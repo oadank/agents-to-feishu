@@ -359,6 +359,13 @@ async function synthesizeLocal(text: string, cfg: LocalTts): Promise<TtsResult |
 }
 
 // ── Audio8 本地零样本克隆 TTS（2026-09-01）────────────────────────────
+/** Audio8 项目根（voices/ 在它下面；可用环境变量 AUDIO8_DIR 覆盖） */
+export const AUDIO8_DIR = process.env.AUDIO8_DIR ?? 'C:\\D\\opt\\audio8-tts'
+/** 已注册音色目录：voices/<名字>/{meta.json, codes.npy} */
+export const AUDIO8_VOICES_DIR = path.join(AUDIO8_DIR, 'voices')
+/** Audio8 专用 python（项目 venv），注册音色 register_voice.py 用它跑 */
+export const AUDIO8_PY = path.join(AUDIO8_DIR, '.venv', 'Scripts', 'python.exe')
+
 // CLI 包装（audio8-tts.mjs）输出 mp3 到 stdout；音色须先注册到 C:\D\opt\audio8-tts\voices\。
 // 没有内置音色——每句话都是拿注册参考音频做克隆，注册/试听见 audio8-tts 目录。
 // 包装脚本内部自带常驻服务优先 + 冷启动兜底（见 audio8-tts.mjs），这里只管拉起。

@@ -68,6 +68,15 @@
     const cloneFileRef = useRef(null);
     // 试听文本
     const [ttsText, setTtsText] = useState(DEFAULT_TTS_TEXT);
+    // 引擎参数编辑态：{ local: true } = 该引擎的 URL/CMD 正在改；其余时间输入框只读，防止手滑改坏路径
+    const [editing, setEditing] = useState({});
+    // Audio8 已注册音色（服务端读 voices 目录）
+    const [a8Voices, setA8Voices] = useState([]);
+    const [a8Registering, setA8Registering] = useState(false);
+    const [a8Msg, setA8Msg] = useState(null);
+    const a8FileRef = useRef(null);
+    const [a8Name, setA8Name] = useState("");
+    const [a8Text, setA8Text] = useState("");
     // 语音设计自定义
     const [vdCustomText, setVdCustomText] = useState("年轻的女性声音，普通话标准，语速适中");
     const [vdReadText, setVdReadText] = useState(DEFAULT_TTS_TEXT);
@@ -117,6 +126,8 @@
         if (!dead) setVdSamples(vd.data.samples || []);
         const as = await api("/api/speech/asr-sample");
         if (!dead && as.ok) setAsrSample({ url: "data:" + (as.data.mediaType || "audio/wav") + ";base64," + as.data.data, base64: as.data.data });
+        const a8 = await api("/api/speech/audio8/voices");
+        if (!dead && a8.ok) setA8Voices(a8.data.voices || []);
       })();
       return function () { dead = true; if (previewRef.current) { try { previewRef.current.pause(); } catch {} } };
     }, []);
@@ -138,6 +149,34 @@
       (async function () { await api("/api/speech", "PUT", next); })();
       setPreviewErr(null);
     }
+    /* 上传一段参考音频 → ASR 转写 → 服务端注册成 Audio8 音色 */
+    async function registerAudio8Voice() {
+      const f = a8FileRef.current && a8FileRef.current.files ? a8FileRef.current.files[0] : null;
+      if (!f) { setA8Msg({ ok: false, text: "请选择音频文件" }); return; }
+      const data = await new Promise(function (res, rej) {
+        const rd = new FileReader();
+        rd.onload = () => res(String(rd.result).split(",")[1] || "");
+        rd.onerror = rej;
+        rd.readAsDataURL(f);
+      });
+      setA8Registering(true); setA8Msg(null);
+      const r = await api("/api/speech/audio8/register", "POST", {
+        name: a8Name.trim() || f.name.replace(/\.(mp3|wav|m4a|ogg)$/i, ""),
+        audioBase64: data, mediaType: f.type || "audio/wav", text: a8Text.trim(),
+      });
+      setA8Registering(false);
+      if (r.ok) {
+        const v = await api("/api/speech/audio8/voices");
+        if (v.ok) setA8Voices(v.data.voices || []);
+        const s = await api("/api/speech"); if (s.httpOk) setConfig(s.data.speech);
+        setA8Msg({ ok: true, text: "已注册音色「" + (r.data.voice || "") + "」" + (r.data.text ? "（逐字：" + r.data.text.slice(0, 30) + "…）" : "") });
+        setA8Name(""); setA8Text("");
+        if (a8FileRef.current) a8FileRef.current.value = "";
+      } else {
+        setA8Msg({ ok: false, text: r.data.error || "注册失败" });
+      }
+    }
+
     /* 保存 tts 顶层字段（如 defaultEngine）——不是某个引擎的子配置，patch() 管不到 */
     function patchTts(obj) {
       const next = Object.assign({}, config, { tts: Object.assign({}, config.tts, obj) });
@@ -319,22 +358,52 @@
         );
       }
       if (engine === "local") {
+        // [2026-09-01] 老大要求：URL/CMD 不是随手能改的输入框。默认锁定，点「修改」才解锁，
+        // 按钮变「保存」，再点一下保存并重新锁定——一个按钮来回切。
+        const ed = !!editing.local;
+        const ro = ed ? {} : { disabled: true, style: { opacity: 0.65 } };
         return h("div", null,
           h("div", { class: "row" },
-            Field({ label: "URL 服务" }, h("input", { type: "text", value: (e.url || ""), onInput: (ev) => patch("local", { url: ev.target.value }), placeholder: "http://本地 MeloTTS（优先）" })),
-            Field({ label: "CMD 命令" }, h("input", { type: "text", value: (e.cmd || ""), onInput: (ev) => patch("local", { cmd: ev.target.value }), placeholder: "node C:\\D\\opt\\scripts\\local-tts.mjs" })),
+            Field({ label: "URL 服务" }, h("input", Object.assign({ type: "text", value: (e.url || ""), onInput: (ev) => patch("local", { url: ev.target.value }), placeholder: "http://本地 MeloTTS（优先）" }, ro))),
+            Field({ label: "CMD 命令" }, h("input", Object.assign({ type: "text", value: (e.cmd || ""), onInput: (ev) => patch("local", { cmd: ev.target.value }), placeholder: "node C:\\D\\opt\\scripts\\local-tts.mjs" }, ro))),
           ),
-          h("div", { class: "row" }, PlayBtn("local", () => synthPreview(DEFAULT_TTS_TEXT, "local", undefined, "local"), { text: "试听本地 TTS" })),
+          h("div", { class: "row" },
+            h("button", { type: "button", class: "btn" + (ed ? " primary" : ""), style: { flex: "none" }, onClick: () => setEditing(Object.assign({}, editing, { local: !ed })) }, ed ? "保存" : "修改"),
+            h("span", { class: "dim" }, ed ? "改完点保存（输入时已实时写入）" : "已锁定，点修改才能改"),
+            PlayBtn("local", () => synthPreview(DEFAULT_TTS_TEXT, "local", undefined, "local"), { text: "试听本地 TTS" }),
+          ),
         );
       }
       if (engine === "audio8") {
+        const ed = !!editing.audio8;
+        const ro = ed ? {} : { disabled: true, style: { opacity: 0.65 } };
+        const voiceNames = a8Voices.map(function (v) { return v.name; });
+        const curVoice = (e.voice || "") || voiceNames[0] || "";
         return h("div", null,
-          h("div", { class: "dim", style: { marginBottom: 6 } }, "零样本克隆引擎（纯 CPU，慢：短句 ~10s、长句 30s+）。没有内置音色，每句都按注册的参考音频克隆；音色用 register_voice.py 注册到 C:\\D\\opt\\audio8-tts\\voices\\。"),
+          h("div", { class: "dim", style: { marginBottom: 6 } }, "零样本克隆：每句都按参考音频克隆，纯 CPU（短句 ~8s、长句 30s+）。没有内置音色，音色在下面的下拉里选，或上传一段语音现场克隆。"),
           h("div", { class: "row" },
-            Field({ label: "CMD 命令" }, h("input", { type: "text", value: (e.cmd || ""), onInput: (ev) => patch("audio8", { cmd: ev.target.value }), placeholder: "node C:\\D\\opt\\audio8-tts\\audio8-tts.mjs" })),
-            Field({ label: "默认音色" }, h("input", { type: "text", value: (e.voice || ""), onInput: (ev) => patch("audio8", { voice: ev.target.value }), placeholder: "如 xiaotuantuan（留空=最新注册的）" })),
+            Field({ label: "CMD 命令" }, h("input", Object.assign({ type: "text", value: (e.cmd || ""), onInput: (ev) => patch("audio8", { cmd: ev.target.value }), placeholder: "node C:\\D\\opt\\audio8-tts\\audio8-tts.mjs" }, ro))),
+            Field({ label: "克隆音色" }, h("select", Object.assign({ value: curVoice, onInput: (ev) => patch("audio8", { voice: ev.target.value }) }, ro),
+              voiceNames.length
+                ? a8Voices.map(function (v) { return h("option", { value: v.name }, v.name + (v.text ? "（" + v.text.slice(0, 14) + "…）" : "")); })
+                : [h("option", { value: "" }, "(还没有注册过的音色)")])),
           ),
-          h("div", { class: "row" }, PlayBtn("audio8", () => synthPreview(DEFAULT_TTS_TEXT, "audio8", undefined, "audio8"), { text: "试听 Audio8 克隆" })),
+          h("div", { class: "row" },
+            h("button", { type: "button", class: "btn" + (ed ? " primary" : ""), style: { flex: "none" }, onClick: () => setEditing(Object.assign({}, editing, { audio8: !ed })) }, ed ? "保存" : "修改"),
+            h("span", { class: "dim" }, ed ? "改完点保存（输入时已实时写入）" : "已锁定，点修改才能改"),
+            PlayBtn("audio8", () => synthPreview(DEFAULT_TTS_TEXT, "audio8", undefined, "audio8"), { text: "试听 Audio8 克隆" }),
+          ),
+          h("div", { class: "divider" }),
+          h("div", { class: "dim", style: { marginBottom: 6 } }, "上传一段语音克隆新音色（15~30 秒最像，mp3/wav ≤20MB）："),
+          h("div", { class: "row" }, h("input", { type: "file", accept: ".mp3,.wav,.m4a,audio/*", ref: a8FileRef })),
+          h("div", { class: "row" },
+            Field({ label: "音色名（字母数字）" }, h("input", { type: "text", value: a8Name, onInput: (ev) => setA8Name(ev.target.value), placeholder: "如 adan（留空按文件名自动起名）" })),
+            Field({ label: "逐字文本（可空=自动转写）" }, h("input", { type: "text", value: a8Text, onInput: (ev) => setA8Text(ev.target.value), placeholder: "录音里说的原话，越准越像" })),
+          ),
+          h("div", { class: "row" },
+            h("button", { class: "btn primary", onClick: registerAudio8Voice, disabled: a8Registering }, a8Registering ? "注册中…（约 10-40 秒）" : "注册音色"),
+            a8Msg ? h("span", { class: a8Msg.ok ? "ok dim" : "err" }, a8Msg.text) : null,
+          ),
         );
       }
       if (engine === "ali") {
@@ -361,17 +430,15 @@
       h("div", { class: "cols" },
         h("div", { class: "card" },
           h("div", { class: "card-header", onClick: () => setActiveEngine(null) },
-            h("select", { value: shownEngine, onClick: (ev) => ev.stopPropagation(), onInput: (ev) => setActiveEngine(ev.target.value), style: { minWidth: 180 }, title: "切换要编辑哪个引擎的参数（不是设默认引擎）" },
-              ENGINE_ORDER.map(function (en) { return h("option", { value: en }, ENGINE_LABEL[en]); })),
-            // [2026-09-01] 默认引擎此前是一行纯文本，改不动（只能靠改 JSON），换成下拉：选中即 PUT 保存
-            h("span", { class: "chev" }, "默认引擎："),
+            // [2026-09-01] 一个下拉搞定：选中哪个引擎 = 它就是默认引擎（立刻 PUT 保存）+ 打开它的配置面板
             h("select", {
-              value: tts.defaultEngine && ENGINE_ORDER.includes(tts.defaultEngine) ? tts.defaultEngine : "edge",
+              value: shownEngine,
               onClick: (ev) => ev.stopPropagation(),
-              onInput: (ev) => patchTts({ defaultEngine: ev.target.value }),
-              style: { minWidth: 160 },
-              title: "所有 bot 语音回复用的引擎，选中即刻保存",
+              onInput: (ev) => { const v = ev.target.value; setActiveEngine(v); patchTts({ defaultEngine: v }); },
+              style: { minWidth: 180 },
+              title: "选中即设为默认引擎，所有 bot 的语音回复都用它；同时展开这个引擎的配置",
             }, ENGINE_ORDER.map(function (en) { return h("option", { value: en }, ENGINE_LABEL[en]); })),
+            h("span", { class: "chev" }, "选中即默认引擎"),
           ),
           h("div", { class: "map" }, EngineContent(shownEngine)),
         ),

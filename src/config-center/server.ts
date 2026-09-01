@@ -22,6 +22,7 @@
 
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { URL, fileURLToPath } from 'node:url';
 import { execFile, execFileSync } from 'node:child_process';
@@ -32,7 +33,9 @@ import {
 import { writeAgentArtifacts, readCredentialKey, readOldEnvKey } from './render.js';
 import { buildAgentRuntimeState, type AgentRuntimeState } from './runtime.js';
 import { lookImage } from '../vision/look.js';
-import { synthesize, type TtsConfig } from '../voice/tts.js';
+import {
+  synthesize, AUDIO8_DIR, AUDIO8_VOICES_DIR, AUDIO8_PY, type TtsConfig,
+} from '../voice/tts.js';
 import { transcribe, resolveFfmpeg, type AsrConfig } from '../voice/asr.js';
 import { createComfyMcpHttpHandler } from '../comfy/mcp-server.js';
 import { createVisionMcpHttpHandler } from '../vision/mcp.js';
@@ -1068,6 +1071,74 @@ export function createConfigServer(opts: ConfigServerOptions) {
         };
         save(store);
         return json(res, 200, { ok: true, sample: newSample });
+      }
+      // GET /api/speech/audio8/voices：Audio8 已注册音色（读 voices\<name>\meta.json）
+      if (p === '/api/speech/audio8/voices' && method === 'GET') {
+        try {
+          const items = fs.readdirSync(AUDIO8_VOICES_DIR, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => {
+              let text = '';
+              let createdAt = '';
+              try {
+                const meta = JSON.parse(fs.readFileSync(path.join(AUDIO8_VOICES_DIR, d.name, 'meta.json'), 'utf8')) as Record<string, unknown>;
+                text = String(meta.reference_text ?? meta.text ?? '').slice(0, 200);
+                createdAt = String(meta.created_at ?? '');
+              } catch { /* 没 meta.json 也照样列出来 */ }
+              return { name: d.name, text, createdAt };
+            })
+            .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+          return json(res, 200, { ok: true, voices: items });
+        } catch (e) {
+          return json(res, 200, { ok: false, voices: [], error: `读取 Audio8 音色目录失败: ${(e as Error)?.message ?? String(e)}` });
+        }
+      }
+      // POST /api/speech/audio8/register：上传参考音频 → 转 16k/单声道/≤30s → ASR 逐字文本 → register_voice.py 注册
+      if (p === '/api/speech/audio8/register' && method === 'POST') {
+        const store = load();
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const audioBase64 = String(body.audioBase64 || '');
+        if (!audioBase64) return json(res, 200, { ok: false, error: '缺少音频' });
+        const bytes = Buffer.from(audioBase64, 'base64');
+        if (bytes.byteLength === 0) return json(res, 200, { ok: false, error: '音频为空' });
+        if (bytes.byteLength > 20 * 1024 * 1024) return json(res, 200, { ok: false, error: '音频需在 20MB 以内' });
+        // register_voice.py 的 --name 只接受字母数字-_：中文名会被拒，这里兜底转换
+        const rawName = String(body.name || '').trim();
+        const name = rawName.replace(/[^A-Za-z0-9_-]/g, '') || `voice${Date.now().toString(36)}`;
+        const tmpDir = path.join(os.tmpdir(), 'agents-to-feishu-audio8');
+        fs.mkdirSync(tmpDir, { recursive: true });
+        const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        const src = path.join(tmpDir, `${id}.src`);
+        fs.writeFileSync(src, bytes);
+        const wav = path.join(tmpDir, `${id}.wav`);
+        try {
+          execFileSync(resolveFfmpeg(), ['-y', '-i', src, '-ar', '16000', '-ac', '1', '-t', '30', wav],
+            { windowsHide: true, stdio: 'ignore', timeout: 60_000 });
+        } catch (e) {
+          return json(res, 200, { ok: false, error: `音频转码失败（需 ffmpeg，且参考音 ≤30s）: ${(e as Error)?.message ?? String(e)}` });
+        }
+        let text = String(body.text || '').trim();
+        if (!text) {
+          try {
+            const r = await transcribe(fs.readFileSync(wav), store.speech?.asr as AsrConfig);
+            text = String(r.text ?? '').trim();
+          } catch (e) {
+            return json(res, 200, { ok: false, error: `ASR 转写失败: ${(e as Error)?.message ?? String(e)}（也可以手填逐字文本）` });
+          }
+        }
+        if (!text) return json(res, 200, { ok: false, error: '拿不到这段音频的逐字文本，请在「逐字文本」里手填' });
+        try {
+          execFileSync(AUDIO8_PY, [
+            path.join(AUDIO8_DIR, 'register_voice.py'),
+            '--audio', wav, '--text', text, '--name', name, '--overwrite',
+          ], {
+            cwd: AUDIO8_DIR, windowsHide: true, encoding: 'utf8', timeout: 180_000,
+            env: { ...process.env, PYTHONUTF8: '1' },
+          });
+        } catch (e) {
+          return json(res, 200, { ok: false, error: `注册音色失败: ${(e as Error)?.message ?? String(e)}` });
+        }
+        return json(res, 200, { ok: true, voice: name, text });
       }
       // GET /api/speech/voice-design-samples：VoiceDesign 官方示例（预生成音频，简单术右侧播放）
       if (p === '/api/speech/voice-design-samples' && method === 'GET') {
