@@ -12,7 +12,13 @@
     voiceclone: "小米·语音克隆", local: "本地 MeloTTS", audio8: "Audio8 本地克隆", ali: "阿里 qwen3-tts",
   };
   const XIAOMI_VOICES = ["冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean"];
-  const AI_AGE_LABELS = { infant: "婴儿感", child: "幼儿感", teen: "少年感", young: "青年感", middle: "中年感", old: "老年感" };
+  // [2026-09-01] 对齐 dsh-web：年龄感只留 3 档（少年/中年/老年）；旧值归并（婴儿/幼儿→少年，青年→中年）
+  const AI_AGE_LABELS = { teen: "少年感", middle: "中年感", old: "老年感" };
+  function normAiAge(v) {
+    if (v === "teen" || v === "middle" || v === "old") return v;
+    if (v === "young") return "middle";
+    return "teen";
+  }
   const DEFAULT_TTS_TEXT = "你好，这是一段语音试听。";
   const BUNDLED_CLONE_ID = "8da38fcc-b041-4f5b-86b9-901956016f89"; // 自带默认样本（小团团）：禁删
 
@@ -165,8 +171,10 @@
     const cloneSamples = (tts.voiceclone && tts.voiceclone.samples) || [];
 
     /* 保存当前引擎 patch（写回 config + PUT） */
-    function patch(engine, obj) {
+    function patch(engine, obj, makeDefault) {
       const next = Object.assign({}, config, { tts: Object.assign({}, config.tts, { [engine]: Object.assign({}, (config.tts && config.tts[engine]) || {}, obj) }) });
+      // [2026-09-01] 对齐 dsh-web「选中即生效」：某引擎卡内选中/改动可联动默认引擎（makeDefault=引擎 key）
+      if (makeDefault) next.tts.defaultEngine = makeDefault;
       setConfig(next);
       (async function () { await api("/api/speech", "PUT", next); })();
       setPreviewErr(null);
@@ -371,21 +379,21 @@
         return h("div", null,
           h("div", { class: "dim", style: { marginBottom: 8 } }, "语音设计：给一段音色描述，AI 生成对应人声（需小米 key" + (hasMimoKey ? " ✓" : " ✗ 未配置") + "）"),
           h("div", { class: "row" },
-            Field({ label: "模式" }, h("select", { value: vd.mode || "ai", onInput: (ev) => patch("voicedesign", { mode: ev.target.value }) },
+            // [2026-09-01] 选中即生效：模式/性别/年龄改动联动默认引擎=voicedesign（bot 语音回复走 defaultEngine）
+            Field({ label: "模式" }, h("select", { value: vd.mode || "ai", onInput: (ev) => patch("voicedesign", { mode: ev.target.value }, "voicedesign") },
               [["ai", "AI 自动发挥"], ["fixed", "固定音色描述"]].map(function (p) { return h("option", { value: p[0] }, p[1]); }))),
           ),
           (vd.mode === "ai") ?
             h("div", null,
               h("div", { class: "row" },
-                Field({ label: "固定性别" }, h("select", { value: vd.aiGender || "", onInput: (ev) => patch("voicedesign", { aiGender: ev.target.value }) },
+                Field({ label: "固定性别" }, h("select", { value: vd.aiGender || "", onInput: (ev) => patch("voicedesign", { aiGender: ev.target.value }, "voicedesign") },
                   [["", "不限"], ["male", "男"], ["female", "女"]].map(function (p) { return h("option", { value: p[0] }, p[1]); }))),
-                Field({ label: "年龄段" }, h("select", { value: vd.aiAge || "young", onInput: (ev) => patch("voicedesign", { aiAge: ev.target.value }) },
+                Field({ label: "年龄段" }, h("select", { value: normAiAge(vd.aiAge), onInput: (ev) => patch("voicedesign", { aiAge: ev.target.value }, "voicedesign") },
                   Object.keys(AI_AGE_LABELS).map(function (k) { return h("option", { value: k }, AI_AGE_LABELS[k]); }))),
               ),
               h("div", { class: "row" },
-                h("label", { style: { fontSize: 12, color: "var(--dim)" } }, h("input", { type: "checkbox", checked: !!vd.lockGender, onChange: (ev) => patch("voicedesign", { lockGender: ev.target.checked }) }), " 锁性别"),
-                h("label", { style: { fontSize: 12, color: "var(--dim)" } }, h("input", { type: "checkbox", checked: !!vd.lockAge, onChange: (ev) => patch("voicedesign", { lockAge: ev.target.checked }) }), " 锁年龄"),
-                h("label", { style: { fontSize: 12, color: "var(--dim)" } }, h("input", { type: "checkbox", checked: !!vd.lockTimbre, onChange: (ev) => patch("voicedesign", { lockTimbre: ev.target.checked }) }), " 锁音色"),
+                h("label", { style: { fontSize: 12, color: "var(--dim)" } }, h("input", { type: "checkbox", checked: !!vd.lockGender, onChange: (ev) => patch("voicedesign", { lockGender: ev.target.checked }, "voicedesign") }), " 锁性别"),
+                h("label", { style: { fontSize: 12, color: "var(--dim)" } }, h("input", { type: "checkbox", checked: !!vd.lockAge, onChange: (ev) => patch("voicedesign", { lockAge: ev.target.checked }, "voicedesign") }), " 锁年龄"),
               ),
               h("div", { class: "row" }, PlayBtn("vd-ai", () => synthPreview(vdReadText || DEFAULT_TTS_TEXT, "voicedesign", undefined, "vd-ai"), { text: "试听 AI 音色" })),
             )
@@ -395,7 +403,7 @@
               h("div", { class: "row" }, Field({ label: "试听文本" }, h("input", { type: "text", value: vdReadText, onInput: (ev) => setVdReadText(ev.target.value) }))),
               h("div", { class: "row" },
                 PlayBtn("vd-custom", () => synthPreview(vdReadText || DEFAULT_TTS_TEXT, "voicedesign", vdCustomText, "vd-custom"), { text: "试听自定义" }),
-                h("button", { class: "btn", style: { flex: "none" }, onClick: () => patch("voicedesign", { context: vdCustomText }) }, "保存此描述"),
+                h("button", { class: "btn", style: { flex: "none" }, onClick: () => patch("voicedesign", { context: vdCustomText }, "voicedesign") }, "保存此描述"),
               ),
             ),
           h("div", { class: "divider" }),
