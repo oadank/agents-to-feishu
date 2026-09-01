@@ -154,9 +154,17 @@ export class CodexProvider implements RuntimeProvider {
     });
 
     // 发送 turn（codex 的 input 是消息序列）
-    const fullPrompt = params.systemPrompt
-      ? `${params.systemPrompt}\n\n${params.text}`
-      : params.text;
+    // [2026-09-01] 跨消息记忆修复：codex provider 此前每条消息 thread/start 新线程
+    // 且无视 params.history，导致 bot 完全没有跨消息记忆（对齐 claude.ts 的
+    // historyText 注入格式）。fresh 会话时把 bridge 存的会话上下文拼进 prompt。
+    const historyText = params.freshSession && params.history && params.history.length > 0
+      ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
+      : '';
+    const promptParts: string[] = [];
+    if (params.systemPrompt) promptParts.push(params.systemPrompt);
+    if (historyText) promptParts.push(historyText);
+    promptParts.push(params.text);
+    const fullPrompt = promptParts.join('\n\n---\n\n');
     try {
       await client.call('turn/start', {
         threadId,
