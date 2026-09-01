@@ -84,7 +84,8 @@
     const [asrSample, setAsrSample] = useState(null); // {url, base64}
     const [asrResult, setAsrResult] = useState(null);
     const [previewErr, setPreviewErr] = useState(null);
-    const [previewDur, setPreviewDur] = useState(null);
+    const [previewDur, setPreviewDur] = useState(null); // 试听生成用时的实时秒表（按下即开始跳，出音频即停）
+    const durTickerRef = useRef(null);
 
     /* 隐形播放：new Audio 直接播（页面不摆可见播放条），再点=停止，与 input-tools 一致 */
     function playAudio(dataUrl, tag) {
@@ -97,9 +98,25 @@
       if (previewErr) setPreviewErr(null);
       const audio = new Audio(dataUrl);
       previewRef.current = audio; previewTagRef.current = tag; setPreviewing(tag);
-      audio.onended = () => { if (previewTagRef.current === tag) { previewRef.current = null; previewTagRef.current = null; setPreviewing(null); } };
-      audio.onerror = () => { if (previewTagRef.current === tag) { previewRef.current = null; previewTagRef.current = null; setPreviewing(null); setPreviewErr("音频加载失败"); } };
-      audio.play().catch((e) => { if (previewTagRef.current === tag) { previewRef.current = null; previewTagRef.current = null; setPreviewing(null); setPreviewErr("播放失败: " + String(e && e.message || e)); } });
+      audio.onended = () => { if (previewTagRef.current === tag) { previewRef.current = null; previewTagRef.current = null; setPreviewing(null); stopDurTicker(); } };
+      audio.onerror = () => { if (previewTagRef.current === tag) { previewRef.current = null; previewTagRef.current = null; setPreviewing(null); setPreviewErr("音频加载失败"); stopDurTicker(); } };
+      audio.play().catch((e) => { if (previewTagRef.current === tag) { previewRef.current = null; previewTagRef.current = null; setPreviewing(null); setPreviewErr("播放失败: " + String(e && e.message || e)); stopDurTicker(); } });
+      // 出音频就算生成完了，秒表停
+      stopDurTicker();
+    }
+
+    /* 实时秒表：按下试听即开始跳，音频回来/播放完即停 */
+    function startDurTicker() {
+      stopDurTicker();
+      const t0 = Date.now();
+      setPreviewDur("0.0s");
+      durTickerRef.current = setInterval(function () {
+        const ms = Date.now() - t0;
+        setPreviewDur(ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms");
+      }, 100);
+    }
+    function stopDurTicker() {
+      if (durTickerRef.current) { clearInterval(durTickerRef.current); durTickerRef.current = null; }
     }
 
     /* 统一试听按钮：正在播放显示 ⏹（再点停止），否则 ▶ */
@@ -193,9 +210,13 @@
 
     /* TTS 试听 */
     async function synthPreview(text, engine, voiceDesc, tag) {
-      setPreviewDur(null);
+      setPreviewErr(null);
+      // 按下即开始跳秒（等待合成期间也能看到在动）；endpoint 出音频即停
+      startDurTicker();
       const r = await api("/api/speech/tts-test", "POST", { text: text || ttsText, engine: engine, voiceDesc: voiceDesc });
+      // 后端 elapsedMs 为准（含网络），比前端秒表准；出错也停秒表显示用时
       const ms = r.data && typeof r.data.elapsedMs === "number" ? r.data.elapsedMs : null;
+      stopDurTicker();
       if (ms !== null) setPreviewDur(ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms");
       if (r.ok && r.data.dataUrl) playAudio(r.data.dataUrl, tag);
       else setPreviewErr(r.data.error || "合成失败");
