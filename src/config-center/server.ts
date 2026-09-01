@@ -907,6 +907,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
             voicedesign: { ...d.tts.voicedesign, ...(s.tts?.voicedesign ?? {}) },
             voiceclone: { ...d.tts.voiceclone, ...(s.tts?.voiceclone ?? {}) },
             local: { ...d.tts.local, ...(s.tts?.local ?? {}) },
+            audio8: { ...d.tts.audio8, ...(s.tts?.audio8 ?? {}) },
             ali: { ...d.tts.ali, ...(s.tts?.ali ?? {}) },
           },
           asr: { ...d.asr, ...(s.asr ?? {}) },
@@ -927,6 +928,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
           voicedesign: { ...(base.tts?.voicedesign ?? DEFAULT_SPEECH.tts.voicedesign), ...(newTts.voicedesign ?? {}) },
           voiceclone: { ...(base.tts?.voiceclone ?? DEFAULT_SPEECH.tts.voiceclone), ...(newTts.voiceclone ?? {}) },
           local: { ...(base.tts?.local ?? DEFAULT_SPEECH.tts.local), ...(newTts.local ?? {}) },
+          audio8: { ...(base.tts?.audio8 ?? DEFAULT_SPEECH.tts.audio8), ...(newTts.audio8 ?? {}) },
           ali: { ...(base.tts?.ali ?? DEFAULT_SPEECH.tts.ali), ...(newTts.ali ?? {}) },
         };
         store.speech = {

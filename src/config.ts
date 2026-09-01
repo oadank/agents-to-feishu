@@ -197,6 +197,7 @@ export function loadSpeechConfig(env: NodeJS.ProcessEnv = process.env): SpeechCo
         voicedesign: { ...DEFAULT_SPEECH.tts.voicedesign, ...(s.tts?.voicedesign ?? {}) },
         voiceclone: { ...DEFAULT_SPEECH.tts.voiceclone, ...(s.tts?.voiceclone ?? {}) },
         local: { ...DEFAULT_SPEECH.tts.local, ...(s.tts?.local ?? {}) },
+        audio8: { ...DEFAULT_SPEECH.tts.audio8, ...(s.tts?.audio8 ?? {}) },
         ali: { ...DEFAULT_SPEECH.tts.ali, ...(s.tts?.ali ?? {}) },
       },
       asr: { ...DEFAULT_SPEECH.asr, ...(s.asr ?? {}) },

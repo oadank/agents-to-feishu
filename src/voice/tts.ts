@@ -44,15 +44,18 @@ export interface VoiceCloneTts {
 }
 export interface LocalTts { enabled: boolean; url: string; cmd: string }
 export interface AliTts { enabled: boolean; apiKey: string; baseUrl: string; voice: string }
+/** Audio8 本地零样本克隆 TTS（C:\D\opt\audio8-tts，音色须先注册到 voices/） */
+export interface Audio8Tts { enabled: boolean; cmd: string; voice: string }
 
 export interface TtsConfig {
-  /** edge | xiaomi | voicedesign | voiceclone | local | ali | auto */
+  /** edge | xiaomi | voicedesign | voiceclone | local | audio8 | ali | auto */
   defaultEngine: string
   edge: { enabled: boolean; voice: string }
   xiaomi: XiaomiTts
   voicedesign: VoiceDesignTts
   voiceclone: VoiceCloneTts
   local: LocalTts
+  audio8: Audio8Tts
   ali: AliTts
 }
 
@@ -355,6 +358,29 @@ async function synthesizeLocal(text: string, cfg: LocalTts): Promise<TtsResult |
   }
 }
 
+// ── Audio8 本地零样本克隆 TTS（2026-09-01）────────────────────────────
+// CLI 包装（audio8-tts.mjs）输出 mp3 到 stdout；音色须先注册到 C:\D\opt\audio8-tts\voices\。
+// 没有内置音色——每句话都是拿注册参考音频做克隆，注册/试听见 audio8-tts 目录。
+// 包装脚本内部自带常驻服务优先 + 冷启动兜底（见 audio8-tts.mjs），这里只管拉起。
+async function synthesizeAudio8(text: string, cfg: Audio8Tts): Promise<TtsResult | null> {
+  const command = (cfg?.cmd ?? '').trim()
+  if (command === '') return null
+  try {
+    const parts = splitCommandLine(command)
+    const bin = parts[0]
+    if (bin === undefined) return null
+    const args = [...parts.slice(1)]
+    const voice = (cfg?.voice ?? '').trim()
+    if (voice !== '') args.push('--voice', voice)
+    args.push(text)
+    // audio8 纯 CPU 推理慢（短句 ~10s、长句 30s+），超时给足 180s
+    const audio = execFileSync(bin, args, { windowsHide: true, encoding: 'buffer', timeout: 180_000 })
+    return { ok: true, format: 'mp3', data: Buffer.from(audio as Buffer), engine: 'audio8' }
+  } catch (e) {
+    return { ok: false, error: `Audio8 克隆 TTS 失败: ${(e as Error)?.message ?? String(e)}` }
+  }
+}
+
 /** 阿里 qwen3-tts-flash（dashscope） */
 async function synthesizeAli(text: string, cfg: AliTts): Promise<TtsResult | null> {
   const apiKey = cfg?.apiKey ?? ''
@@ -424,6 +450,9 @@ export async function synthesize(
     case 'local':
       if (cfg?.local?.enabled === false) return { ok: false, error: '本地 TTS 未启用' }
       return (await synthesizeLocal(text, cfg?.local)) ?? { ok: false, error: '本地 TTS 配置不完整' }
+    case 'audio8':
+      if (cfg?.audio8?.enabled === false) return { ok: false, error: 'Audio8 本地克隆未启用' }
+      return (await synthesizeAudio8(text, cfg?.audio8)) ?? { ok: false, error: 'Audio8 本地克隆配置不完整（缺 cmd）' }
     case 'ali':
       if (cfg?.ali?.enabled === false) return { ok: false, error: '阿里 TTS 未启用' }
       return (await synthesizeAli(text, cfg?.ali)) ?? { ok: false, error: '阿里 TTS 配置不完整（缺 apiKey）' }

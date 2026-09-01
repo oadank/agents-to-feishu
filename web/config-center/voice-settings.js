@@ -6,10 +6,10 @@
   /* 是否在配置中心 iframe 内（内嵌时不显示"返回"箭头，防止 location.href 把 iframe 自己跳成主页造成嵌套） */
   const inIframe = (function () { try { return window.self !== window.top; } catch { return true; } })();
 
-  const ENGINE_ORDER = ["edge", "xiaomi", "voicedesign", "voiceclone", "local", "ali"];
+  const ENGINE_ORDER = ["edge", "xiaomi", "voicedesign", "voiceclone", "local", "audio8", "ali"];
   const ENGINE_LABEL = {
     edge: "微软 Edge（免费）", xiaomi: "小米 MiMo 预置", voicedesign: "小米·语音设计",
-    voiceclone: "小米·语音克隆", local: "本地 MeloTTS", ali: "阿里 qwen3-tts",
+    voiceclone: "小米·语音克隆", local: "本地 MeloTTS", audio8: "Audio8 本地克隆", ali: "阿里 qwen3-tts",
   };
   const XIAOMI_VOICES = ["冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean"];
   const AI_AGE_LABELS = { infant: "婴儿感", child: "幼儿感", teen: "少年感", young: "青年感", middle: "中年感", old: "老年感" };
@@ -318,6 +318,16 @@
             Field({ label: "CMD 命令" }, h("input", { type: "text", value: (e.cmd || ""), onInput: (ev) => patch("local", { cmd: ev.target.value }), placeholder: "node C:\\D\\opt\\scripts\\local-tts.mjs" })),
           ),
           h("div", { class: "row" }, PlayBtn("local", () => synthPreview(DEFAULT_TTS_TEXT, "local", undefined, "local"), { text: "试听本地 TTS" })),
+        );
+      }
+      if (engine === "audio8") {
+        return h("div", null,
+          h("div", { class: "dim", style: { marginBottom: 6 } }, "零样本克隆引擎（纯 CPU，慢：短句 ~10s、长句 30s+）。没有内置音色，每句都按注册的参考音频克隆；音色用 register_voice.py 注册到 C:\\D\\opt\\audio8-tts\\voices\\。"),
+          h("div", { class: "row" },
+            Field({ label: "CMD 命令" }, h("input", { type: "text", value: (e.cmd || ""), onInput: (ev) => patch("audio8", { cmd: ev.target.value }), placeholder: "node C:\\D\\opt\\audio8-tts\\audio8-tts.mjs" })),
+            Field({ label: "默认音色" }, h("input", { type: "text", value: (e.voice || ""), onInput: (ev) => patch("audio8", { voice: ev.target.value }), placeholder: "如 xiaotuantuan（留空=最新注册的）" })),
+          ),
+          h("div", { class: "row" }, PlayBtn("audio8", () => synthPreview(DEFAULT_TTS_TEXT, "audio8", undefined, "audio8"), { text: "试听 Audio8 克隆" })),
         );
       }
       if (engine === "ali") {
