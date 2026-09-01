@@ -40,6 +40,8 @@ export interface VoiceCloneTts {
   samplePath: string
   context: string
   defaultId: string
+  // [2026-09-01] 下拉选中的样本（对齐 dsh-web）：合成时优先用它，缺省回落 samples[0]
+  sampleId?: string
   samples: CloneSample[]
 }
 export interface LocalTts { enabled: boolean; url: string; cmd: string }
@@ -72,6 +74,54 @@ export interface TtsResult {
 /** 语音设计年龄标签（对齐 dsh-input-tools AI_AGE_LABELS） */
 const AI_AGE_LABELS: Record<string, string> = {
   infant: '婴儿感', child: '幼儿感', teen: '少年感', young: '青年感', middle: '中年感', old: '老年感',
+}
+
+// [2026-09-01] AI 模式随机音色描述池（对齐 dsh-input-tools 分档逻辑）：锁哪个年龄段就只抽哪个档的质感词，
+// 避免"年轻/低沉"这类强年龄暗示词压过身份锚点（dsh-web 实测婴儿感翻车的教训）
+const VD_TIMBRE_BY_AGE: Record<string, string[]> = {
+  infant: ['奶声奶气的稚嫩嗓音', '软糯含糊的小奶音', '尖细清亮的宝宝嗓音', '奶乎乎的婴语嗓音，吐字稚嫩'],
+  child: ['清脆明亮的孩童嗓音', '软糯稚嫩的童声', '活泼稚气的小学生嗓音'],
+  teen: ['清亮干净的少年嗓音', '元气满满的青春嗓音', '略带青涩变声期的嗓音'],
+  young: [
+    '嗓音清亮通透', '声音温润醇厚', '带一点沙哑的颗粒感', '气声很重的轻柔嗓音', '明亮有弹性的年轻嗓音',
+    '低沉磁性的嗓音', '清冷干净的嗓音', '软糯带鼻音的嗓音', '洪亮有力的嗓音', '细腻柔和的嗓音',
+  ],
+  middle: ['沉稳成熟的嗓音', '温和厚实的嗓音', '干练利落的嗓音', '低沉有阅历的嗓音'],
+  old: ['沙哑沧桑的老年嗓音', '苍老低沉的嗓音，略带气喘', '沧桑沙哑、字音微颤的老年嗓音', '苍老厚重的嗓音，慢条斯理'],
+}
+const VD_RANDOM_MOOD = [
+  '语气活泼轻快，像中了奖一样开心', '语气委屈巴巴，带着撒娇的鼻音', '语气温柔安抚，像哄小孩睡觉',
+  '语气急促紧张，像赶时间要迟到', '语气慵懒随意，像刚睡醒的样子', '语气兴奋雀跃，忍不住笑出声',
+  '语气认真严肃，一字一顿', '语气俏皮搞怪，爱开玩笑', '语气感伤低落，声音发闷',
+  '语气得意洋洋，带点小骄傲', '语气神秘压低，像在讲秘密', '语气豪爽大方，像东北唠嗑',
+]
+const VD_RANDOM_PACE = [
+  '语速适中，吐字清晰', '语速偏快，节奏跳跃', '语速缓慢，字正腔圆', '语速忽快忽慢，情绪起伏大', '语速均匀平稳',
+]
+// [2026-09-01 修] 对齐 dsh-input-tools：老大实测性别/年龄锁定不生效——中性池里"撒娇的鼻音"(女倾向)/
+// "东北唠嗑"(男倾向)会把声音身份带偏。情绪/节奏池也按锁定年龄分档，三池（质感/情绪/节奏）全部吻合身份。
+const VD_MOOD_BY_AGE: Record<string, string[]> = {
+  infant: ['咿咿呀呀像在学说话', '咯咯咯笑个不停', '带着奶音的哭腔，委屈巴巴', '奶声奶气地耍小脾气', '含糊不清地自言自语'],
+  child: ['兴高采烈像捡到宝', '撅着嘴小声嘟囔', '叽叽喳喳抢着说话', '奶声奶气地撒娇卖萌'],
+  teen: ['元气满满像打了鸡血', '意气风发带着少年意气', '害羞时声音发紧', '兴奋时语调飞扬'],
+  young: ['语气活泼轻快，像中了奖一样开心', '语气温柔安抚，像哄小孩睡觉', '语气急促紧张，像赶时间要迟到', '语气慵懒随意，像刚睡醒的样子', '语气兴奋雀跃，忍不住笑出声', '语气认真严肃，一字一顿', '语气俏皮搞怪，爱开玩笑'],
+  middle: ['语气沉稳从容，不急不躁', '语气温和笃定，像宽厚的长辈', '语气干练果断，条理分明', '语气疲惫但克制', '语气爽朗，带着生活历练的通透'],
+  old: ['语气慢悠悠像晒太阳', '絮絮叨叨地念家常', '带着笑意讲起往事，娓娓道来', '语气感慨，声音微微发颤', '有气无力但慈祥温和'],
+}
+const VD_PACE_BY_AGE: Record<string, string[]> = {
+  infant: ['忽快忽慢，想到哪说到哪', '一个字一个字往外蹦', '断断续续还带着喘'],
+  child: ['蹦蹦跳跳忽快忽慢', '一激动就越说越快'],
+  teen: ['语速轻快带弹跳感', '忽快忽慢，情绪全写在节奏里'],
+  young: ['语速适中，从容自然', '语速偏快，透着利索', '语速偏慢，懒洋洋的'],
+  middle: ['语速平稳，字字清楚', '不紧不慢，稳中有度'],
+  old: ['语速很慢，字与字之间带着停顿', '慢条斯理，偶尔喘口气', '念叨起来会不由自主变快'],
+}
+function randomVoiceDesignDesc(ageKey: string): string {
+  const pick = (arr: string[]): string => arr[Math.floor(Math.random() * arr.length)]
+  const timbre = VD_TIMBRE_BY_AGE[ageKey] ?? VD_TIMBRE_BY_AGE.young
+  const mood = VD_MOOD_BY_AGE[ageKey] ?? VD_MOOD_BY_AGE.young
+  const pace = VD_PACE_BY_AGE[ageKey] ?? VD_PACE_BY_AGE.young
+  return `${pick(timbre)}，${pick(mood)}，${pick(pace)}`
 }
 
 // ── 工具 ──
@@ -235,19 +285,18 @@ async function synthesizeVoiceDesign(
     const identity = ageGenderIdentity(aKey, gKey)
     const lockG = cfg?.lockGender === true
     const lockA = cfg?.lockAge === true
-    const lockT = cfg?.lockTimbre === true
+    // [2026-09-01] 对齐 dsh-input-tools：质感锁定选项已删（三池按年龄分档，身份天然稳定）
     const gLabel = gKey === 'male' ? '男' : gKey === 'female' ? '女' : ''
     const aLabel = AI_AGE_LABELS[aKey] ?? ''
     const anchorText = [
       lockG ? '性别固定为' + (gLabel !== '' ? gLabel : '每次一致') : '',
       lockA ? '年龄感固定为' + (aLabel !== '' ? aLabel : '每次一致') : '',
-      lockT ? '音色质感保持稳定' : '',
     ].filter(Boolean).join('、')
     if (identity !== '' || anchorText !== '') {
-      desc = (identity !== '' ? '一位' + identity + '的声音（身份硬性要求：' + (anchorText !== '' ? anchorText : '按上述身份') + '；若与其他描述冲突，一律以本身份为准）。' : '')
-        + (desc !== '' ? '语气/情绪要求：' + desc + '（性别/年龄以身份为准；音色质感与语气情绪按本描述执行——如"沙哑、苍老、低沉、气声"等质感词应保留并强化）。' : '语气情绪要饱满生动：像真人一样带喜怒哀乐、笑音、撒娇或急切等起伏，禁止平淡。')
+      desc = (identity !== '' ? '一位' + identity + '的声音（身份硬性要求：' + (anchorText !== '' ? anchorText : '按上述身份') + '；若与其他描述冲突，一律以本身份为准，严禁合成其他性别或年龄段的声音）。' : '')
+        + (desc !== '' ? '语气/情绪要求：' + desc + '（性别与年龄以身份为准，严禁改变；只按本描述演绎情绪语气）。' : '音色与语气要求：' + randomVoiceDesignDesc(aKey) + '（性别与年龄以身份为准，严禁改变）。')
     } else if (desc === '') {
-      desc = '语气情绪要饱满生动：像真人一样带喜怒哀乐、笑音、撒娇或急切等起伏，禁止平淡。'
+      desc = randomVoiceDesignDesc('') + '；语气情绪要饱满生动，像真人一样带喜怒哀乐，禁止平淡。'
     }
   } else {
     // 固定模式：voiceDesc 作为情绪/风格叠加在底嗓 context 后；overrideVoice=true 整体替换
@@ -283,13 +332,18 @@ async function synthesizeVoiceDesign(
 }
 
 /** 小米音色克隆（mimo-v2.5-tts-voiceclone）：audio.voice=样本 dataURL（≤10MB）。
- *  样本取 samples[0]（或 samplePath 兼容）；风格指令优先级 voiceDesc > 样本 context > 全局 context。 */
-async function synthesizeVoiceClone(
+ *  样本取 sampleId 选中项（对齐 dsh-web 下拉）→ samples[0] → samplePath 兼容；风格指令优先级 voiceDesc > 样本 context > 全局 context。
+ *  [2026-09-01] export：config-center server 的 add 接口用它做"保存后预生成 -preview.mp3"。 */
+export async function synthesizeVoiceClone(
   text: string, cfg: VoiceCloneTts, apiKey: string, baseUrl: string, voiceDesc: string,
 ): Promise<TtsResult | null> {
   if (apiKey === '') return null
-  const samplePath = (Array.isArray(cfg?.samples) && cfg.samples.length > 0 && typeof cfg.samples[0]?.path === 'string' && cfg.samples[0].path !== '')
-    ? cfg.samples[0].path
+  const sampleList = Array.isArray(cfg?.samples) ? cfg.samples : []
+  const chosen = (typeof cfg?.sampleId === 'string' && cfg.sampleId !== '')
+    ? (sampleList.find((s) => s?.id === cfg.sampleId) ?? sampleList[0])
+    : sampleList[0]
+  const samplePath = (chosen && typeof chosen.path === 'string' && chosen.path !== '')
+    ? chosen.path
     : (cfg?.samplePath ?? '')
   if (samplePath === '') return null
   let sample: string
@@ -303,8 +357,7 @@ async function synthesizeVoiceClone(
     return { ok: false, error: '克隆样本读取失败' }
   }
   const messages: Array<{ role: string; content: string }> = []
-  const firstSample = Array.isArray(cfg?.samples) ? cfg.samples[0] : undefined
-  const sampleContext = typeof firstSample?.context === 'string' ? firstSample.context.trim() : ''
+  const sampleContext = typeof chosen?.context === 'string' ? chosen.context.trim() : ''
   const styleInstruct = (voiceDesc ?? '').trim() !== ''
     ? voiceDesc.trim()
     : (sampleContext !== '' ? sampleContext : (cfg?.context?.trim() ?? ''))

@@ -34,7 +34,7 @@ import { writeAgentArtifacts, readCredentialKey, readOldEnvKey } from './render.
 import { buildAgentRuntimeState, type AgentRuntimeState } from './runtime.js';
 import { lookImage } from '../vision/look.js';
 import {
-  synthesize, AUDIO8_DIR, AUDIO8_VOICES_DIR, AUDIO8_PY, type TtsConfig,
+  synthesize, synthesizeVoiceClone, AUDIO8_DIR, AUDIO8_VOICES_DIR, AUDIO8_PY, type TtsConfig,
 } from '../voice/tts.js';
 import { transcribe, resolveFfmpeg, type AsrConfig } from '../voice/asr.js';
 import { createComfyMcpHttpHandler } from '../comfy/mcp-server.js';
@@ -1058,10 +1058,14 @@ export function createConfigServer(opts: ConfigServerOptions) {
         const samplePath = path.join(sampleDir, `${id}.${finalSuffix}`);
         fs.writeFileSync(samplePath, bytes);
         const name = String(body.name || '').trim() || `克隆音色-${Date.now()}`;
+        // [2026-09-01] 对齐 dsh-web（老大：试听文本内置固定、沟通指令用小团团默认、名字用文件名——
+        // 前端已删名称/沟通指令输入框，这里兜底内置默认）
+        const DEFAULT_CLONE_CONTEXT = '一个魔性的少女萝莉音，说话自带沙雕搞怪和无厘头气质，像在撒娇又像在耍宝，情绪起伏很大：前一句还奶声奶气地撒娇卖萌，后一句就突然拔高音量夸张卖惨耍赖，再下一秒又贱兮兮地坏笑。尾音拖长上扬，带着气音和魔性笑声，喜欢用「臭猪」「你凶我」「哼」「嘿嘿嘿」这类咋咋呼呼的用词，语速忽快忽慢、节奏跳跃，吐字软糯清晰，傻白甜又可爱，让人听了忍不住想笑';
+        const DEFAULT_CLONE_PREVIEW_TEXT = '哈喽哈喽！听到这段声音就说明克隆成功啦，怎么样，像不像我本人呀？嘿嘿，以后就用这个声音陪你聊天咯！';
         const newSample = {
           id, name, path: samplePath,
-          context: String(body.context || ''),
-          previewText: String(body.previewText || ''),
+          context: String(body.context || '').trim() || DEFAULT_CLONE_CONTEXT,
+          previewText: String(body.previewText || '').trim() || DEFAULT_CLONE_PREVIEW_TEXT,
         };
         const base = store.speech ?? DEFAULT_SPEECH;
         const samples = Array.isArray(base.tts?.voiceclone?.samples) ? [...base.tts.voiceclone.samples] : [];
@@ -1071,6 +1075,23 @@ export function createConfigServer(opts: ConfigServerOptions) {
           tts: { ...base.tts, voiceclone: { ...(base.tts?.voiceclone ?? DEFAULT_SPEECH.tts.voiceclone), samples } },
         };
         save(store);
+        // [2026-09-01] 保存成功后预生成试听录音 <id>-preview.mp3（fire-and-forget）：
+        // 「克隆声」按钮直接读静态文件，省 token，没配小米 key 的用户也能试听
+        void (async () => {
+          try {
+            const xiaomiCfg = (store.speech ?? DEFAULT_SPEECH).tts?.xiaomi;
+            const key = String(xiaomiCfg?.apiKey ?? '');
+            if (key === '') return;
+            const r = await synthesizeVoiceClone(
+              newSample.previewText,
+              { ...(base.tts?.voiceclone ?? DEFAULT_SPEECH.tts.voiceclone), samples: [newSample], sampleId: id },
+              key, String(xiaomiCfg?.baseUrl || 'https://api.xiaomimimo.com/v1'), '',
+            );
+            if (r?.ok && r.data && r.data.length > 1000) {
+              fs.writeFileSync(path.join(sampleDir, `${id}-preview.mp3`), r.data);
+            }
+          } catch { /* 预生成失败不影响添加（试听时实时合成兜底） */ }
+        })();
         return json(res, 200, { ok: true, sample: newSample });
       }
       // GET /api/speech/audio8/voices：Audio8 已注册音色（读 voices\<name>\meta.json）

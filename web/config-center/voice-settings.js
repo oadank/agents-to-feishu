@@ -60,9 +60,7 @@
     const [previewing, setPreviewing] = useState(null);
     const previewRef = useRef(null);
     const previewTagRef = useRef(null);
-    // 克隆
-    const [cloneName, setCloneName] = useState("");
-    const [cloneContext, setCloneContext] = useState("");
+    // 克隆（[2026-09-01] 对齐 dsh-web：名称=文件名、指令/试听文本后端内置，删除名称与沟通指令输入框）
     const [cloneAddMsg, setCloneAddMsg] = useState(null);
     const [addingClone, setAddingClone] = useState(false);
     const cloneFileRef = useRef(null);
@@ -314,13 +312,13 @@
       });
       setAddingClone(true);
       const r = await api("/api/speech/voice-clone/add", "POST", {
-        name: cloneName.trim() || f.name.replace(/\.(mp3|wav)$/i, ""),
-        audioBase64: data, mediaType: f.type || "audio/wav", context: cloneContext,
+        // [2026-09-01] 对齐 dsh-web：名字=文件名（去扩展名）；context/previewText 不传，后端内置默认
+        name: f.name.replace(/\.(mp3|wav)$/i, ""),
+        audioBase64: data, mediaType: f.type || "audio/wav",
       });
       setAddingClone(false);
       if (r.ok) {
         setCloneAddMsg({ ok: true, text: "已添加克隆音色「" + (r.data.sample && r.data.sample.name || "") + "」" });
-        setCloneName(""); setCloneContext("");
         if (cloneFileRef.current) cloneFileRef.current.value = "";
         const s = await api("/api/speech"); if (s.httpOk) setConfig(s.data.speech);
       } else {
@@ -421,27 +419,31 @@
       }
       if (engine === "voiceclone") {
         const isBundled = (id) => id === BUNDLED_CLONE_ID;
+        // [2026-09-01] 对齐 dsh-web 一行式：克隆列表 [下拉] 🔊原音 🔊克隆声 ✕（选中即合成用该样本，sampleId 后端优先读取）
+        const cloneCfg = (config.tts && config.tts.voiceclone) || {};
+        const curId = cloneSamples.some(function (s) { return s.id === (cloneCfg.sampleId || ""); }) ? cloneCfg.sampleId : (cloneSamples[0] && cloneSamples[0].id) || "";
+        const cur = cloneSamples.find(function (s) { return s.id === curId; });
         return h("div", null,
           h("div", { class: "dim", style: { marginBottom: 8 } }, "语音克隆：用一段参考语音克隆出人声（需小米 key" + (hasMimoKey ? " ✓" : " ✗ 未配置") + "；原音=参考语音，克隆声=预生成，不浪费额度）"),
-          h("div", { class: "dim", style: { marginBottom: 6 } }, "已保存的克隆音色（默认语音引擎选「小米克隆」后用第一个音色）："),
-          (cloneSamples.length === 0) ? h("div", { class: "dim" }, "暂无克隆音色，可在下方上传参考语音") :
-            cloneSamples.map(function (sm) {
-              return h("div", { class: "clone-row", key: sm.id },
-                h("span", { class: "name" }, sm.name || sm.id.slice(0, 8)),
-                h("button", { type: "button", class: "btn", title: "播放原始参考语音", onClick: () => playCloneSource(sm.id) }, previewing === "clone-src:" + sm.id ? "⏹" : "🔊 原音"),
-                h("button", { type: "button", class: "btn", title: "播放预生成克隆声", onClick: () => playClonePreview(sm.id) }, previewing === "clone-baked:" + sm.id ? "⏹" : "🔊 克隆声"),
-                isBundled(sm.id) ? null : h("button", { type: "button", class: "btn", title: "删除此克隆音色", style: { flex: "none", color: "#ff5f57" }, onClick: () => removeCloneSample(sm.id, sm.name || "样本") }, "✕"),
-              );
-            }),
-          h("div", { class: "divider" }),
-          h("div", { class: "dim", style: { marginBottom: 6 } }, "添加克隆音色（上传语音作参考，mp3/wav ≤10MB，建议 15-60 秒）："),
-          h("div", { class: "row" }, h("input", { type: "file", accept: ".mp3,.wav,audio/mpeg,audio/wav", ref: cloneFileRef })),
-          h("div", { class: "row" },
-            Field({ label: "名称" }, h("input", { type: "text", value: cloneName, onInput: (ev) => setCloneName(ev.target.value), placeholder: "如：我的声音（留空用文件名）" })),
-            Field({ label: "沟通指令（可选）" }, h("input", { type: "text", value: cloneContext, onInput: (ev) => setCloneContext(ev.target.value), placeholder: "如：用委屈撒娇的语气" })),
+          h("div", { class: "row", style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+            h("span", { class: "dim", style: { flexShrink: 0 } }, "克隆列表："),
+            h("select", { value: curId, style: { flex: "0 0 200px", width: 200 },
+              onChange: (ev) => patch("voiceclone", { sampleId: ev.target.value }) },
+              cloneSamples.map(function (sm) {
+                return h("option", { key: sm.id, value: sm.id }, sm.name || sm.id.slice(0, 8));
+              }),
+            ),
+            h("button", { type: "button", class: "btn", title: "播放选中样本的原始参考语音", onClick: () => playCloneSource(curId) }, previewing === "clone-src:" + curId ? "⏹" : "🔊 原音"),
+            h("button", { type: "button", class: "btn", title: "播放预生成克隆声", onClick: () => playClonePreview(curId) }, previewing === "clone-baked:" + curId ? "⏹" : "🔊 克隆声"),
+            (cur && !isBundled(cur.id)) ? h("button", { type: "button", class: "btn", title: "删除选中的克隆音色", style: { flex: "none", color: "#ff5f57" }, onClick: () => removeCloneSample(cur.id, cur.name || "样本") }, "✕") : null,
           ),
+          (cloneSamples.length === 0) ? h("div", { class: "dim" }, "暂无克隆音色，可在下方上传参考语音") : null,
+          h("div", { class: "divider" }),
+          h("div", { class: "dim", style: { marginBottom: 6 } }, "添加克隆音色：名字用上传文件的文件名，沟通指令与试听文本内置默认（mp3/wav ≤10MB，建议 15-60 秒）"),
           h("div", { class: "row" },
-            h("button", { class: "btn primary", onClick: addCloneSample, disabled: addingClone }, addingClone ? "添加中…" : "添加克隆音色"),
+            h("input", { type: "file", accept: ".mp3,.wav,audio/mpeg,audio/wav", ref: cloneFileRef, style: { display: "none" },
+              onChange: () => { if (cloneFileRef.current && cloneFileRef.current.files && cloneFileRef.current.files[0]) addCloneSample(); } }),
+            h("button", { type: "button", class: "btn primary", onClick: () => { if (cloneFileRef.current) cloneFileRef.current.click(); }, disabled: addingClone }, addingClone ? "上传中…" : "📤 上传克隆音色"),
             cloneAddMsg ? h("span", { class: cloneAddMsg.ok ? "ok dim" : "err" }, cloneAddMsg.text) : null,
           ),
         );
