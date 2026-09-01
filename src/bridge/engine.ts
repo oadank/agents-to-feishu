@@ -524,6 +524,7 @@ export class MessageEngine {
 
     const layers: TurnLayers = { text: '', thinking: '', toolLines: [] };
     let voiceText = ''; // agent 专门写的【语音】口语块；空=本回复无语音
+    const pendingVoiceIds: string[] = []; // [2026-09-01] send_voice 工具产物（voiceId=sha256），本轮结束后投递到飞书
     let hadError = false;
     let seq = 0;
 
@@ -645,6 +646,15 @@ export class MessageEngine {
             }
             break;
           case 'tool': {
+            // [2026-09-01] send_voice 结果捕获（放最前，不受工具卡显示开关影响）：
+            // 工具结果文本形如「语音已发送（voiceId: sha256:<64hex>，时长 N 秒）」
+            if (ev.status === 'done' && typeof ev.output === 'string' && ev.output.length > 0) {
+              const vm = ev.output.match(/voiceId:\s*(sha256:[0-9a-f]{64})/);
+              if (vm) {
+                pendingVoiceIds.push(vm[1]);
+                console.log(`[engine] send_voice 捕获 voiceId=${vm[1].slice(0, 26)}… 待投递`);
+              }
+            }
             if (!this.opts.showToolCallCards) break;
             if (!ev.status || ev.status === 'running') {
               // 工具在跑：入历史（每条一行，对齐旧 1874 行格式）
@@ -765,6 +775,15 @@ export class MessageEngine {
         }
         if (spoken) await this.sendVoiceReply(chatId, spoken);
       }
+      // [2026-09-01] send_voice 工具产物投递：模型已合成的语音（如 audio8 克隆）直接上传飞书，
+      // 不再用桥接 TTS 重合成。失败只记日志不阻塞（工具卡里模型已报成功，这里补真实投递）。
+      for (const vid of pendingVoiceIds) {
+        try {
+          await this.sendVoiceObjectById(chatId, vid);
+        } catch (e) {
+          console.warn(`[engine] send_voice 投递失败 voiceId=${vid.slice(0, 26)}…: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       try {
@@ -827,6 +846,44 @@ export class MessageEngine {
       }
     } catch (e) {
       console.warn(`[engine] 语音回复失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
+   * [2026-09-01] send_voice 工具产物投递：voiceId(sha256:<64hex>) → 内容寻址对象
+   * （DSH_HOME/attachments/v1/objects/<前2位>/<hash>）→ opus 转码 → 上传 → 飞书语音消息。
+   * 与 sendVoiceReply 的区别：不重新 TTS，直接投递 agent 侧已合成的音频（audio8 克隆等本地引擎）。
+   */
+  async sendVoiceObjectById(chatId: string, voiceId: string): Promise<void> {
+    const hash = voiceId.replace(/^sha256:/, '');
+    if (!/^[0-9a-f]{64}$/.test(hash)) {
+      console.warn(`[engine] send_voice 投递跳过: voiceId 格式不对 "${voiceId.slice(0, 26)}…"`);
+      return;
+    }
+    const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
+    const objFile = path.join(home, 'attachments', 'v1', 'objects', hash.slice(0, 2), hash);
+    let data: Buffer;
+    try {
+      data = fs.readFileSync(objFile);
+    } catch {
+      console.warn(`[engine] send_voice 投递跳过: 语音对象不存在 ${objFile}`);
+      return;
+    }
+    const opus = await toOpus(data);
+    if (!opus) {
+      console.warn('[engine] send_voice 语音对象→OPUS 转码失败，跳过投递');
+      return;
+    }
+    const tmpDir = path.join(os.tmpdir(), 'agents-to-feishu-tts');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = path.join(tmpDir, `sendvoice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.opus`);
+    fs.writeFileSync(tmpFile, opus);
+    try {
+      const fileKey = await this.opts.feishu.uploadFile(tmpFile, 'opus');
+      await this.opts.feishu.sendAudio(chatId, fileKey);
+      console.log(`[engine] send_voice 语音已投递 chat=${chatId} voiceId=${hash.slice(0, 16)}… opus=${opus.length}B`);
+    } finally {
+      try { fs.unlinkSync(tmpFile); } catch { /* 忽略 */ }
     }
   }
 

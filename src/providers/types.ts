@@ -9,7 +9,7 @@
 export type StreamEvent =
   | { type: 'text'; text: string } // 已提交的正文增量
   | { type: 'thinking'; text: string } // 思考层增量（可选）
-  | { type: 'tool'; tool: string; input?: string; status?: 'running' | 'done' | 'error' } // 工具调用
+  | { type: 'tool'; tool: string; input?: string; status?: 'running' | 'done' | 'error'; output?: string } // 工具调用；output=工具结果文本（dsh ACP rawOutput，send_voice 投递靠它拿 voiceId）
   | { type: 'permission'; request: PermissionRequest } // 权限申请（卡片弹窗）
   | { type: 'question'; question: QuestionRequest } // AskUserQuestion 选择题/填空题（卡片弹窗）
   | { type: 'usage'; usage: UsageInfo; sessionId?: string } // token 统计（缓存命中率/上下文）；sessionId = ACP 真实会话 id（状态条显示用）

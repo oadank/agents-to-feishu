@@ -579,6 +579,9 @@ export class DshProvider implements RuntimeProvider {
             tool: String(u.title || 'tool'),
             status: status === 'failed' ? 'error' : status === 'completed' ? 'done' : 'running',
             input: typeof u.rawInput === 'string' ? u.rawInput.slice(0, 200) : JSON.stringify(u.rawInput ?? '').slice(0, 200),
+            // [2026-09-01] 透传工具结果文本（harness ACP 已带 rawOutput ≤2000 字符）；
+            // send_voice 的 voiceId 就在里面，桥接靠它读语音对象投递到飞书
+            output: typeof u.rawOutput === 'string' ? u.rawOutput.slice(0, 500) : undefined,
           });
           poke();
         }
