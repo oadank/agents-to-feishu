@@ -21,6 +21,8 @@ export class CodexProvider implements RuntimeProvider {
   readonly name = 'codex';
 
   private client: CodexAppServerClient | null = null;
+  /** [2026-09-02] 会话线程映射：sessionKey → codex threadId，实现跨消息真连续（thread/resume）。 */
+  private threadIds = new Map<string, string>();
 
   private async ensureClient(): Promise<CodexAppServerClient> {
     if (!this.client) {
@@ -39,8 +41,12 @@ export class CodexProvider implements RuntimeProvider {
     }
   }
 
-  async resetSession(_key?: string): Promise<void> {
-    rtLog(`[codex] resetSession called`);
+  async resetSession(sessionKey?: string): Promise<void> {
+    // [2026-09-02] /new 时 bridge 会调这里（带 key）并标 freshSession：双保险丢弃旧线程映射，
+    // 下一条消息 thread/start 开全新对话。清空 key 对应映射即可，其他会话不受影响。
+    if (sessionKey) this.threadIds.delete(sessionKey);
+    else this.threadIds.clear();
+    rtLog(`[codex] resetSession: thread mapping cleared (key=${sessionKey ? 'yes' : 'all'})`);
   }
 
   async interrupt(): Promise<void> {
@@ -65,22 +71,48 @@ export class CodexProvider implements RuntimeProvider {
     let settleResolve: () => void = () => {};
     const settledP = new Promise<void>((r) => { settleResolve = r; });
 
-    // 创建 thread（codex 协议用 thread/start）
-    let threadId: string;
-    try {
-      const thread = await client.call<{ thread?: { id?: string } }>('thread/start', {
-        experimentalRawEvents: true,
-        persistExtendedHistory: true,
-        cwd: process.env.CTI_DEFAULT_WORKDIR || process.cwd(),
-      });
-      threadId = String((thread as any)?.thread?.id || '');
-      if (!threadId) { throw new Error('thread/start: missing thread id'); }
-    } catch (e) {
-      yield { type: 'error', message: `Codex thread/start 失败: ${e instanceof Error ? e.message : String(e)}` };
-      yield { type: 'done' };
-      return;
+    // [2026-09-02] 线程连续性：同一飞书会话复用同一 codex thread（thread/resume，
+    // 原生全量上下文=真记忆）；/new（freshSession）丢弃旧线程开新对话；
+    // resume 失败回退 thread/start + history 注入（保底，与 claude.ts 同款）。
+    const sessionKey = params.sessionKey || '';
+    if (params.freshSession) this.threadIds.delete(sessionKey);
+    const prevThreadId = this.threadIds.get(sessionKey);
+    let threadId = '';
+    let resumed = false;
+    if (prevThreadId) {
+      try {
+        const r = await client.call<{ thread?: { id?: string } }>('thread/resume', {
+          experimentalRawEvents: true,
+          persistExtendedHistory: true,
+          cwd: process.env.CTI_DEFAULT_WORKDIR || process.cwd(),
+          threadId: prevThreadId,
+        });
+        threadId = String((r as any)?.thread?.id || '') || prevThreadId;
+        resumed = true;
+      } catch (e) {
+        rtLog(`[codex] thread/resume failed, fallback to start: ${e instanceof Error ? e.message.slice(0, 120) : String(e).slice(0, 120)}`);
+        threadId = '';
+      }
     }
-    rtLog(`[codex] thread created: ${threadId.slice(0, 8)}`);
+    if (!threadId) {
+      try {
+        const thread = await client.call<{ thread?: { id?: string } }>('thread/start', {
+          experimentalRawEvents: true,
+          persistExtendedHistory: true,
+          cwd: process.env.CTI_DEFAULT_WORKDIR || process.cwd(),
+        });
+        threadId = String((thread as any)?.thread?.id || '');
+        if (!threadId) { throw new Error('thread/start: missing thread id'); }
+      } catch (e) {
+        yield { type: 'error', message: `Codex thread/start 失败: ${e instanceof Error ? e.message : String(e)}` };
+        yield { type: 'done' };
+        return;
+      }
+    }
+    // 简单防膨胀：映射超过 64 个会话时整体清空（丢失的只是续聊能力，可自愈重建）
+    if (this.threadIds.size > 64) this.threadIds.clear();
+    this.threadIds.set(sessionKey, threadId);
+    rtLog(`[codex] thread ${resumed ? 'resumed' : 'created'}: ${threadId.slice(0, 8)} (session=${sessionKey.slice(0, 12)})`);
 
     // 订阅 → push 事件
     unsubscribe = client.subscribe((message) => {
