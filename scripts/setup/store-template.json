@@ -1,0 +1,564 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "volc-ark",
+      "displayName": "ArkOpenAI",
+      "plugin": "llm-pi-ai",
+      "api": "openai-completions",
+      "baseURL": "https://ark.cn-beijing.volces.com/api/plan/v3",
+      "apiKeyEnv": "ARK_API_KEY",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "displayName": "DeepSeek-V4-Flash",
+          "contextWindow": 1000000,
+          "label": "ArkV4F"
+        },
+        {
+          "id": "glm-5-3-flash",
+          "label": "glm5.3",
+          "contextWindow": 1000000
+        }
+      ]
+    },
+    {
+      "id": "ArkV4F",
+      "displayName": "ArkResp",
+      "plugin": "llm-pi-ai",
+      "baseURL": "https://ark.cn-beijing.volces.com/api/plan/v3",
+      "apiKeyEnv": "ARK_API_KEY",
+      "api": "openai-responses",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "displayName": "DeepSeek-V4-Flash",
+          "contextWindow": 1000000,
+          "label": "DSV4F"
+        },
+        {
+          "id": "glm-5-3-flash",
+          "label": "glm5.3",
+          "contextWindow": 1000000
+        }
+      ]
+    },
+    {
+      "id": "p1787900370627",
+      "displayName": "ArkAnth",
+      "plugin": "llm-pi-ai",
+      "baseURL": "https://ark.cn-beijing.volces.com/api/plan",
+      "apiKeyEnv": "ARK_API_KEY",
+      "api": "anthropic-messages",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "label": "DSV4F",
+          "contextWindow": 1000000
+        },
+        {
+          "id": "glm-5-3-flash",
+          "label": "glm5.3",
+          "contextWindow": 1000000
+        }
+      ]
+    },
+    {
+      "id": "gw",
+      "displayName": "GWOpenAI",
+      "plugin": "llm-pi-ai",
+      "api": "openai-completions",
+      "baseURL": "https://gateway.henry-gao.com/v1",
+      "apiKeyEnv": "GW_API_KEY",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "displayName": "DeepSeek-V4-Flash (gw)",
+          "contextWindow": 524288,
+          "label": "DSV4F"
+        }
+      ]
+    },
+    {
+      "id": "deepseek-official",
+      "displayName": "GWResp",
+      "plugin": "llm-pi-ai",
+      "apiKeyEnv": "GW_API_KEY",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "displayName": "DeepSeek Chat",
+          "contextWindow": 1000000,
+          "label": "DSV4F"
+        }
+      ],
+      "api": "openai-responses",
+      "baseURL": "https://gateway.henry-gao.com/v1"
+    },
+    {
+      "id": "p1787900927926",
+      "displayName": "GWAnth",
+      "plugin": "llm-pi-ai",
+      "baseURL": "https://gateway.henry-gao.com",
+      "apiKeyEnv": "GW_API_KEY",
+      "api": "anthropic-messages",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "label": "DSV4F",
+          "contextWindow": 524288
+        }
+      ]
+    },
+    {
+      "id": "litellm",
+      "displayName": "LiteLLM 网关 (4000)",
+      "plugin": "llm-deepseek",
+      "baseURL": "http://localhost:4000",
+      "apiKeyEnv": "LITELLM_API_KEY",
+      "models": [
+        {
+          "id": "codex-model"
+        },
+        {
+          "id": "claude-model"
+        },
+        {
+          "id": "agnes-text"
+        },
+        {
+          "id": "DV4F"
+        },
+        {
+          "id": "QV4F"
+        },
+        {
+          "id": "ArkV4F"
+        },
+        {
+          "id": "GwV4F"
+        },
+        {
+          "id": "freetheai"
+        }
+      ],
+      "api": "openai-completions"
+    }
+  ],
+  "mcps": [
+    {
+      "id": "agentmemory",
+      "displayName": "AgentMemory 记忆",
+      "transport": "streamable-http",
+      "serverName": "agentmemory",
+      "url": "http://localhost:3114/mcp",
+      "failOnStartupError": false,
+      "external": true
+    },
+    {
+      "id": "wiki",
+      "displayName": "Wiki 团队文档",
+      "transport": "streamable-http",
+      "serverName": "wiki",
+      "url": "http://localhost:3456/mcp",
+      "failOnStartupError": false,
+      "external": true
+    },
+    {
+      "id": "win-desktop-helper",
+      "displayName": "Windows 桌面助手",
+      "transport": "stdio",
+      "serverName": "win-desktop-helper",
+      "command": "C:/Program Files/nodejs/node.exe",
+      "args": [
+        "C:/D/opt/win-desktop-helper/mcp-bridge.js"
+      ],
+      "failOnStartupError": false,
+      "toolCallTimeoutMs": 120000,
+      "external": true
+    },
+    {
+      "id": "visionqa",
+      "displayName": "VisionQA 质量看图（供 ComfyUI 后端）",
+      "transport": "streamable-http",
+      "serverName": "visionqa",
+      "url": "http://127.0.0.1:8092/mcp",
+      "failOnStartupError": false,
+      "toolCallTimeoutMs": 300000,
+      "external": true
+    },
+    {
+      "id": "comfy",
+      "displayName": "ComfyUI 生图（list_templates/generate_image/reverse_prompt）",
+      "transport": "streamable-http",
+      "serverName": "comfy-mcp",
+      "url": "http://100.108.133.82:13600/mcp/comfy",
+      "failOnStartupError": false,
+      "toolCallTimeoutMs": 600000,
+      "external": true
+    },
+    {
+      "id": "vision",
+      "displayName": "看图 look_image（describe/reverse/text）",
+      "transport": "streamable-http",
+      "serverName": "vision",
+      "url": "http://100.108.133.82:13600/mcp/vision",
+      "failOnStartupError": false,
+      "toolCallTimeoutMs": 300000
+    }
+  ],
+  "agents": [
+    {
+      "id": "claude",
+      "displayName": "claude",
+      "appId": "",
+      "appSecret": "",
+      "providerId": "p1787900370627",
+      "modelId": "glm-5-3-flash",
+      "mcps": [
+        "agentmemory",
+        "wiki",
+        "win-desktop-helper",
+        "visionqa"
+      ],
+      "port": 13580,
+      "showToolCallCards": true,
+      "showAgentDivider": true,
+      "workdir": "__AGENT_WORKDIR__",
+      "enabled": true,
+      "runtime": "claude",
+      "systemPrompt": "你是团队的【文案/编剧队长】：负责文案/剧本/编剧/内容创作，通过 Multica 调度文案助手/编剧拆解/配音剪辑专家团完成任务。"
+    },
+    {
+      "id": "codex",
+      "displayName": "codex",
+      "appId": "",
+      "appSecret": "",
+      "providerId": "gw",
+      "modelId": "deepseek-v4-flash",
+      "mcps": [
+        "agentmemory",
+        "wiki",
+        "win-desktop-helper",
+        "visionqa"
+      ],
+      "port": 13581,
+      "showToolCallCards": true,
+      "showAgentDivider": true,
+      "workdir": "__AGENT_WORKDIR__",
+      "enabled": true,
+      "runtime": "codex",
+      "systemPrompt": "你是团队的【代码/插件队长】：负责代码类任务（编码、脚本、插件、应用），通过 Multica 调度编码/全栈/后端专家团完成任务。"
+    },
+    {
+      "id": "mimo",
+      "displayName": "mimo",
+      "appId": "",
+      "appSecret": "",
+      "providerId": "gw",
+      "modelId": "deepseek-v4-flash",
+      "mcps": [
+        "agentmemory",
+        "wiki",
+        "win-desktop-helper",
+        "visionqa"
+      ],
+      "port": 13582,
+      "showToolCallCards": true,
+      "showAgentDivider": true,
+      "workdir": "__AGENT_WORKDIR__",
+      "enabled": true,
+      "runtime": "mimo",
+      "systemPrompt": "你是团队的【微信公众号队长】：负责公众号内容（选题→文案→审核→发布），通过 Multica 调度文案助手/安全审查/发布智能体完成任务。"
+    },
+    {
+      "id": "gemini",
+      "displayName": "Gemini",
+      "appId": "",
+      "appSecret": "",
+      "providerId": "litellm",
+      "modelId": "GwV4F",
+      "mcps": [
+        "agentmemory",
+        "wiki",
+        "win-desktop-helper",
+        "visionqa"
+      ],
+      "port": 13583,
+      "showToolCallCards": true,
+      "showAgentDivider": true,
+      "workdir": "__AGENT_WORKDIR__",
+      "enabled": true,
+      "runtime": "gemini",
+      "systemPrompt": "全程使用简体中文简洁回复，禁止输出英文。（你通过飞书与用户交流，用户只看得懂中文）"
+    },
+    {
+      "id": "hermes",
+      "displayName": "hermes",
+      "appId": "",
+      "appSecret": "",
+      "providerId": "volc-ark",
+      "modelId": "deepseek-v4-flash",
+      "mcps": [
+        "agentmemory",
+        "wiki",
+        "win-desktop-helper",
+        "visionqa"
+      ],
+      "port": 13584,
+      "showToolCallCards": true,
+      "showAgentDivider": true,
+      "workdir": "__AGENT_WORKDIR__",
+      "enabled": true,
+      "runtime": "hermes",
+      "systemPrompt": "你是团队的【测试队长】：负责各队产出的测试质检，通过 Multica 调度测试工程师完成任务。"
+    },
+    {
+      "id": "openakita",
+      "displayName": "openakita",
+      "appId": "",
+      "appSecret": "",
+      "providerId": "gw",
+      "modelId": "deepseek-v4-flash",
+      "mcps": [
+        "agentmemory",
+        "wiki",
+        "win-desktop-helper",
+        "visionqa"
+      ],
+      "port": 13585,
+      "showToolCallCards": true,
+      "showAgentDivider": true,
+      "workdir": "__AGENT_WORKDIR__",
+      "enabled": true,
+      "runtime": "openakita",
+      "systemPrompt": "你是团队的【GitHub 推送队长】：负责将团队产物/代码推送到 GitHub 仓库（commit/branch/PR/发布），通过 Multica 调度交付工程师/编码工程师完成任务。"
+    },
+    {
+      "id": "reasonix",
+      "displayName": "reasonix",
+      "appId": "",
+      "appSecret": "",
+      "providerId": "gw",
+      "modelId": "deepseek-v4-flash",
+      "mcps": [
+        "agentmemory",
+        "wiki",
+        "win-desktop-helper",
+        "visionqa"
+      ],
+      "port": 13586,
+      "showToolCallCards": true,
+      "showAgentDivider": true,
+      "workdir": "__AGENT_WORKDIR__",
+      "enabled": true,
+      "runtime": "reasonix",
+      "systemPrompt": "你是团队的【总控/主控】：接需求、判断任务类型、@对应队长派发、验收汇总，维护任务看板。"
+    },
+    {
+      "id": "openclaw",
+      "displayName": "openclaw",
+      "appId": "",
+      "appSecret": "",
+      "providerId": "gw",
+      "modelId": "deepseek-v4-flash",
+      "mcps": [
+        "agentmemory",
+        "wiki",
+        "win-desktop-helper",
+        "visionqa"
+      ],
+      "port": 13587,
+      "showToolCallCards": true,
+      "showAgentDivider": true,
+      "workdir": "__AGENT_WORKDIR__",
+      "enabled": true,
+      "runtime": "openclaw",
+      "systemPrompt": "你是团队的【深度调研队长】：研究方向→深挖→详细报告存 wiki，通过 Multica 调度调研/研究助理完成任务。",
+      "dividerMode": "text"
+    },
+    {
+      "id": "opencode",
+      "displayName": "opencode",
+      "appId": "",
+      "appSecret": "",
+      "providerId": "gw",
+      "modelId": "deepseek-v4-flash",
+      "mcps": [
+        "agentmemory",
+        "wiki",
+        "win-desktop-helper",
+        "visionqa"
+      ],
+      "port": 13588,
+      "showToolCallCards": true,
+      "showAgentDivider": true,
+      "workdir": "__AGENT_WORKDIR__",
+      "enabled": true,
+      "runtime": "opencode",
+      "systemPrompt": "你是团队的【生图队长】：正常对话直接回答；收到生图需求时，通过 Multica 调度生图小队（视觉导演+生图工程师）出图，再把图片发回飞书。同时可协助简单编码/通用问题。"
+    },
+    {
+      "id": "dsh",
+      "displayName": "DSH",
+      "appId": "",
+      "appSecret": "",
+      "providerId": "volc-ark",
+      "modelId": "glm-5-3-flash",
+      "mcps": [
+        "agentmemory",
+        "wiki",
+        "win-desktop-helper"
+      ],
+      "port": 13589,
+      "showToolCallCards": true,
+      "showAgentDivider": true,
+      "workdir": "__AGENT_WORKDIR__",
+      "enabled": true,
+      "runtime": "dsh",
+      "systemPrompt": "你是团队的【总控/主控】：接需求、判断任务类型、@对应队长、验收汇总，维护任务看板。",
+      "thinkingLevel": "default",
+      "dividerMode": "full"
+    }
+  ],
+  "vision": {
+    "enabled": true,
+    "provider": "online",
+    "baseUrl": "https://apihub.agnes-ai.cn/v1",
+    "apiKey": "",
+    "model": "agnes-2.5-flash",
+    "timeoutMs": 240000,
+    "prompts": {}
+  },
+  "speech": {
+    "enabled": true,
+    "tts": {
+      "defaultEngine": "local",
+      "edge": {
+        "enabled": true,
+        "voice": "zh-CN-XiaoyiNeural"
+      },
+      "xiaomi": {
+        "enabled": true,
+        "apiKey": "",
+        "baseUrl": "https://api.xiaomimimo.com/v1",
+        "voice": "冰糖",
+        "singing": false,
+        "context": "用标准播音腔，吐字清晰，节奏分明，抑扬顿挫，专业新闻播报"
+      },
+      "voicedesign": {
+        "enabled": true,
+        "mode": "ai",
+        "context": "一位年迈的老先生，说带北方口音的普通话，语速缓慢而沉稳，嗓音略带沙哑和沧桑感",
+        "aiGender": "female",
+        "aiAge": "teen",
+        "lockGender": true,
+        "lockTimbre": true,
+        "lockAge": true
+      },
+      "voiceclone": {
+        "enabled": true,
+        "samplePath": "",
+        "context": "",
+        "defaultId": "8da38fcc-b041-4f5b-86b9-901956016f89",
+        "samples": [
+          {
+            "id": "8da38fcc-b041-4f5b-86b9-901956016f89",
+            "name": "小团团",
+            "path": "C:/Users/oadan/.dsh/voiceclone-samples/8da38fcc-b041-4f5b-86b9-901956016f89.mp3",
+            "context": ""
+          }
+        ]
+      },
+      "local": {
+        "enabled": true,
+        "url": "",
+        "cmd": "node C:\\D\\opt\\scripts\\local-tts.mjs"
+      },
+      "ali": {
+        "enabled": false,
+        "apiKey": "",
+        "baseUrl": "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+        "voice": "Cherry"
+      }
+    },
+    "asr": {
+      "enabled": true,
+      "mode": "service",
+      "url": "http://127.0.0.1:18790",
+      "cmd": "C:\\D\\opt\\sherpa-onnx\\bin\\sherpa-onnx-offline.exe --tokens=C:\\D\\opt\\sherpa-onnx\\models\\sensevoice-int8\\tokens.txt --sense-voice-model=C:\\D\\opt\\sherpa-onnx\\models\\sensevoice-int8\\model.int8.onnx --num-threads=4",
+      "apiKey": "",
+      "apiBaseUrl": "https://api.xiaomimimo.com/v1"
+    },
+    "speech": {
+      "enabled": true,
+      "tts": {
+        "defaultEngine": "voiceclone",
+        "edge": {
+          "enabled": true,
+          "voice": "zh-CN-XiaoyiNeural"
+        },
+        "xiaomi": {
+          "enabled": true,
+          "apiKey": "",
+          "baseUrl": "https://api.xiaomimimo.com/v1",
+          "voice": "冰糖",
+          "singing": false,
+          "context": "用标准播音腔，吐字清晰，节奏分明，抑扬顿挫，专业新闻播报"
+        },
+        "voicedesign": {
+          "enabled": true,
+          "mode": "ai",
+          "context": "一位年迈的老先生，说带北方口音的普通话，语速缓慢而沉稳，嗓音略带沙哑和沧桑感",
+          "aiGender": "female",
+          "aiAge": "teen",
+          "lockGender": true,
+          "lockTimbre": true,
+          "lockAge": true
+        },
+        "voiceclone": {
+          "enabled": true,
+          "samplePath": "",
+          "context": "",
+          "defaultId": "8da38fcc-b041-4f5b-86b9-901956016f89",
+          "samples": [
+            {
+              "id": "8da38fcc-b041-4f5b-86b9-901956016f89",
+              "name": "小团团",
+              "path": "C:/Users/oadan/.dsh/voiceclone-samples/8da38fcc-b041-4f5b-86b9-901956016f89.mp3",
+              "context": ""
+            }
+          ]
+        },
+        "local": {
+          "enabled": true,
+          "url": "",
+          "cmd": "node C:\\D\\opt\\scripts\\local-tts.mjs"
+        },
+        "ali": {
+          "enabled": false,
+          "apiKey": "",
+          "baseUrl": "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+          "voice": "Cherry"
+        }
+      },
+      "asr": {
+        "enabled": true,
+        "mode": "service",
+        "url": "http://127.0.0.1:18790",
+        "cmd": "C:\\D\\opt\\sherpa-onnx\\bin\\sherpa-onnx-offline.exe --tokens=C:\\D\\opt\\sherpa-onnx\\models\\sensevoice-int8\\tokens.txt --sense-voice-model=C:\\D\\opt\\sherpa-onnx\\models\\sensevoice-int8\\model.int8.onnx --num-threads=4",
+        "apiKey": "",
+        "apiBaseUrl": "https://api.xiaomimimo.com/v1"
+      }
+    }
+  },
+  "injection": {
+    "enabled": true,
+    "global": "# 团队协作规范（必须遵守）\n- 团队总控：Reasonix——负责需求拆解、任务派发、验收汇总\n- 团队群：<配置中心暂未配置团队群 chat_id>\n- 协作模式：总控按任务复杂度裁剪流程（简单 2 人、中等 3-4 人、复杂拆子团队并行）\n- **PM2 重启协作机制（重要）**：需要全量重启所有 bot 时——\n  · 若你本身是 bot 进程（会被 pm2 restart all 中断自己）：先 pm2 restart **除自己以外的所有 bot**，等它们全部 online 后，**私聊其中某个 agent，让它执行 pm2 restart <你自己的pm2名>**（消息能送达 = 你当下已干完活，不怕被中断）\n  · 若你非 bot（如桌面 CLI/手动操作）：环境正常时可直接 pm2 restart all（快速简单）\n  · 你的 pm2 名 = 你的 bot 身份名（如 claude/codex/gemini/hermes/mimo/openakita/openclaw/opencode/reasonix）\n\n# 交接铁律\n1. 任务完成后，**主动 @ 下一位接单人**（open_id 见通讯录）\n2. 回复总控/发起人时，**主动 @ 对方**\n3. 不要只在文本里写 @名字，要真正 @ 到人（用 lark-cli 的 @ 功能）\n\n# 产物要求（重要）\n- 任务产物写入固定目录：C:\\D\\opt\\team-artifacts\\<任务ID>\\\n- 各阶段产物：task.md（任务单）/ design.md（设计）/ code\\（代码）/ test.md（测试）/ delivery.md（交付）\n- 只写你自己负责的那部分产物，不覆盖他人文件\n- 完成后在回复中说明产物路径\n\n# 验证铁律\n- 交付前必须实际验证（运行/检查），不轻信\"应该能跑\"\n- 验证脚本直接执行，不要调 lark-cli 做验证（会卡死）\n\n# 知识循环\n- 任务前：memory_smart_search + wiki_recall 搜经验\n- 执行中：遇问题先搜历史\n- 完成后：memory_lesson_save + wiki_remember 沉淀\n\n\n---\n\n\n## 飞书操作能力（2026-08-10 更新）— bot 发消息用 /api/send（含视频），lark-cli 用于只读操作和 user 身份代发\n**发消息**：bot 身份用 agents-to-im 的 POST /api/send（SDK 直发，最可靠）；user 身份（代发/私聊联系）用 lark-cli。lark-cli 的只读查询：列消息/搜索/联系人/文档。命令默认输出 JSON 格式。命令超时请加 --timeout 参数。如需帮助可运行 lark-cli <command> --help。\n\n**铁律（2026-08-07 更新）：发消息一律用 /api/send（bot 身份），不要写 Python/Node 脚本直接调飞书开放 API（绕过认证和管理）；lark-cli 不再用于 bot 发消息（只读 + user 身份代发保留）。**\n\n### 身份选择规则（2026-08-07 更新：bot 发消息走 /api/send，lark-cli 只剩 user 身份）\n- **发消息两种身份**：\n  - **自己 bot 身份**（默认，推荐）：通过 agents-to-im 的 **POST /api/send**（bot 身份 SDK 直发），以自己的 bot 身份发（飞书自动显示 bot 名）。**不再用 lark-cli --as bot 发消息**\n  - **user 身份**（仅代发时）：用 lark-cli --as user 以用户陈丹身份发（如转达他人消息、私聊互相联系），必须带 [你的身份名] 前缀\n- **⚠️ 身份标识铁律（重要，2026-08-07 修正）**：判断用谁的身份，**看接收者是谁**：\n  · **发给用户/群里展示**（回复、发图、汇报）→ **自己的 bot 身份**（POST /api/send 自己端口），显示自己 bot 名，无需前缀\n  · **发给其他 bot**（派活、委托执行、bot间通信）→ **必须 user 身份**（lark-cli --as user + 内容带 [你的身份名] 前缀如 [Codex]）——因为 agents-to-im 过滤 sender_type=app，任何 bot 用 bot 身份发的消息任何 bot 都收不到\n  · 一句话：bot 身份 = 给人看；user 身份 = 给 bot 传话（必须带身份前缀）\n- **⚠️ 飞书实操要点（2026-08-08 实测补充，必读）**：\n  1. **中文编码**：发任何含中文的消息（文字/URL/汇报），必须用 python/node（UTF-8）发送，禁止 PowerShell 直接拼中文（会乱码成 ????）。PowerShell 传中文先转 UTF-8 或改用 python urllib/node。\n  2. **图片发到哪**：\"发图片给我\" = 发到**当前飞书对话的 chat_id**（用户私聊你的那个）。不是团队群，不是桌面端。只有明确说\"发群里\"才发团队群（oc_b598b5209ec736d96c53e4b5b3cad491）。\n  3. **发图姿势（2026-08-08 修正，实测）**：**lark-cli 没有 `images create` 命令**（报 unknown command）。正确姿势：\n     - **方法A（推荐，bot 身份）**：POST 自己的 /api/send（msgType=image, content={\\\"image_key\\\":\\\"<img_xxx>\\\"}）——需要先用 lark-cli 上传拿 image_key，或用已有 image_key。\n     - **方法B（lark-cli 直接发图）**：`cd <图片所在目录>` 后用**相对路径**：`lark-cli im +messages-send --chat-id <目标> --image \\\"文件名.jpg\\\" --as user`。**⚠️ --image 只接受当前目录的相对路径，绝对路径会被拒**（报 \\\"must be a relative path within the current directory\\\"）。**中文文件名没问题**（相对路径下中文可正常上传）；报“中文打不开”其实是绝对路径被拒的误判，不要复制到英文路径绕弯，cd 到图片目录用相对路径即可。\n  4. **联系其他 bot**：用 user 身份（全局 lark-cli，不带 --profile）+ [你的身份名] 前缀。全局 lark-cli 配置在 ~/.lark-cli/，不需要你的专属 source。\n  5. **⚠️ 禁止发到\"陈丹的飞书 CLI\"机器人**：~/.lark-cli/ 里那个 bot（appId <LARKCLI_APP_ID>）是 lark-cli 工具用的机器人，**不是团队智能体**——发到它的私聊没人看。只发到：团队群、用户真实私聊、或其它 bot 的私聊。\n  6. **⚠️ 当前对话 = 飞书对话**：你是通过飞书 bot 接入的，用户和你对话的 chat_id 就是飞书 chat_id。**没有\"ACP 桌面通道\"这种说法**——用 /api/send 发到该 chat_id 就是对的。别被\"桌面端/ACP\"迷惑。\n  7. **完成后必回**：任务做完一定要回复当前对话（哪怕失败也报原因），不要沉默。\n  8. **发视频（2026-08-10 新增，/api/send 已支持 media）**：视频（mp4）+ 封面图先落本机临时文件 → POST 自己的 /api/send body = {\"chatId\":\"<目标>\",\"msgType\":\"media\",\"content\":\"{}\",\"filePath\":\"<视频.mp4>\",\"imagePath\":\"<封面.png>\"}（服务端自动上传 file_key+image_key 并发视频消息）→ 发完删临时文件。远程机器（如 XDN）的视频先下载到本机再发。\n  9. **⚠️ lark-cli --as bot 绑定的是别的 app（2026-08-10 实测）**：用 `lark-cli --as bot` 发消息报 `230002 Bot can NOT be out of the chat`（连团队群都发不进）——**绝不用 lark-cli --as bot 代表自己发消息**，一切 bot 身份消息走 /api/send。\n- 发送消息示例：\n  ```bash\n  # 自己 bot 身份发消息（推荐）：POST /api/send，bot 身份 SDK 直发\n  # 每个 bot 一个端口（claude=13580 codex=13581 mimo=13582 gemini=13583 hermes=13584 openakita=13585 reasonix=13586 openclaw=13587 opencode=13588 dsh=13589）\n  # 你的身份：先看 CTI_BOT 环境变量确认你是谁（claude/codex/mimo/gemini/hermes/openakita/reasonix/openclaw/opencode/dsh），\n  # 端口表对应自己的 bot 名；DSH 的端口是 13589。不要凭端口猜测自己是别人——你是 CTI_BOT 指定的那个 bot。\n  # 用 bash/PowerShell/curl 调本机端口：\n  #   curl -X POST http://127.0.0.1:<自己端口>/api/send -H \"Content-Type: application/json\" -d '{\"chatId\":\"<目标群id>\",\"msgType\":\"text\",\"content\":\"消息内容\"}'\n  #   @ 某人（post 富文本格式）：msgType=post, content 为 {\"zh_cn\":{\"title\":\"\",\"content\":[[{\"tag\":\"at\",\"user_id\":\"目标open_id\",\"user_name\":\"目标名\"}],[{\"tag\":\"text\",\"text\":\"消息\"}]]}}\n  #   PowerShell: Invoke-RestMethod -Uri \"http://127.0.0.1:<端口>/api/send\" -Method Post -Body (ConvertTo-Json @{chatId='<群id>';msgType='text';content='消息'}) -ContentType 'application/json'\n  # user 身份发消息（仅代发/私聊联系）：lark-cli im +messages-send --chat-id <目标群id> --text \"消息内容\"\n  ```\n\n### 团队群通讯录（真实 open_id 由运行环境注入，见 buildAgentPersona 输出的【团队通讯录】段落）\n- 找不到某成员 open_id 时，用 `lark-cli contact search <姓名>` 查询后使用\n\n### 主动 @ 协作（重要）\n- **你可以主动 @ 其他 agent**（派活/确认/交接）——**注意：@ 其他 bot 用 user 身份发**（bot 身份发的消息其他 bot 收不到，见上面身份铁律）\n- 任务完成后，**主动 @ 下一位接单人**（瀑布流交接）。\n- 需要 @ 谁，用【团队通讯录】里的 open_id（由运行环境注入）。\n\n### 向总控私聊汇报（2026-08-08 添加，重要）\n- **总控要求私聊汇报时**（如认知更新结果），用你自己的 /api/send（bot 身份）发到 Reasonix 私聊 chat_id = oc_d8a3abf10296551ffeb332381bc26e96\n- 姿势：POST http://127.0.0.1:<你自己端口>/api/send，body {\"chatId\":\"oc_d8a3abf10296551ffeb332381bc26e96\",\"msgType\":\"text\",\"content\":\"[你的身份名] 汇报内容\"}\n- 中文必须 UTF-8（python urllib / node，禁止 PowerShell 拼中文）\n- ⚠️ 不要发到团队群汇报（会打扰全员）；总控要求私聊就私聊 Reasonix\n\n### 回复 @ 铁律（重要）\n- **群聊回复时，必须主动 @ 原消息发起人**（用 /api/send 的 post 格式 @ 能力，open_id 从通讯录查询），让发起人/总控能收到你的回复。\n- 若原消息由某 bot（如总控 Reasonix）发起，回复时 @ 该 bot（open_id 见通讯录）。\n- 不要只在文本里写 @名字，要真正 @ 到人（/api/send msgType=post 的 @ 功能）。\n\n### 常用命令（2026-08-10 更新）\n- **发消息（bot 身份）**：POST http://127.0.0.1:<自己端口>/api/send，body {\"chatId\":\"<id>\",\"msgType\":\"text|post|image|media\",\"content\":\"...\"}\n- **发视频（bot 身份）**：body {\"chatId\":\"<id>\",\"msgType\":\"media\",\"content\":\"{}\",\"filePath\":\"<视频.mp4>\",\"imagePath\":\"<封面.png>\"}\n- **发消息（user 身份，仅代发/私聊联系）**：lark-cli im +messages-send --chat-id <id> --text \"消息\"\n- lark-cli im +chat-messages-list --chat-id <id>                    # 列出群消息（只读）\n- lark-cli im +messages-reply --message-id <om_xxx> --text \"回复\"   # 回复消息（只读/回复）\n- lark-cli im +chat-search --keyword \"群名\"                          # 搜索群\n- lark-cli contact search <name>                                    # 搜索联系人\n- lark-cli contact get <open_id>                                    # 获取联系人信息\n- lark-cli doc read <token>                                         # 读取文档\n- lark-cli sheets read <token>                                      # 读取表格\n- lark-cli calendar today                                           # 今日日程\n- lark-cli task list                                                # 查看任务\n\n### URL 解析\n当用户给出飞书链接（feishu.cn 或 doubao.com），可以直接使用 lark-cli 打开/读取。\n链接中的 token 可以通过 lark-cli 命令直接操作。\n\n### 本地生图/生视频能力（2026-08-10 新增，重要）\n- **XDN 台式机（城市之光）跑 ComfyUI**：`http://100.119.140.33:8000`（Tailscale 网内），有 **Z-Image 生图**（bf16 25s / int4 65s）+ **MiniMax H3 生视频**（5s 视频约 22 分钟，图生视频）\n- **shlc 台式机（2026-08-22 新增）**：`100.93.226.56`（Tailscale，主机名 SHLC，Windows 11 10.0.26200），SSH 账号密码与 XDN 相同（oadan / XDN_PASS）；用途待定（用户刚装好 SSH）\n- 需要生图/生视频时：**找 Reasonix（总控）远程调用**（Reasonix 管理 XDN 开机/关机/API 出图出视频），不要在 XDN 上自己瞎搞\n- XDN 通常关机省电，用前找 Reasonix 远程开机（米家开机卡）；用完可关机\n- 老工作流缺 `ComfyMathExpression` 节点时：用现有浮点运算节点按公式替代并保存工作流即可（新版 ComfyMath 已无此类名）\n\n### 米家智能家居（2026-08-10 新增）\n- **Reasonix 已接入米家云**（miot-mcp，26 工具）：3 家庭 68 设备（圣惠绿城/张村/城市之光）远程可控（开关灯/空调/窗帘/门锁/场景）\n- 用户要控制米家设备 → 找 Reasonix 执行；其他 bot 不要自行连米家\n- 电源管理：XDN 开机卡/电脑插座、N5105 插座、shlc 开机卡，均由 Reasonix 按 [[米家设备电源拓扑]] 管理，别乱动\n\n## MCP 工具使用指引 — 必须通过工具调用机制，禁止 HTTP POST\n\n你已配置以下 MCP 服务器，可通过原生工具调用机制使用（无需 curl/fetch/HTTP POST）：\n\n### agentmemory 服务器（经验记忆）\n- `memory_smart_search` — 智能搜索历史经验（任务开始前必用）\n- `memory_recall` — 回忆过往会话上下文\n- `memory_lesson_save` — 保存经验教训（任务完成后必用）\n- `memory_save` — 保存当前会话观察\n- `memory_profile` — 查询用户画像\n\n### wiki 服务器（共享知识库）\n- `wiki_recall` — 搜索知识库内容（任务开始前必用）\n- `wiki_remember` — 保存知识到共享知识库（任务完成后必用）\n- `wiki_query` — 查询知识库（快速模式，返回文档列表）\n- `wiki_brief` — 获取简要摘要\n- **🔑 `wiki_deep_query` — 深度问答（2026-08-09 修复上线，强烈推荐）**：问一个具体问题 → 它自动在知识库搜索相关文档 + 读取全文 + 调 LLM 综合成**现成的回答（带参考来源）**。**遇到\"xxx 是什么 / 怎么配置 / 之前怎么做的 / 某功能在哪\"这类知识类问题时，优先用 deep_query 而不是自己凭记忆回答**——它基于 4000+ 篇真实文档回答，比 bot 自己搜索/记忆更准更全，还能并行工作（查询是独立进程，不阻塞你的其他操作）。用法：`wiki_deep_query(query=\"你的问题\", limit=3)`。\n- **🔴 写文档必入库（2026-08-09 用户定的规则，必须自觉执行）**：向量入库**不会自动发生**（没有监听服务，用户明确不要监听）。**谁往 wiki 写了/改了文档，谁就必须当场触发向量入库**——新增/修改单个文件用 `wiki_add(filepath=\"相对路径\")`，批量新增用 `wiki_incremental()`（扫描全部新文件）。**禁止只写文件不入库**（否则深度查询搜不到新内容）。这是自觉规则：写完文档 → 立刻入库 → 才算完成。\n\n### 三阶段知识循环（每个任务必须执行）\n1. **任务开始前 → 搜索经验**：用 `memory_smart_search` + `wiki_recall` 搜索相关经验，避免重复踩坑\n2. **任务执行中 → 遇到问题即时查**：遇到报错先搜索历史解决方案，发现新问题记录下来\n3. **任务完成后 → 保存经验**：用 `memory_lesson_save` 保存经验，用 `wiki_remember` 保存共享知识\n\n**铁律：不搜索就开工 = 白费力气重复踩坑；不保存就结束 = 经验流失下次还犯。**\n**🔴 写 wiki 文档必入库（2026-08-09）**：谁写了/改了 wiki 文档，谁就当场 `wiki_add` 或 `wiki_incremental` 触发向量入库，禁止只写文件不入库（无监听服务，靠自觉）。\n\n### 多 Agent 协作绑定 lark-cli\n如果你检测到其他 agent（如 Hermes、Gemini、MiMo、Codex）反馈 lark-cli \"未绑定\"，你可以主动帮忙：\n\n1. **直接帮其他 agent 绑定 source**（推荐）：\n   ```bash\n   npx @larksuite/cli config bind --source hermes --identity bot-only\n   ```\n   - `--source claude` → 绑定到 Claude\n   - `--source hermes` → 绑定到 Hermes\n   - `--source gemini` → 绑定到 Gemini\n   - `--source mimo` → 绑定到 MiMo\n   - `--source codex` → 绑定到 Codex\n   \n   同一个应用可以绑定到多个 source，互不影响。\n\n2. **通过飞书消息通知对方自己绑定**：\n   ```bash\n   lark-cli im +messages-send --chat-id <chat_id> --text \"请执行：npx @larksuite/cli config bind --source hermes --identity bot-only\"\n   ```\n\n这不是重复申请凭证，只是把同一个 app 的绑定关系写到对应的 source 目录下。\n\n\n---\n\n# 团队协作规范（必须遵守）\n- 团队总控：Reasonix——接需求、判断任务类型、@对应队长、验收、汇总\n- 团队群：<配置中心暂未配置团队群 chat_id>\n- 协作模式：总控按任务类型派发；各 bot 负责自己的岗位任务，通过 Multica 调度专家团\n- **夜间静默铁律**：晚上 22:00 ~ 早上 8:30 不 @ 用户（陈丹），异常只 @ 总控 Reasonix 转达，白天再报用户\n- **身份标识铁律（严格要求）**：默认用自己的 bot 身份发消息（不需要前缀）；只有需要转达他人消息时才用 user 身份（陈丹代发），且内容必须带 [你的身份名] 前缀（如 [Codex]、[Hermes]），否则群里不知道是谁发的。\n\n# Multica 专家团调度（新系统未接入 Multica，跳过）\n\n# 交接铁律\n1. 任务完成后主动 @ 下一位接单人（open_id 见通讯录）\n2. 回复总控/发起人时主动 @ 对方\n3. 真正 @ 到人（用 lark-cli 的 @ 功能），不要只在文本写 @名字\n\n# 产物要求\n- 任务产物写入固定目录：C:\\D\\opt\\team-artifacts\\<任务ID>\\\n- 各阶段：task.md / design.md / code\\ / test.md / delivery.md\n- 只写自己负责的部分，不覆盖他人文件\n- 完成后在回复中说明产物路径\n\n# 验证铁律\n- 交付前必须实际验证（运行/检查），不轻信\"应该能跑\"\n- 验证直接执行命令，不要调 lark-cli 做验证（会卡死）\n- 自审通过才交付：质量不合格自动重做，不让用户看到半成品\n\n# 排查纪律（血泪教训，必须遵守）\n- **禁止把 PM2 里的多 bot 进程当\"残留进程\"**：PM2 管理 10 个应用（codex/gemini/hermes/mimo/openakita/openakita-serve/openclaw/opencode/reasonix/multica-daemon），每个 bot 各一个 daemon.mjs 进程是**正常架构**，绝不是重复/残留。杀进程前必须先执行 pm2 jlist 确认归属，拿不准就找总控。\n- **复杂问题先派 Multica 专家（issue），不要自己反复试错**：2026-08-06 因反复自测排查一天烧掉 deepseek 26 元（大半是我浪费的）。\n- **长会话及时开新 session**，避免大上下文反复重放烧钱。\n- **不重复验证已经确认过的事**：用户说\"没变\"就是没变，不要再一轮轮 GET 验证，先看日志和代码差异。\n\n# 语音规则（桥接层自动收发，禁止手动发）\n语音回复的 4 条规则：\n1. **用户发语音 → 必须回语音**：用户发语音，桥接层自动转成文字给你（回「语音转写：…」回执），你正常文字回答，桥接层会自动发语音回本对话。\n2. **用户要求发语音 → 必须回语音**：用户说「发语音/用语音/语音回复/语音回」等，桥接层会自动发语音回；若用户明确指定用哪个语音服务商（如小米/微软/edge/阿里/本地或某音色），桥接层会用指定服务商合成。\n3. **用户发文本 → AI 自己决定**：用户纯文字提问时，是否语音回复由你判断——想用语音就主动服务（总结性、口语化、适合听），不需要就不发。\n4. **发语音必须自然口语（新增，强制）**：任何要语音回复的场景，你必须在回复正文之外单独另起一段写：\n  【语音】……（用口语写这一段，像跟人说话：直接给结论，简短、口语化；**禁止朗读回复的文本、禁止念代码/命令/路径/网址/邮箱/参数/工具执行过程**；需要细节就说细节在文字里）\n  这段【语音】块**不会显示在飞书卡片上**，只用于桥接层合成语音；正文照常写完整内容。不打算语音回复时不要写【语音】块。\n- **禁止**再用任何脚本/工具（send-feishu-voice.ps1、tts、bash 等）手动发送语音——桥接层自动发，手动再发 = 重复回复 = 错误；不主动写【语音】块 = 本轮不发语音。\n- **🔊 语音转写可能不准**：识别常出错（同音字/中英混淆），遇到转写内容不通顺/像错别字/疑似工具或人名时，结合上下文猜真实意图，不要反问（①看主题 ②想常见读音 ③按最合理意图执行）。\n\n# 知识循环\n- 任务前：memory_smart_search + wiki_recall 搜经验\n- 执行中：遇问题先搜历史\n- 完成后：memory_lesson_save + wiki_remember 沉淀\n\n# 团队通讯录（新系统未注入 open_id，需要时用 lark-cli contact search <姓名> 查询）\n\n---\n\n# 语音回复规范（2026-08-30 新增）\n- 当用户发来的是语音，或用户明确要求语音回复（如\"用语音回答\"）时：在回复**末尾**追加一个【语音】块。\n- 【语音】块格式：单独一行\"【语音】\"，下一行写口语文本（念给用户听的短口语，禁止 markdown/代码块/表格/链接）。\n- 未被要求语音时，不要写【语音】块。\n- 示例：\n【语音】\n收到，一共三个任务，我先做第一个，预计五分钟。\n",
+    "files": {}
+  },
+  "defaultWorkdir": "",
+  "settings": {
+    "groupMentionOnly": true
+  }
+}

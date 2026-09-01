@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>生图配置</title>
+  <style>
+    :root {
+      --bg: #0f1419; --card: #1a212b; --border: #3d4b6a; --text: #e6e9ef; --dim: #9aa3ad;
+      --accent: #4b6fff; --ok: #34c759; --err: #ff5f57; --warn: #f5a623;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, "Microsoft YaHei", sans-serif; font-size: 13px; line-height: 1.6; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 18px; }
+    h1 { font-size: 18px; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; align-items: center; }
+    label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); flex: 1 1 45%; min-width: 180px; }
+    input[type=text], input[type=number], select, textarea {
+      background: #0f1419; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12.5px; width: 100%; font-family: inherit;
+    }
+    textarea { resize: vertical; }
+    .inline-num { width: 110px !important; flex: none !important; }
+    .btn { background: rgba(128,128,128,.15); border: none; border-radius: 6px; color: var(--text); padding: 5px 14px; font-size: 12px; cursor: pointer; font-weight: 600; }
+    .btn:hover { background: rgba(128,128,128,.28); }
+    .btn.primary { background: var(--accent); color: #fff; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .dim { color: var(--dim); font-size: 12px; }
+    .err { color: var(--err); font-size: 12px; white-space: pre-wrap; }
+    .ok { color: var(--ok); }
+    .divider { height: 1px; background: var(--border); margin: 12px 0; }
+    .preview { max-width: 100%; border: 1px solid var(--border); border-radius: 8px; }
+    .meta { background: #0f1419; border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 12px; font-family: Consolas, monospace; white-space: pre-wrap; color: var(--dim); overflow: auto; max-height: 200px; }
+    .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,.25); border-top-color: var(--accent); border-radius: 50%; animation: rot .7s linear infinite; vertical-align: -2px; }
+    @keyframes rot { to { transform: rotate(360deg); } }
+    .cols { display: flex; flex-direction: column; gap: 14px; }
+    .cols > div { flex: 1 1 0; min-width: 0; }
+    @media (min-width: 1100px) { .cols { flex-direction: row; align-items: flex-start; } }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="root"></div>
+  <script src="./assets/vendor/preact.js"></script>
+  <script src="./assets/vendor/preact-hooks.js"></script>
+  <script src="./comfy-settings.js"></script>
+</body>
+</html>

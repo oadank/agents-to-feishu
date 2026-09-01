@@ -1,0 +1,433 @@
+/**
+ * 内建 TTS（语音合成）—— 全引擎对齐 @oadank/dsh-input-tools：
+ *   edge（微软免费）、xiaomi（小米预置音色+唱歌+音色描述底嗓）、
+ *   voicedesign（小米音色设计，AI/固定模式）、voiceclone（小米音色克隆，多样本）、
+ *   local（本地 MeloTTS，URL/CMD）、ali（阿里 qwen3-tts-flash）。
+ * 配置驱动、可分发；接口 synthesize(text, ttsCfg, engineOverride?)。
+ */
+
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import crypto from 'node:crypto'
+import { execFileSync } from 'node:child_process'
+import { edgeTts } from './edge-tts.js'
+import { resolveFfmpeg } from './asr.js'
+import type { CloneSample } from '../config-center/store.js'
+
+// ── 类型（对应 store.SpeechConfig.tts）──
+
+export interface XiaomiTts {
+  enabled: boolean
+  apiKey: string
+  baseUrl: string
+  voice: string
+  singing: boolean
+  context: string
+}
+export interface VoiceDesignTts {
+  enabled: boolean
+  mode: 'ai' | 'fixed'
+  context: string
+  aiGender: string
+  aiAge: string
+  lockGender: boolean
+  lockTimbre: boolean
+  lockAge: boolean
+}
+export interface VoiceCloneTts {
+  enabled: boolean
+  samplePath: string
+  context: string
+  defaultId: string
+  samples: CloneSample[]
+}
+export interface LocalTts { enabled: boolean; url: string; cmd: string }
+export interface AliTts { enabled: boolean; apiKey: string; baseUrl: string; voice: string }
+
+export interface TtsConfig {
+  /** edge | xiaomi | voicedesign | voiceclone | local | ali | auto */
+  defaultEngine: string
+  edge: { enabled: boolean; voice: string }
+  xiaomi: XiaomiTts
+  voicedesign: VoiceDesignTts
+  voiceclone: VoiceCloneTts
+  local: LocalTts
+  ali: AliTts
+}
+
+export interface TtsResult {
+  ok: boolean
+  format?: string   // mp3 / wav
+  data?: Buffer
+  engine?: string
+  error?: string
+}
+
+/** 语音设计年龄标签（对齐 dsh-input-tools AI_AGE_LABELS） */
+const AI_AGE_LABELS: Record<string, string> = {
+  infant: '婴儿感', child: '幼儿感', teen: '少年感', young: '青年感', middle: '中年感', old: '老年感',
+}
+
+// ── 工具 ──
+
+/** 解析 Windows 命令行参数（处理双引号：引号内空格不拆、剥掉引号） */
+function splitCommandLine(cmd: string): string[] {
+  const args: string[] = []
+  let cur = ''
+  let inQuote = false
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i]
+    if (ch === '"') inQuote = !inQuote
+    else if (ch === ' ' || ch === '\t') {
+      if (inQuote) cur += ch
+      else if (cur !== '') { args.push(cur); cur = '' }
+    } else cur += ch
+  }
+  if (cur !== '') args.push(cur)
+  return args
+}
+
+function resolveFfmpegBin(): string {
+  try {
+    const out = execFileSync('ffmpeg', ['-version'], { windowsHide: true, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
+    if (out.split(/\r?\n/)[0]?.trim()) return 'ffmpeg'
+  } catch { /* 不在 PATH */ }
+  return 'ffmpeg' // 让 execFileSync 自己解析系统 PATH；找不到会抛错由上层兜底
+}
+
+const FFMPEG_BIN = resolveFfmpegBin()
+
+/** 非 mp3 音频转 mp3（失败保留原容器）；识别 mp3 头不转码（兼容 ID3v2 标签头） */
+function toMp3(data: Uint8Array, declared: string): { data: Buffer; format: string } {
+  // 跳过 ID3v2 标签（ID3 头 10 字节 + 4 字节大小），再找 MPEG 帧同步 0xFF E?
+  let off = 0
+  if (data.length > 10 && data[0] === 0x49 && data[1] === 0x44 && data[2] === 0x33) { // 'ID3'
+    const size = ((data[6] & 0x7f) << 21) | ((data[7] & 0x7f) << 14) | ((data[8] & 0x7f) << 7) | (data[9] & 0x7f)
+    off = 10 + size
+  }
+  const isMp3 = data.length > off + 2 && data[off] === 0xFF && ((data[off + 1] ?? 0) & 0xE0) === 0xE0
+  let finalData = Buffer.from(data)
+  let mediaType = declared
+  if (!isMp3) {
+    const tmpIn = path.join(process.env.TEMP || os.tmpdir(), `atf-tts-in-${crypto.randomUUID()}.wav`)
+    const mp3Path = path.join(process.env.TEMP || os.tmpdir(), `atf-tts-${crypto.randomUUID()}.mp3`)
+    fs.writeFileSync(tmpIn, finalData)
+    try {
+      execFileSync(FFMPEG_BIN, ['-y', '-i', tmpIn, '-c:a', 'libmp3lame', '-b:a', '128k', mp3Path], {
+        windowsHide: true, stdio: 'ignore', timeout: 30_000,
+      })
+      finalData = fs.readFileSync(mp3Path)
+      mediaType = 'audio/mpeg'
+    } catch { /* 转码失败保留原容器 */ } finally {
+      try { fs.unlinkSync(tmpIn) } catch {}
+      try { fs.unlinkSync(mp3Path) } catch {}
+    }
+  }
+  // audio/mpeg 含 mp3 判据：同时匹配 'mp3' 与 'mpeg'（'audio/mpeg'.includes('mp3') 是 false，旧 bug 导致 format='audio'）
+  const fmt = (mediaType.includes('mpeg') || mediaType.includes('mp3')) ? 'mp3' : (mediaType.includes('wav') ? 'wav' : 'audio')
+  return { data: finalData, format: fmt }
+}
+
+/** 年龄×性别 → 无歧义身份短语 */
+function ageGenderIdentity(ageKey: string, genderKey: string): string {
+  const male = genderKey === 'male'
+  const female = genderKey === 'female'
+  switch (ageKey) {
+    case 'infant': return male ? '男婴' : female ? '女婴' : '婴儿'
+    case 'child': return male ? '小男孩' : female ? '小女孩' : '小孩'
+    case 'teen': return male ? '少年' : female ? '少女' : '少年'
+    case 'young': return male ? '青年男性' : female ? '青年女性' : '青年人'
+    case 'middle': return male ? '中年男性' : female ? '中年女性' : '中年人'
+    case 'old': return male ? '老年男性' : female ? '老年女性' : '老年人'
+    default: return male ? '男性' : female ? '女性' : ''
+  }
+}
+
+/** 飞书语音消息需要 OPUS 格式（16k 单声道 libopus voip，对齐旧 agents-to-im）；失败返回 null */
+export async function toOpus(data: Buffer): Promise<Buffer | null> {
+  const ffmpeg = resolveFfmpeg()
+  const tmp = process.env.TEMP || os.tmpdir()
+  const inPath = path.join(tmp, `atf-opus-in-${crypto.randomUUID()}.bin`)
+  const outPath = path.join(tmp, `atf-opus-${crypto.randomUUID()}.opus`)
+  try {
+    fs.writeFileSync(inPath, data)
+    execFileSync(ffmpeg, ['-y', '-i', inPath, '-ar', '16000', '-ac', '1', '-c:a', 'libopus', '-b:a', '24k', '-application', 'voip', outPath], {
+      windowsHide: true, stdio: 'ignore', timeout: 30_000,
+    })
+    const out = fs.readFileSync(outPath)
+    if (out.length === 0) return null
+    return out
+  } catch {
+    return null
+  } finally {
+    try { fs.unlinkSync(inPath) } catch {}
+    try { fs.unlinkSync(outPath) } catch {}
+  }
+}
+
+// ── 各引擎合成 ──
+
+/** 微软 Edge 免费 */
+async function synthesizeEdge(text: string, cfg: { enabled: boolean; voice: string }): Promise<TtsResult | null> {
+  if (!cfg?.voice) return null
+  try {
+    const mp3 = await edgeTts(text, cfg.voice || 'zh-CN-XiaoxiaoNeural')
+    if (!mp3 || mp3.length === 0) return { ok: false, error: 'Edge TTS 未返回音频' }
+    return { ok: true, format: 'mp3', data: Buffer.from(mp3), engine: 'edge' }
+  } catch (e) {
+    return { ok: false, error: `Edge TTS 失败: ${(e as Error)?.message ?? String(e)}` }
+  }
+}
+
+/** 小米预置音色（mimo-v2.5-tts）：唱歌标签 + 音色描述底嗓 context */
+async function synthesizeXiaomi(text: string, cfg: XiaomiTts): Promise<TtsResult | null> {
+  const apiKey = cfg?.apiKey ?? ''
+  if (apiKey === '') return null
+  const baseUrl = (cfg?.baseUrl || 'https://api.xiaomimimo.com/v1').replace(/\/+$/, '')
+  const voice = cfg?.voice || '冰糖'
+  let speak = text
+  // 唱歌：文本自带 (唱歌) 标签，或明确唱歌意图时自动加标签
+  const hasTag = /^\s*\((唱歌|sing|singing)\)/i.test(speak)
+  const wantsSing = cfg?.singing === true || (!hasTag && /(唱(歌|一?首|一段)|歌声回复|用歌声|唱歌回|来一段|唱两句)/i.test(speak))
+  if (wantsSing && !hasTag) speak = `(唱歌)${speak}`
+  const messages: Array<{ role: string; content: string }> = []
+  if ((cfg?.context ?? '').trim() !== '') messages.push({ role: 'user', content: cfg.context.trim() })
+  messages.push({ role: 'assistant', content: speak })
+  try {
+    const resp = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: 'mimo-v2.5-tts', messages, max_tokens: 8192, audio: { format: 'wav', voice } }),
+      signal: AbortSignal.timeout(60000),
+    })
+    if (!resp.ok) {
+      let b = ''; try { b = (await resp.text()).slice(0, 200) } catch {}
+      return { ok: false, error: `小米 TTS 返回 ${resp.status}: ${b}` }
+    }
+    const payload = await resp.json() as any
+    const data = payload?.choices?.[0]?.message?.audio?.data
+    if (typeof data !== 'string' || data.length < 100) return { ok: false, error: '小米 TTS 未返回音频' }
+    const r = toMp3(new Uint8Array(Buffer.from(data, 'base64')), 'audio/wav')
+    return { ok: true, format: r.format, data: r.data, engine: 'xiaomi' }
+  } catch (e) {
+    return { ok: false, error: `小米 TTS 失败: ${(e as Error)?.message ?? String(e)}` }
+  }
+}
+
+/** 小米音色设计（mimo-v2.5-tts-voicedesign）：user=音色描述，无 voice。
+ *  mode=ai：按 aiGender/aiAge 生成身份基座 + 锁定锚点；
+ *  mode=fixed：底嗓用 context，voiceDesc 作为情绪/风格叠加（overrideVoice=true 时整体替换）。 */
+async function synthesizeVoiceDesign(
+  text: string, cfg: VoiceDesignTts, apiKey: string, baseUrl: string, voiceDesc: string, overrideVoice: boolean,
+): Promise<TtsResult | null> {
+  if (apiKey === '') return null
+  const vdMode = cfg?.mode || 'ai'
+  let desc = (voiceDesc ?? '').trim()
+  if (vdMode === 'ai') {
+    const gKey = cfg?.aiGender === 'male' ? 'male' : cfg?.aiGender === 'female' ? 'female' : ''
+    const aKey = AI_AGE_LABELS[cfg?.aiAge ?? ''] !== undefined ? cfg.aiAge : ''
+    const identity = ageGenderIdentity(aKey, gKey)
+    const lockG = cfg?.lockGender === true
+    const lockA = cfg?.lockAge === true
+    const lockT = cfg?.lockTimbre === true
+    const gLabel = gKey === 'male' ? '男' : gKey === 'female' ? '女' : ''
+    const aLabel = AI_AGE_LABELS[aKey] ?? ''
+    const anchorText = [
+      lockG ? '性别固定为' + (gLabel !== '' ? gLabel : '每次一致') : '',
+      lockA ? '年龄感固定为' + (aLabel !== '' ? aLabel : '每次一致') : '',
+      lockT ? '音色质感保持稳定' : '',
+    ].filter(Boolean).join('、')
+    if (identity !== '' || anchorText !== '') {
+      desc = (identity !== '' ? '一位' + identity + '的声音（身份硬性要求：' + (anchorText !== '' ? anchorText : '按上述身份') + '；若与其他描述冲突，一律以本身份为准）。' : '')
+        + (desc !== '' ? '语气/情绪要求：' + desc + '（性别/年龄以身份为准；音色质感与语气情绪按本描述执行——如"沙哑、苍老、低沉、气声"等质感词应保留并强化）。' : '语气情绪要饱满生动：像真人一样带喜怒哀乐、笑音、撒娇或急切等起伏，禁止平淡。')
+    } else if (desc === '') {
+      desc = '语气情绪要饱满生动：像真人一样带喜怒哀乐、笑音、撒娇或急切等起伏，禁止平淡。'
+    }
+  } else {
+    // 固定模式：voiceDesc 作为情绪/风格叠加在底嗓 context 后；overrideVoice=true 整体替换
+    const base = (cfg?.context ?? '').trim()
+    if (overrideVoice === true && desc !== '') desc = desc
+    else if (desc !== '') desc = base + '；' + desc
+    else desc = base
+  }
+  if (desc === '') return null
+  const messages = [
+    { role: 'user', content: desc },
+    { role: 'assistant', content: text },
+  ]
+  try {
+    const resp = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: 'mimo-v2.5-tts-voicedesign', messages, max_tokens: 8192, audio: { format: 'wav' } }),
+      signal: AbortSignal.timeout(60000),
+    })
+    if (!resp.ok) {
+      let b = ''; try { b = (await resp.text()).slice(0, 200) } catch {}
+      return { ok: false, error: `语音设计返回 ${resp.status}: ${b}` }
+    }
+    const payload = await resp.json() as any
+    const data = payload?.choices?.[0]?.message?.audio?.data
+    if (typeof data !== 'string' || data.length < 100) return { ok: false, error: '语音设计未返回音频' }
+    const r = toMp3(new Uint8Array(Buffer.from(data, 'base64')), 'audio/wav')
+    return { ok: true, format: r.format, data: r.data, engine: 'voicedesign' }
+  } catch (e) {
+    return { ok: false, error: `语音设计失败: ${(e as Error)?.message ?? String(e)}` }
+  }
+}
+
+/** 小米音色克隆（mimo-v2.5-tts-voiceclone）：audio.voice=样本 dataURL（≤10MB）。
+ *  样本取 samples[0]（或 samplePath 兼容）；风格指令优先级 voiceDesc > 样本 context > 全局 context。 */
+async function synthesizeVoiceClone(
+  text: string, cfg: VoiceCloneTts, apiKey: string, baseUrl: string, voiceDesc: string,
+): Promise<TtsResult | null> {
+  if (apiKey === '') return null
+  const samplePath = (Array.isArray(cfg?.samples) && cfg.samples.length > 0 && typeof cfg.samples[0]?.path === 'string' && cfg.samples[0].path !== '')
+    ? cfg.samples[0].path
+    : (cfg?.samplePath ?? '')
+  if (samplePath === '') return null
+  let sample: string
+  try {
+    const bytes = fs.readFileSync(samplePath)
+    if (bytes.byteLength > 10 * 1024 * 1024) return { ok: false, error: '克隆样本 >10MB' }
+    const suffix = samplePath.toLowerCase().split('.').pop()
+    const mime = suffix === 'mp3' ? 'audio/mpeg' : 'audio/wav'
+    sample = `data:${mime};base64,${bytes.toString('base64')}`
+  } catch {
+    return { ok: false, error: '克隆样本读取失败' }
+  }
+  const messages: Array<{ role: string; content: string }> = []
+  const firstSample = Array.isArray(cfg?.samples) ? cfg.samples[0] : undefined
+  const sampleContext = typeof firstSample?.context === 'string' ? firstSample.context.trim() : ''
+  const styleInstruct = (voiceDesc ?? '').trim() !== ''
+    ? voiceDesc.trim()
+    : (sampleContext !== '' ? sampleContext : (cfg?.context?.trim() ?? ''))
+  if (styleInstruct !== '') messages.push({ role: 'user', content: styleInstruct })
+  messages.push({ role: 'assistant', content: text })
+  try {
+    const resp = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: 'mimo-v2.5-tts-voiceclone', messages, max_tokens: 8192, audio: { format: 'wav', voice: sample } }),
+      signal: AbortSignal.timeout(60000),
+    })
+    if (!resp.ok) {
+      let b = ''; try { b = (await resp.text()).slice(0, 200) } catch {}
+      return { ok: false, error: `语音克隆返回 ${resp.status}: ${b}` }
+    }
+    const payload = await resp.json() as any
+    const data = payload?.choices?.[0]?.message?.audio?.data
+    if (typeof data !== 'string' || data.length < 100) return { ok: false, error: '语音克隆未返回音频' }
+    const r = toMp3(new Uint8Array(Buffer.from(data, 'base64')), 'audio/wav')
+    return { ok: true, format: r.format, data: r.data, engine: 'voiceclone' }
+  } catch (e) {
+    return { ok: false, error: `语音克隆失败: ${(e as Error)?.message ?? String(e)}` }
+  }
+}
+
+/** 本地 MeloTTS：URL 常驻服务优先，CMD 兜底 */
+async function synthesizeLocal(text: string, cfg: LocalTts): Promise<TtsResult | null> {
+  const url = (cfg?.url ?? '').trim()
+  try {
+    if (url !== '') {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text }),
+        signal: AbortSignal.timeout(60000),
+      })
+      if (!resp.ok) return { ok: false, error: `本地 TTS 服务返回 ${resp.status}` }
+      const body = Buffer.from(await resp.arrayBuffer())
+      const r = toMp3(new Uint8Array(body), 'audio/wav')
+      return { ok: true, format: r.format, data: r.data, engine: 'local' }
+    }
+    const command = (cfg?.cmd ?? '').trim()
+    if (command === '') return null
+    const parts = splitCommandLine(command)
+    const bin = parts[0]
+    if (bin === undefined) return null
+    const audio = execFileSync(bin, [...parts.slice(1), text], { windowsHide: true, encoding: 'buffer', timeout: 60000 })
+    const r = toMp3(new Uint8Array(audio as Buffer), 'audio/mpeg')
+    return { ok: true, format: r.format, data: r.data, engine: 'local' }
+  } catch (e) {
+    return { ok: false, error: `本地 TTS 失败: ${(e as Error)?.message ?? String(e)}` }
+  }
+}
+
+/** 阿里 qwen3-tts-flash（dashscope） */
+async function synthesizeAli(text: string, cfg: AliTts): Promise<TtsResult | null> {
+  const apiKey = cfg?.apiKey ?? ''
+  if (apiKey === '') return null
+  const baseUrl = (cfg?.baseUrl || 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation').replace(/\/+$/, '')
+  const voice = cfg?.voice || 'Cherry'
+  try {
+    const resp = await fetch(baseUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: 'qwen3-tts-flash', input: { text }, parameters: { voice, format: 'wav', language_type: 'zh' } }),
+      signal: AbortSignal.timeout(60000),
+    })
+    if (!resp.ok) {
+      let b = ''; try { b = (await resp.text()).slice(0, 200) } catch {}
+      return { ok: false, error: `阿里 TTS 返回 ${resp.status}: ${b}` }
+    }
+    const payload = await resp.json() as any
+    const audioUrl = payload?.output?.audio?.url
+    if (typeof audioUrl !== 'string' || audioUrl === '') return { ok: false, error: '阿里 TTS 未返回音频' }
+    const audioRes = await fetch(audioUrl, { signal: AbortSignal.timeout(120000) })
+    if (!audioRes.ok) return { ok: false, error: `音频下载失败 ${audioRes.status}` }
+    const body = Buffer.from(await audioRes.arrayBuffer())
+    const r = toMp3(new Uint8Array(body), 'audio/wav')
+    return { ok: true, format: r.format, data: r.data, engine: 'ali' }
+  } catch (e) {
+    return { ok: false, error: `阿里 TTS 失败: ${(e as Error)?.message ?? String(e)}` }
+  }
+}
+
+// ── 统一入口 ──
+
+/**
+ * 合成语音。engineOverride 指定引擎；否则用 cfg.defaultEngine。
+ * voicedesign/voiceclone 需要额外小米 key（apiKey 由 cfg.xiaomi 提供）。
+ * voiceDesc / overrideVoice 用于 voicedesign（动态音色描述/换声）与 voiceclone（风格指令）。
+ */
+export async function synthesize(
+  text: string,
+  cfg: TtsConfig,
+  engineOverride?: string,
+  voiceDesc?: string,
+  overrideVoice?: boolean,
+): Promise<TtsResult> {
+  const engine = engineOverride || cfg?.defaultEngine || 'edge'
+  const xiaomiKey = cfg?.xiaomi?.apiKey ?? ''
+  const xiaomiBase = (cfg?.xiaomi?.baseUrl || 'https://api.xiaomimimo.com/v1').replace(/\/+$/, '')
+
+  switch (engine) {
+    case 'edge':
+      return (await synthesizeEdge(text, cfg?.edge)) ?? { ok: false, error: `Edge TTS 失败（voice 缺失）` }
+    case 'xiaomi':
+      if (cfg?.xiaomi?.enabled === false) return { ok: false, error: '小米 TTS 未启用' }
+      return (await synthesizeXiaomi(text, cfg?.xiaomi)) ?? { ok: false, error: '小米 TTS 配置不完整（缺 apiKey）' }
+    case 'voicedesign': {
+      if (cfg?.voicedesign?.enabled === false) return { ok: false, error: '语音设计未启用' }
+      if (xiaomiKey === '') return { ok: false, error: '语音设计需要小米 apiKey' }
+      return (await synthesizeVoiceDesign(text, cfg?.voicedesign, xiaomiKey, xiaomiBase, voiceDesc ?? '', overrideVoice === true))
+        ?? { ok: false, error: '语音设计配置不完整或未返回音频' }
+    }
+    case 'voiceclone': {
+      if (cfg?.voiceclone?.enabled === false) return { ok: false, error: '语音克隆未启用' }
+      if (xiaomiKey === '') return { ok: false, error: '语音克隆需要小米 apiKey' }
+      return (await synthesizeVoiceClone(text, cfg?.voiceclone, xiaomiKey, xiaomiBase, voiceDesc ?? ''))
+        ?? { ok: false, error: '语音克隆配置不完整（缺样本路径或未返回音频）' }
+    }
+    case 'local':
+      if (cfg?.local?.enabled === false) return { ok: false, error: '本地 TTS 未启用' }
+      return (await synthesizeLocal(text, cfg?.local)) ?? { ok: false, error: '本地 TTS 配置不完整' }
+    case 'ali':
+      if (cfg?.ali?.enabled === false) return { ok: false, error: '阿里 TTS 未启用' }
+      return (await synthesizeAli(text, cfg?.ali)) ?? { ok: false, error: '阿里 TTS 配置不完整（缺 apiKey）' }
+    default:
+      return { ok: false, error: `未知 TTS 引擎: ${engine}` }
+  }
+}

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" href="data:," />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agents 配置中心</title>
+  <script src="./assets/vendor/vue.global.prod.js"></script>
+  <script src="./assets/vendor/element-plus.min.js"></script>
+  <link rel="stylesheet" href="./assets/vendor/element-plus.css" />
+  <link rel="stylesheet" href="./assets/vendor/dark.css" />
+  <link rel="stylesheet" href="./assets/style.css" />
+</head>
+<body class="dark">
+  <div id="app" v-cloak>
+    <el-container>
+      <el-aside :width="sidebarCollapsed ? '64px' : '200px'" class="sidebar" :class="{ collapsed: sidebarCollapsed }">
+        <div class="logo" style="white-space:nowrap;overflow:hidden">
+          <span class="logo-ic">⚙️</span><span class="logo-txt">Agents 配置中心</span>
+        </div>
+        <el-menu :default-active="tab" @select="setTab" class="el-menu-vertical">
+          <el-menu-item index="agents"><span class="m-ic">🤖</span><span class="m-txt">Agent 分配置</span></el-menu-item>
+          <el-menu-item index="runtimes"><span class="m-ic">🧩</span><span class="m-txt">运行时</span></el-menu-item>
+          <el-menu-item index="providers"><span class="m-ic">☁️</span><span class="m-txt">总配置·模型</span></el-menu-item>
+          <el-menu-item index="mcps"><span class="m-ic">🔌</span><span class="m-txt">总配置·MCP</span></el-menu-item>
+          <el-menu-item index="vision"><span class="m-ic">👁</span><span class="m-txt">看图配置</span></el-menu-item>
+          <el-menu-item index="speech"><span class="m-ic">🗣</span><span class="m-txt">语音能力</span></el-menu-item>
+          <el-menu-item index="skills"><span class="m-ic">🛠</span><span class="m-txt">技能库</span></el-menu-item>
+          <el-menu-item index="comfy"><span class="m-ic">🎨</span><span class="m-txt">生图</span></el-menu-item>
+          <el-menu-item index="inject"><span class="m-ic">💉</span><span class="m-txt">注入</span></el-menu-item>
+        </el-menu>
+      </el-aside>
+
+      <el-container>
+        <el-header class="header">
+          <el-button size="small" text class="side-toggle" @click="toggleSidebar">{{ sidebarCollapsed ? '☰' : '☰' }}</el-button>
+          <div class="header-title">{{ pageTitle }}</div>
+          <div class="header-actions">
+            <el-button size="small" @click="reloadAll" :loading="loading">刷新</el-button>
+          </div>
+        </el-header>
+
+        <el-main>
+          <!-- 2026-08-30：概览页已合并进「Agent 分配置」（余额/用量已搬过去），旧入口删除 -->
+
+          <!-- ══ Agent 分配置（独立 React 页）══ -->
+          <div v-show="tab==='agents'">
+            <iframe src="/agents-settings" style="width:100%;height:84vh;border:1px solid #2a3346;border-radius:8px;background:#0f1419" title="Agent 分配置"></iframe>
+          </div>
+
+          <!-- ══ 运行时管理（独立 React 页）══ -->
+          <div v-show="tab==='runtimes'">
+            <iframe src="/runtimes-settings" style="width:100%;height:84vh;border:1px solid #2a3346;border-radius:8px;background:#0f1419" title="运行时管理"></iframe>
+          </div>
+
+          <!-- ══ 总配置 · 模型（独立 React 页）══ -->
+          <div v-show="tab==='providers'">
+            <iframe src="/providers-settings" style="width:100%;height:84vh;border:1px solid #2a3346;border-radius:8px;background:#0f1419" title="总配置 · 模型"></iframe>
+          </div>
+
+          <!-- ══ 总配置 · MCP（独立 React 页）══ -->
+          <div v-show="tab==='mcps'">
+            <iframe src="/mcps-settings" style="width:100%;height:84vh;border:1px solid #2a3346;border-radius:8px;background:#0f1419" title="总配置 · MCP"></iframe>
+          </div>
+
+          <!-- ══ 看图配置（独立 React 看图配置页）══ -->
+          <div v-show="tab==='vision'">
+            <iframe src="/vision-settings" style="width:100%;height:84vh;border:1px solid #2a3346;border-radius:8px;background:#0f1419" title="看图配置"></iframe>
+          </div>
+
+          <!-- ══ 技能库（独立 React 技能设置页）══ -->
+          <div v-show="tab==='skills'">
+            <iframe src="/skill-settings" style="width:100%;height:84vh;border:1px solid #2a3346;border-radius:8px;background:#0f1419" title="技能库设置"></iframe>
+          </div>
+
+          <!-- ══ 语音能力（独立 React 语音设置页）══ -->
+          <div v-show="tab==='speech'">
+            <iframe src="/voice-settings" style="width:100%;height:80vh;border:1px solid #2a3346;border-radius:8px;background:#0f1419" title="语音设置"></iframe>
+          </div>
+
+          <!-- ══ 生图（独立 React 生图配置页）══ -->
+          <div v-show="tab==='comfy'">
+            <iframe src="/comfy-settings" style="width:100%;height:84vh;border:1px solid #2a3346;border-radius:8px;background:#0f1419" title="生图配置"></iframe>
+          </div>
+
+          <!-- ══ 注入（独立 React 注入配置页）══ -->
+          <div v-show="tab==='inject'">
+            <iframe src="/inject-settings" style="width:100%;height:84vh;border:1px solid #2a3346;border-radius:8px;background:#0f1419" title="注入配置"></iframe>
+          </div>
+        </el-main>
+      </el-container>
+    </el-container>
+  </div>
+
+  <script src="./assets/app.js"></script>
+</body>
+</html>
+

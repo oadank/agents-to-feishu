@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>总配置 · MCP</title>
+  <style>
+    :root {
+      --bg: #0f1419; --card: #1a212b; --border: #3d4b6a; --text: #e6e9ef; --dim: #9aa3ad;
+      --accent: #4b6fff; --ok: #34c759; --err: #ff5f57; --warn: #f5a623;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, "Microsoft YaHei", sans-serif; font-size: 13px; line-height: 1.6; }
+    .wrap { max-width: 1000px; margin: 0 auto; padding: 18px; }
+    h1 { font-size: 18px; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+    .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .pcard { background: var(--card); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; box-shadow: 0 1px 6px rgba(0,0,0,.25); }
+    .phead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 14px; cursor: pointer; user-select: none; }
+    .phead .name { font-weight: 600; font-size: 14px; }
+    .phead .chev { margin-left: auto; color: var(--dim); font-size: 12px; flex: none; }
+    .pbody { padding: 12px 14px 14px; border-top: 1px solid var(--border); }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0; align-items: center; }
+    label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); flex: 1 1 45%; min-width: 180px; }
+    input[type=text], input[type=number], select, textarea {
+      background: #0f1419; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12.5px; width: 100%; font-family: inherit;
+    }
+    .tag { font-size: 10.5px; border-radius: 4px; padding: 1px 6px; border: 1px solid var(--border); color: var(--dim); flex: none; }
+    .tag.warn { color: var(--warn); border-color: rgba(245,166,35,.4); }
+    .btn { background: rgba(128,128,128,.15); border: none; border-radius: 6px; color: var(--text); padding: 5px 14px; font-size: 12px; cursor: pointer; font-weight: 600; }
+    .btn:hover { background: rgba(128,128,128,.28); }
+    .btn.primary { background: var(--accent); color: #fff; }
+    .btn.danger { background: rgba(255,95,87,.15); color: #ff5f57; }
+    .btn.mini { padding: 2px 8px; font-size: 11px; }
+    .dim { color: var(--dim); font-size: 12px; }
+    .err { color: var(--err); font-size: 12px; }
+    .ok { color: var(--ok); }
+    .model-row { display: flex; gap: 8px; margin: 6px 0; align-items: center; }
+    .model-row input { flex: 1; min-width: 0; }
+    .model-row input.mid { flex: 2; }
+    .model-row input.mlen { flex: 0 0 120px; width: 120px; }
+    .sub { font-weight: 600; font-size: 13px; margin: 10px 0 4px; color: var(--text); }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="root"></div>
+  <script src="./assets/vendor/preact.js"></script>
+  <script src="./assets/vendor/preact-hooks.js"></script>
+  <script src="./mcps-settings.js"></script>
+</body>
+</html>

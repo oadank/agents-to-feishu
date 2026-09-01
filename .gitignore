@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.log
+debug_*.log
+config.env
+.env
+*.bak
+*.bak-*
+backup/
+logs/
+nssm-backups/
+_removed-overview-backup/
+.mimocode/

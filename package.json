@@ -1,0 +1,35 @@
+{
+  "name": "agents-to-feishu",
+  "version": "0.1.0",
+  "description": "把 AI 编码 Agent 桥接到飞书/Lark —— 从零自研，干净架构",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "node scripts/build.mjs",
+    "start": "node dist/daemon.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.250",
+    "@larksuiteoapi/node-sdk": "^1.59.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "markdown-it": "^14.1.1",
+    "pg": "^8.23.0",
+    "preact": "^10.29.8",
+    "ws": "^8.21.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.1.0",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.23.1",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.23.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
