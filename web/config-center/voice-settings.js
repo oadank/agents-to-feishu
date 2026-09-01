@@ -84,6 +84,7 @@
     const [asrSample, setAsrSample] = useState(null); // {url, base64}
     const [asrResult, setAsrResult] = useState(null);
     const [previewErr, setPreviewErr] = useState(null);
+    const [previewDur, setPreviewDur] = useState(null);
 
     /* 隐形播放：new Audio 直接播（页面不摆可见播放条），再点=停止，与 input-tools 一致 */
     function playAudio(dataUrl, tag) {
@@ -192,7 +193,10 @@
 
     /* TTS 试听 */
     async function synthPreview(text, engine, voiceDesc, tag) {
+      setPreviewDur(null);
       const r = await api("/api/speech/tts-test", "POST", { text: text || ttsText, engine: engine, voiceDesc: voiceDesc });
+      const ms = r.data && typeof r.data.elapsedMs === "number" ? r.data.elapsedMs : null;
+      if (ms !== null) setPreviewDur(ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms");
       if (r.ok && r.data.dataUrl) playAudio(r.data.dataUrl, tag);
       else setPreviewErr(r.data.error || "合成失败");
     }
@@ -371,27 +375,27 @@
             h("button", { type: "button", class: "btn" + (ed ? " primary" : ""), style: { flex: "none" }, onClick: () => setEditing(Object.assign({}, editing, { local: !ed })) }, ed ? "保存" : "修改"),
             h("span", { class: "dim" }, ed ? "改完点保存（输入时已实时写入）" : "已锁定，点修改才能改"),
             PlayBtn("local", () => synthPreview(DEFAULT_TTS_TEXT, "local", undefined, "local"), { text: "试听本地 TTS" }),
+            previewDur !== null ? h("span", { class: "dim" }, "生成用时 " + previewDur) : null,
           ),
         );
       }
       if (engine === "audio8") {
-        const ed = !!editing.audio8;
-        const ro = ed ? {} : { disabled: true, style: { opacity: 0.65 } };
+        // [2026-09-01] 常驻服务直连：URL 只读展示；克隆音色下拉不锁（选了即保存）；
+        // 选项只显示音色名，不带 reference_text（老大明确不要导航那串字）
         const voiceNames = a8Voices.map(function (v) { return v.name; });
         const curVoice = (e.voice || "") || voiceNames[0] || "";
         return h("div", null,
-          h("div", { class: "dim", style: { marginBottom: 6 } }, "零样本克隆：每句都按参考音频克隆，纯 CPU（短句 ~8s、长句 30s+）。没有内置音色，音色在下面的下拉里选，或上传一段语音现场克隆。"),
+          h("div", { class: "dim", style: { marginBottom: 6 } }, "零样本克隆：每句都按参考音频克隆，纯 CPU（短句 ~8s、长句 30s+）。模型常驻内存（常驻服务 " + (e.url || "http://127.0.0.1:18795") + "），没有内置音色，音色在下面的下拉里选，或上传一段语音现场克隆。"),
           h("div", { class: "row" },
-            Field({ label: "CMD 命令" }, h("input", Object.assign({ type: "text", value: (e.cmd || ""), onInput: (ev) => patch("audio8", { cmd: ev.target.value }), placeholder: "node C:\\D\\opt\\audio8-tts\\audio8-tts.mjs" }, ro))),
-            Field({ label: "克隆音色" }, h("select", Object.assign({ value: curVoice, onInput: (ev) => patch("audio8", { voice: ev.target.value }) }, ro),
+            Field({ label: "常驻服务" }, h("input", { type: "text", value: (e.url || "http://127.0.0.1:18795"), disabled: true, style: { opacity: 0.65 }, title: "Audio8 常驻服务地址（模型常驻内存，nssm 服务 audio8-tts 提供）" })),
+            Field({ label: "克隆音色" }, h("select", { value: curVoice, onInput: (ev) => patch("audio8", { voice: ev.target.value }) },
               voiceNames.length
-                ? a8Voices.map(function (v) { return h("option", { value: v.name }, v.name + (v.text ? "（" + v.text.slice(0, 14) + "…）" : "")); })
+                ? a8Voices.map(function (v) { return h("option", { value: v.name }, v.name); })
                 : [h("option", { value: "" }, "(还没有注册过的音色)")])),
           ),
           h("div", { class: "row" },
-            h("button", { type: "button", class: "btn" + (ed ? " primary" : ""), style: { flex: "none" }, onClick: () => setEditing(Object.assign({}, editing, { audio8: !ed })) }, ed ? "保存" : "修改"),
-            h("span", { class: "dim" }, ed ? "改完点保存（输入时已实时写入）" : "已锁定，点修改才能改"),
             PlayBtn("audio8", () => synthPreview(DEFAULT_TTS_TEXT, "audio8", undefined, "audio8"), { text: "试听 Audio8 克隆" }),
+            previewDur !== null ? h("span", { class: "dim" }, "生成用时 " + previewDur) : null,
           ),
           h("div", { class: "divider" }),
           h("div", { class: "dim", style: { marginBottom: 6 } }, "上传一段语音克隆新音色（15~30 秒最像，mp3/wav ≤20MB）："),

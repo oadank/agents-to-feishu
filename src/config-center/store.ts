@@ -116,8 +116,9 @@ export interface SpeechConfig {
     };
     /** 本地 MeloTTS：URL 常驻服务优先，CMD 兜底 */
     local: { enabled: boolean; url: string; cmd: string };
-    /** 本地 Audio8 零样本克隆 TTS（音色须先注册到 C:\D\opt\audio8-tts\voices\） */
-    audio8: { enabled: boolean; cmd: string; voice: string };
+    /** 本地 Audio8 零样本克隆 TTS（音色须先注册到 C:\D\opt\audio8-tts\voices\）
+     *  url = 常驻服务地址（主路径，模型常驻内存）；cmd = CLI 兜底 */
+    audio8: { enabled: boolean; url: string; cmd: string; voice: string };
     /** 阿里 qwen3-tts-flash（dashscope） */
     ali: { enabled: boolean; apiKey: string; baseUrl: string; voice: string };
   };
@@ -259,7 +260,7 @@ export const DEFAULT_SPEECH: SpeechConfig = {
       enabled: false, samplePath: '', context: '', defaultId: '', samples: [],
     },
     local: { enabled: false, url: '', cmd: '' },
-    audio8: { enabled: false, cmd: 'node C:\\D\\opt\\audio8-tts\\audio8-tts.mjs', voice: 'xiaotuantuan' },
+    audio8: { enabled: false, url: 'http://127.0.0.1:18795', cmd: 'node C:\\D\\opt\\audio8-tts\\audio8-tts.mjs', voice: 'xiaotuantuan' },
     ali: { enabled: false, apiKey: '', baseUrl: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation', voice: 'Cherry' },
   },
   asr: {

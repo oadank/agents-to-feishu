@@ -44,8 +44,9 @@ export interface VoiceCloneTts {
 }
 export interface LocalTts { enabled: boolean; url: string; cmd: string }
 export interface AliTts { enabled: boolean; apiKey: string; baseUrl: string; voice: string }
-/** Audio8 本地零样本克隆 TTS（C:\D\opt\audio8-tts，音色须先注册到 voices/） */
-export interface Audio8Tts { enabled: boolean; cmd: string; voice: string }
+/** Audio8 本地零样本克隆 TTS（C:\D\opt\audio8-tts，音色须先注册到 voices/）
+ *  url = 常驻服务地址（主路径，模型常驻内存）；cmd = CLI 兜底（服务没起来时才会用到） */
+export interface Audio8Tts { enabled: boolean; url: string; cmd: string; voice: string }
 
 export interface TtsConfig {
   /** edge | xiaomi | voicedesign | voiceclone | local | audio8 | ali | auto */
@@ -366,10 +367,27 @@ export const AUDIO8_VOICES_DIR = path.join(AUDIO8_DIR, 'voices')
 /** Audio8 专用 python（项目 venv），注册音色 register_voice.py 用它跑 */
 export const AUDIO8_PY = path.join(AUDIO8_DIR, '.venv', 'Scripts', 'python.exe')
 
-// CLI 包装（audio8-tts.mjs）输出 mp3 到 stdout；音色须先注册到 C:\D\opt\audio8-tts\voices\。
-// 没有内置音色——每句话都是拿注册参考音频做克隆，注册/试听见 audio8-tts 目录。
-// 包装脚本内部自带常驻服务优先 + 冷启动兜底（见 audio8-tts.mjs），这里只管拉起。
+// 主路径 = 直连常驻服务（127.0.0.1:18795，模型常驻内存，省掉每次 spawn CLI + 等模型加载）；
+// 兜底 = CLI 包装（audio8-tts.mjs，输出 mp3 到 stdout），仅当常驻服务没起来时才走。
+// 没有内置音色——每句话都拿注册好的参考音频做克隆，音色须先注册到 C:\D\opt\audio8-tts\voices\。
 async function synthesizeAudio8(text: string, cfg: Audio8Tts): Promise<TtsResult | null> {
+  const voice = (cfg?.voice ?? '').trim()
+  const url = (cfg?.url ?? '').trim()
+  if (url !== '') {
+    try {
+      const r = await fetch(`${url.replace(/\/+$/, '')}/synthesize`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text, voice: voice === '' ? undefined : voice }),
+        // audio8 纯 CPU 推理慢（短句 ~15s、长句 30s+），超时给足
+        signal: AbortSignal.timeout(170_000),
+      })
+      if (r.ok) {
+        const buf = Buffer.from(await r.arrayBuffer())
+        if (buf.length > 1000) return { ok: true, format: 'wav', data: buf, engine: 'audio8' }
+      }
+    } catch { /* 服务没起来：掉到下面的 CLI 兜底 */ }
+  }
   const command = (cfg?.cmd ?? '').trim()
   if (command === '') return null
   try {
@@ -377,7 +395,6 @@ async function synthesizeAudio8(text: string, cfg: Audio8Tts): Promise<TtsResult
     const bin = parts[0]
     if (bin === undefined) return null
     const args = [...parts.slice(1)]
-    const voice = (cfg?.voice ?? '').trim()
     if (voice !== '') args.push('--voice', voice)
     args.push(text)
     // audio8 纯 CPU 推理慢（短句 ~10s、长句 30s+），超时给足 180s

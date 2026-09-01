@@ -950,12 +950,14 @@ export function createConfigServer(opts: ConfigServerOptions) {
         const text = String(body.text || '你好，这是一段语音试听。');
         const engine = String(body.engine || '');
         const voiceDesc = typeof body.voiceDesc === 'string' ? body.voiceDesc : undefined;
+        const t0 = Date.now();
         const r = await synthesize(text, store.speech?.tts as TtsConfig, engine || undefined, voiceDesc);
+        const elapsedMs = Date.now() - t0;
         if (r.ok && r.data) {
           const dataUrl = `data:audio/${r.format || 'mp3'};base64,${r.data.toString('base64')}`;
-          return json(res, 200, { ok: true, engine: r.engine, format: r.format, dataUrl, lenBytes: r.data.length });
+          return json(res, 200, { ok: true, engine: r.engine, format: r.format, dataUrl, lenBytes: r.data.length, elapsedMs });
         }
-        return json(res, 200, { ok: false, error: r.error });
+        return json(res, 200, { ok: false, error: r.error, elapsedMs });
       }
       // POST /api/speech/asr-test：测试 ASR 识别（body: { audioBase64, format? }）
       if (p === '/api/speech/asr-test' && method === 'POST') {
