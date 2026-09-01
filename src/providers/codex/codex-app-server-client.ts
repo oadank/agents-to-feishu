@@ -298,6 +298,13 @@ export class CodexAppServerClient {
   private async bootstrap(): Promise<void> {
     // 启动 codex app-server 时自动添加 bypass 参数，跳过权限审批
     // 这样飞书调用时不会频繁申请权限审批
+    // 2026-09-01：显式钉死 model_provider。共享的 ~/.codex/config.toml 被 Cumora 改成
+    // litellmchat（env_key=LITELLM_API_KEY，bot 环境里没有）→ 全部 codex bot 开局即
+    // "Missing environment variable: LITELLM_API_KEY"。bot 自带 provider（gw + GW_API_KEY），
+    // 不该被别人改共享配置带崩，故用 -c model_provider 覆盖。
+    const providerId = (process.env.CTI_BOT_CODEX_PROVIDER_ID || process.env.CTI_CODEX_PROVIDER_ID || '').trim();
+    const providerArgs = providerId ? ['-c', `model_provider=${providerId}`] : [];
+    if (providerId) console.log(`[codex] 钉死 model_provider=${providerId}（覆盖共享 config.toml）`);
     const proc = spawn(this.executable, [
       '--dangerously-bypass-hook-trust',
       'app-server',
@@ -305,6 +312,7 @@ export class CodexAppServerClient {
       '-c', 'require_confirmation=false',
       '-c', 'approval_policy=never',
       '-c', 'sandbox_mode=danger-full-access',
+      ...providerArgs,
     ], {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,

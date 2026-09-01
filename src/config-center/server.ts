@@ -900,11 +900,12 @@ export function createConfigServer(opts: ConfigServerOptions) {
         // 用 DEFAULT 补齐全引擎缺省字段，保证前端拿到的 speech 结构完整
         const s = store.speech ?? DEFAULT_SPEECH;
         const d = DEFAULT_SPEECH;
+        // 2026-09-01：tts 只白名单合并（此前 ...(s.tts ?? {}) 把历史写脏的嵌套 speech 段
+        // 一起带出来，前端 PUT 又原样回传 → 垃圾字段自我繁殖）
         const full: SpeechConfig = {
-          ...d,
-          ...s,
+          enabled: s.enabled ?? d.enabled,
           tts: {
-            ...d.tts, ...(s.tts ?? {}),
+            defaultEngine: s.tts?.defaultEngine ?? d.tts.defaultEngine,
             edge: { ...d.tts.edge, ...(s.tts?.edge ?? {}) },
             xiaomi: { ...d.tts.xiaomi, ...(s.tts?.xiaomi ?? {}) },
             voicedesign: { ...d.tts.voicedesign, ...(s.tts?.voicedesign ?? {}) },
@@ -924,8 +925,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
         const base = store.speech ?? DEFAULT_SPEECH;
         const newTts = body.tts ?? {};
         const tts = {
-          ...base.tts,
-          ...newTts,
+          defaultEngine: newTts.defaultEngine ?? base.tts?.defaultEngine ?? DEFAULT_SPEECH.tts.defaultEngine,
           edge: { ...(base.tts?.edge ?? DEFAULT_SPEECH.tts.edge), ...(newTts.edge ?? {}) },
           xiaomi: { ...(base.tts?.xiaomi ?? DEFAULT_SPEECH.tts.xiaomi), ...(newTts.xiaomi ?? {}) },
           voicedesign: { ...(base.tts?.voicedesign ?? DEFAULT_SPEECH.tts.voicedesign), ...(newTts.voicedesign ?? {}) },
@@ -935,8 +935,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
           ali: { ...(base.tts?.ali ?? DEFAULT_SPEECH.tts.ali), ...(newTts.ali ?? {}) },
         };
         store.speech = {
-          ...base,
-          ...body,
+          enabled: body.enabled ?? base.enabled ?? true,
           tts,
           asr: { ...(base.asr ?? DEFAULT_SPEECH.asr), ...(body.asr ?? {}) },
         };
@@ -1141,6 +1140,60 @@ export function createConfigServer(opts: ConfigServerOptions) {
           return json(res, 200, { ok: false, error: `注册音色失败: ${(e as Error)?.message ?? String(e)}` });
         }
         return json(res, 200, { ok: true, voice: name, text });
+      }
+      // 2026-09-01 Audio8 卡照「语音克隆」模板重做：原音可播 + 克隆声实时生成 + 保底音色不可删
+      const AUDIO8_SAFE_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+      /** 保底音色：老大给的克隆样例，永远保留（页面不给删除按钮，服务端也拒绝） */
+      const AUDIO8_BUNDLED_VOICE = 'xiaotuantuan';
+      const audio8VoiceDir = (name: string): string | null =>
+        AUDIO8_SAFE_NAME.test(name) ? path.join(AUDIO8_VOICES_DIR, name) : null;
+
+      // GET /api/speech/audio8/source?voice=xxx：播放该音色的参考原音（voices\<name>\reference.wav）
+      if (p === '/api/speech/audio8/source' && method === 'GET') {
+        const name = String(new URL(req.url ?? '', 'http://x').searchParams.get('voice') ?? '').trim();
+        const dir = audio8VoiceDir(name);
+        if (!dir) return json(res, 200, { ok: false, error: '音色名不合法' });
+        const src = path.join(dir, 'reference.wav');
+        if (!fs.existsSync(src)) return json(res, 200, { ok: false, error: `音色「${name}」没有参考原音文件` });
+        return json(res, 200, { ok: true, mediaType: 'audio/wav', data: fs.readFileSync(src).toString('base64') });
+      }
+      // POST /api/speech/audio8/preview：用该音色实时克隆一段（不落盘、不缓存，用完即弃）
+      if (p === '/api/speech/audio8/preview' && method === 'POST') {
+        const store = load();
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const name = String(body.voice ?? '').trim();
+        const text = String(body.text ?? '').trim() || '你好，这是用这段参考音克隆出来的声音。';
+        if (!AUDIO8_SAFE_NAME.test(name)) return json(res, 200, { ok: false, error: '音色名不合法' });
+        const dir = path.join(AUDIO8_VOICES_DIR, name);
+        if (!fs.existsSync(dir)) return json(res, 200, { ok: false, error: `音色「${name}」不存在` });
+        const base = store.speech?.tts ?? DEFAULT_SPEECH.tts;
+        const tts = { ...base, audio8: { ...(base.audio8 ?? DEFAULT_SPEECH.tts.audio8), voice: name } } as TtsConfig;
+        const t0 = Date.now();
+        // 第 3 参 engineOverride='audio8'：试听不自动降级，如实暴露该引擎的真实报错
+        const r = await synthesize(text, tts, 'audio8');
+        const elapsedMs = Date.now() - t0;
+        if (r.ok && r.data) {
+          return json(res, 200, {
+            ok: true, engine: 'audio8', format: r.format || 'wav', elapsedMs,
+            dataUrl: `data:audio/${r.format || 'wav'};base64,${r.data.toString('base64')}`,
+          });
+        }
+        return json(res, 200, { ok: false, error: r.error ?? '合成失败', elapsedMs });
+      }
+      // POST /api/speech/audio8/delete：删掉一个自己注册的音色（保底音色拒绝删除）
+      if (p === '/api/speech/audio8/delete' && method === 'POST') {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const name = String(body.voice ?? '').trim();
+        const dir = audio8VoiceDir(name);
+        if (!dir) return json(res, 200, { ok: false, error: '音色名不合法' });
+        if (name === AUDIO8_BUNDLED_VOICE) return json(res, 200, { ok: false, error: `「${name}」是保底音色，不能删` });
+        if (!fs.existsSync(dir)) return json(res, 200, { ok: false, error: `音色「${name}」不存在` });
+        try {
+          fs.rmSync(dir, { recursive: true, force: true });
+          return json(res, 200, { ok: true, voice: name });
+        } catch (e) {
+          return json(res, 200, { ok: false, error: `删除失败: ${(e as Error)?.message ?? String(e)}` });
+        }
       }
       // GET /api/speech/voice-design-samples：VoiceDesign 官方示例（预生成音频，简单术右侧播放）
       if (p === '/api/speech/voice-design-samples' && method === 'GET') {

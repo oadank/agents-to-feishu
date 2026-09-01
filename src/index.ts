@@ -368,7 +368,9 @@ async function handleIncoming(
   let isAudio = false;
 
   // 排查重复事件：记录每次 handleIncoming 触发
-  console.log(`[agents-to-feishu] handleIncoming chat=${chatId} mid=${fullId.slice(0, 24)} sender=${senderId.slice(0, 8)} msgType=${msg.message_type} text.len=${text.length}`);
+  // 2026-09-01：补文本预览——此前只打 text.len，bot 该回语音却只回文字时，日志里看不出
+  // 到底是用户没说"用语音"还是 wantsVoiceReply 漏判，只能靠猜（老大为此骂了半天）
+  console.log(`[agents-to-feishu] handleIncoming chat=${chatId} mid=${fullId.slice(0, 24)} sender=${senderId.slice(0, 8)} msgType=${msg.message_type} text.len=${text.length} text="${text.replace(/\s+/g, ' ').slice(0, 40)}"`);
   rtLog(`[handleIncoming] chat=${chatId} mid=${fullId.slice(0, 24)} text=${text.slice(0, 100)}`);
 
   // 命令消息豁免去重：命令幂等（重复执行无害），必须保证不被 SDK 重复 dispatch 在首次执行前判重跳过
@@ -611,9 +613,12 @@ function parseImageFileKey(content: string | undefined): string {
   }
 }
 
-/** 用户明确要求语音回复时（文字消息也回语音，对齐 DSH 语音规则 2） */
+/** 用户明确要求语音回复时（文字消息也回语音，对齐 DSH 语音规则 2）
+ *  2026-09-01 放宽：老正则只认"语音回复/用语音/发语音"等少数固定说法，
+ *  "说句话/念出来/读给我听/出个声/讲两句/语音来一段"全漏判 → bot 只回文字不出声。
+ *  判定口径：出现「语音|声音」且带回复意图，或明确的口语化"念/读/说给我听"类指令。 */
 function wantsVoiceReply(text: string): boolean {
-  return /(发个?语音|语音回复|用语音|语音回答|说个?语音|语音回我|用声音回|发语音|语音说)/i.test(text);
+  return /((发|说|来|讲|播|念|读|整|给|回|用|听)[^\n]{0,4}(语音|声音))|((语音|声音)[^\n]{0,4}(回复|回答|回我|回话|回个|来说|说|讲|播|念|读|来|发|给我|听))|(念出来|读出来|说出来|念给|读给|说给|念一|读一|开口说|出个?声|说句话|讲两句|说两句|来一段)/i.test(text);
 }
 
 /** 解析 post 富文本里的内嵌图片 key（用户粘贴图+文字一起发就是 post；此前 img 元素被静默丢弃） */

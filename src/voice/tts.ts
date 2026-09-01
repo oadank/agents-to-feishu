@@ -66,6 +66,7 @@ export interface TtsResult {
   data?: Buffer
   engine?: string
   error?: string
+  degradedFrom?: string  // 2026-09-01：首选引擎失败、自动降级时记录原引擎
 }
 
 /** 语音设计年龄标签（对齐 dsh-input-tools AI_AGE_LABELS） */
@@ -453,7 +454,11 @@ export async function synthesize(
   const xiaomiKey = cfg?.xiaomi?.apiKey ?? ''
   const xiaomiBase = (cfg?.xiaomi?.baseUrl || 'https://api.xiaomimimo.com/v1').replace(/\/+$/, '')
 
-  switch (engine) {
+  const runEngine = async (e: string): Promise<TtsResult> => runOne(e)
+
+  // 单引擎分发（原 switch 抽成函数，供主引擎 + 降级链复用）
+  async function runOne(e: string): Promise<TtsResult> {
+  switch (e) {
     case 'edge':
       return (await synthesizeEdge(text, cfg?.edge)) ?? { ok: false, error: `Edge TTS 失败（voice 缺失）` }
     case 'xiaomi':
@@ -481,6 +486,27 @@ export async function synthesize(
       if (cfg?.ali?.enabled === false) return { ok: false, error: '阿里 TTS 未启用' }
       return (await synthesizeAli(text, cfg?.ali)) ?? { ok: false, error: '阿里 TTS 配置不完整（缺 apiKey）' }
     default:
-      return { ok: false, error: `未知 TTS 引擎: ${engine}` }
+      return { ok: false, error: `未知 TTS 引擎: ${e}` }
   }
+  }
+
+  const primary = await runEngine(engine)
+  // 手动试听（engineOverride）不降级：要如实暴露该引擎的报错，否则页面永远绿
+  if (primary.ok || engineOverride) return primary
+
+  // 2026-09-01 自动降级：首选引擎挂了不能把语音回复整个吞掉（老大实测 bot 只回文字不出声）。
+  // 依次退到其它可用引擎，保证"发语音 ⇒ 回语音"，降级原因写日志与 degradedFrom 便于定位。
+  const fallbackChain = ['local', 'edge', 'voiceclone', 'xiaomi'].filter((e) => e !== engine)
+  for (const fb of fallbackChain) {
+    try {
+      const r = await runEngine(fb)
+      if (r.ok) {
+        console.warn(`[tts] 引擎 ${engine} 失败（${primary.error}），已自动降级到 ${fb}`)
+        return { ...r, engine: fb, degradedFrom: engine }
+      }
+    } catch (e) {
+      console.warn(`[tts] 降级引擎 ${fb} 抛错: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+  return primary
 }
