@@ -283,8 +283,10 @@ async function synthesizeVoiceDesign(
     const gKey = cfg?.aiGender === 'male' ? 'male' : cfg?.aiGender === 'female' ? 'female' : ''
     const aKey = AI_AGE_LABELS[cfg?.aiAge ?? ''] !== undefined ? cfg.aiAge : ''
     const identity = ageGenderIdentity(aKey, gKey)
-    const lockG = cfg?.lockGender === true
-    const lockA = cfg?.lockAge === true
+    // [2026-09-01 #29] 老大定稿：性别/年龄下拉本身就是锁，锁 checkbox 已删——
+    // 只要选了（或不限=「每次一致」）一律按硬锚点写进身份要求，不再看 lockGender/lockAge 开关
+    const lockG = true
+    const lockA = true
     // [2026-09-01] 对齐 dsh-input-tools：质感锁定选项已删（三池按年龄分档，身份天然稳定）
     const gLabel = gKey === 'male' ? '男' : gKey === 'female' ? '女' : ''
     const aLabel = AI_AGE_LABELS[aKey] ?? ''

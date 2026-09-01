@@ -21,6 +21,28 @@
   }
   const DEFAULT_TTS_TEXT = "你好，这是一段语音试听。";
   const BUNDLED_CLONE_ID = "8da38fcc-b041-4f5b-86b9-901956016f89"; // 自带默认样本（小团团）：禁删
+  // [2026-09-01 #29] 语音设计三选一（对齐 dsh-web）：examples=官方示例 / custom=设计音色 / ai=AI 自由发挥。
+  // 官方示例三条全文抄 dsh-input-tools client.js（instruct=音色指令，选中即写入 context；text=试听文本，仅作展示）
+  const VD_KEYS = ["asmr", "docu", "elder"];
+  const VOICE_DESIGN_EXAMPLES = [
+    {
+      key: "asmr", title: "ASMR 双耳女声",
+      instruct: "年轻的女性声音，近距离的聆听效果，带有双耳刺激的ASMR感。可以听到她的呼吸声、轻微的吞咽声，以及轻柔的自然唇音。她的说话速度非常慢，营造出一种极度放松且沉浸式的体验。",
+      text: "[在你耳边低语] 嘘……放松点，再靠近一点吧。我现在就在你身边。慢慢、轻柔地呼吸，让思绪随着水流轻轻流淌，就像沉浸在温暖的水中一样。",
+    },
+    {
+      key: "docu", title: "纪录片旁白",
+      instruct: "一位中年男性，说标准普通话，嗓音低沉有磁性，带有轻微的沙哑质感，像纪录片旁白解说员，沉稳而有感染力。",
+      text: "当最后一缕阳光消失在地平线之下，这片沉睡了亿万年的大地开始显露它真正的面貌。在这寂静的荒野中，每一块岩石都记录着时间的流逝，每一阵风都在诉说着古老的故事。",
+    },
+    {
+      key: "elder", title: "年迈老先生旁白",
+      instruct: "一位年迈的老先生，说带北方口音的普通话，语速缓慢而沉稳，嗓音略带沙哑和沧桑感，仿佛一位饱经风霜的老爷爷在讲故事，充满岁月的智慧。",
+      text: "我这辈子啊，走南闯北六十多年。见过最热闹的集市，也见过最安静的戈壁。到头来才明白一个道理——这人哪，不在走了多远的路，在于记住了多少风景。年轻人，别光顾着赶路，偶尔也停下来看看天。",
+    },
+  ];
+  // 「设计音色」模式的内置默认描述（从官方示例切过来时自动填，用户自写的保留）——抄 dsh-web
+  const CUSTOM_VOICE_DEFAULT = "一位知性温柔的青年女性，说字正腔圆的普通话，声音沉稳放松，像深夜电台主播在耳边娓娓道来，气息平稳，尾音带着若有若无的笑意";
 
   async function api(url, method, body) {
     const opt = { method: method || "GET" };
@@ -56,6 +78,30 @@
       open ? h("div", { class: "map" }, props.children) : null,
     );
   }
+  // [2026-09-01 #29] 「？」帮助提示（对齐 dsh-web helpTip）：点一下展开/收起，弹层浮在按钮下方
+  function HelpTip(props) {
+    const [open, setOpen] = useState(false);
+    return h("span", { style: { position: "relative", display: "inline-flex", alignItems: "center", flex: "none" } },
+      h("button", {
+        type: "button", "aria-label": "帮助", title: "帮助",
+        style: {
+          border: "none", borderRadius: "999px", width: 16, height: 16, padding: 0,
+          background: open ? "var(--accent)" : "rgba(128,128,128,.25)", color: "inherit", cursor: "pointer",
+          fontSize: 10, fontWeight: 700, display: "inline-flex", alignItems: "center", justifyContent: "center",
+        },
+        onClick: () => setOpen(!open),
+      }, "?"),
+      open ? h("div", {
+        style: {
+          position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 60,
+          background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8,
+          padding: "10px 12px", boxShadow: "0 8px 24px rgba(0,0,0,.35)",
+          fontSize: 12, lineHeight: 1.7, minWidth: 280, maxWidth: 420,
+          color: "var(--dim)", textAlign: "left", whiteSpace: "normal",
+        },
+      }, props.text) : null,
+    );
+  }
 
   function App() {
     const [config, setConfig] = useState(null);
@@ -85,9 +131,8 @@
     const [a8CloneMsg, setA8CloneMsg] = useState(null);
     const [a8Dur, setA8Dur] = useState(null);        // 克隆声秒表（毫秒）：点按钮即跳，出声即停
     const a8TickerRef = useRef(null);
-    // 语音设计自定义
-    const [vdCustomText, setVdCustomText] = useState("年轻的女性声音，普通话标准，语速适中");
-    const [vdReadText, setVdReadText] = useState(DEFAULT_TTS_TEXT);
+    // [2026-09-01 #29] 语音设计三选一改造：custom 面板直接读写 config 的 context（改动即保存），
+    // 不再需要 vdCustomText/vdReadText 本地草稿 state（已删）
     // ASR
     const [asrSample, setAsrSample] = useState(null); // {url, base64}
     const [asrResult, setAsrResult] = useState(null);
@@ -376,53 +421,78 @@
       }
       if (engine === "voicedesign") {
         const vd = e || {};
+        // [2026-09-01 #29] 三选一（对齐 dsh-web vdMode 逻辑）：旧数据迁移——
+        // mode 非法/缺失（含旧 fixed）按 context 反推：=官方指令→对应示例；非空→custom；空→ai
+        const vdMode = (function () {
+          const m = vd.mode;
+          if (VD_KEYS.includes(m) || m === "custom" || m === "ai") return m;
+          const ctx = (vd.context || "").trim();
+          if (!ctx) return "ai";
+          const hit = VOICE_DESIGN_EXAMPLES.findIndex(function (ex) { return ex.instruct === ctx; });
+          return hit >= 0 ? VD_KEYS[hit] : "custom";
+        })();
+        const vdGroup = VD_KEYS.includes(vdMode) ? "examples" : vdMode; // 官方示例组在下拉归为一项
+        // 选中官方示例某条 = 音色指令写入 context + 模式切到该示例（第 3 参联动默认引擎，选中即生效）
+        const pickVdMode = function (key) {
+          const ex = VOICE_DESIGN_EXAMPLES[VD_KEYS.indexOf(key)];
+          patch("voicedesign", { mode: key, context: ex.instruct }, "voicedesign");
+        };
+        const pickVdGroup = function (g) {
+          if (g === "examples") { pickVdMode(VD_KEYS.includes(vdMode) ? vdMode : "asmr"); return; }
+          if (g === "custom") {
+            // 从官方示例切过来（context=官方指令）必须换成默认描述，不能拿非空当保留依据；用户自写的才保留
+            const ctx = (vd.context || "").trim();
+            const isOfficial = VOICE_DESIGN_EXAMPLES.some(function (ex) { return ex.instruct === ctx; });
+            patch("voicedesign", { mode: "custom", context: (!ctx || isOfficial) ? CUSTOM_VOICE_DEFAULT : vd.context }, "voicedesign");
+            return;
+          }
+          patch("voicedesign", { mode: "ai" }, "voicedesign");
+        };
         return h("div", null,
           h("div", { class: "dim", style: { marginBottom: 8 } }, "语音设计：给一段音色描述，AI 生成对应人声（需小米 key" + (hasMimoKey ? " ✓" : " ✗ 未配置") + "）"),
           h("div", { class: "row" },
-            // [2026-09-01] 选中即生效：模式/性别/年龄改动联动默认引擎=voicedesign（bot 语音回复走 defaultEngine）
-            Field({ label: "模式" }, h("select", { value: vd.mode || "ai", onInput: (ev) => patch("voicedesign", { mode: ev.target.value }, "voicedesign") },
-              [["ai", "AI 自动发挥"], ["fixed", "固定音色描述"]].map(function (p) { return h("option", { value: p[0] }, p[1]); }))),
+            // [2026-09-01 #29] 模式下拉三选一：选中哪个才显示哪个的配置项（对齐 dsh-web vdGroup）
+            Field({ label: "模式" }, h("select", { value: vdGroup, onInput: (ev) => pickVdGroup(ev.target.value) },
+              [["examples", "官方示例"], ["custom", "设计音色"], ["ai", "AI 自由发挥"]].map(function (p) { return h("option", { value: p[0] }, p[1]); }))),
           ),
-          (vd.mode === "ai") ?
-            h("div", null,
-              h("div", { class: "row" },
-                Field({ label: "固定性别" }, h("select", { value: vd.aiGender || "", onInput: (ev) => patch("voicedesign", { aiGender: ev.target.value }, "voicedesign") },
-                  [["", "不限"], ["male", "男"], ["female", "女"]].map(function (p) { return h("option", { value: p[0] }, p[1]); }))),
-                Field({ label: "年龄段" }, h("select", { value: normAiAge(vd.aiAge), onInput: (ev) => patch("voicedesign", { aiAge: ev.target.value }, "voicedesign") },
-                  Object.keys(AI_AGE_LABELS).map(function (k) { return h("option", { value: k }, AI_AGE_LABELS[k]); }))),
-              ),
-              h("div", { class: "row" },
-                h("label", { style: { fontSize: 12, color: "var(--dim)" } }, h("input", { type: "checkbox", checked: !!vd.lockGender, onChange: (ev) => patch("voicedesign", { lockGender: ev.target.checked }, "voicedesign") }), " 锁性别"),
-                h("label", { style: { fontSize: 12, color: "var(--dim)" } }, h("input", { type: "checkbox", checked: !!vd.lockAge, onChange: (ev) => patch("voicedesign", { lockAge: ev.target.checked }, "voicedesign") }), " 锁年龄"),
-              ),
-              h("div", { class: "row" }, PlayBtn("vd-ai", () => synthPreview(vdReadText || DEFAULT_TTS_TEXT, "voicedesign", undefined, "vd-ai"), { text: "试听 AI 音色" })),
-            )
-            :
-            h("div", null,
-              h("div", { class: "row" }, Field({ label: "音色描述指令" }, h("textarea", { rows: 3, value: vdCustomText, onInput: (ev) => setVdCustomText(ev.target.value), placeholder: "描述想要的音色（身份/质感/语气）" }))),
-              h("div", { class: "row" }, Field({ label: "试听文本" }, h("input", { type: "text", value: vdReadText, onInput: (ev) => setVdReadText(ev.target.value) }))),
-              h("div", { class: "row" },
-                PlayBtn("vd-custom", () => synthPreview(vdReadText || DEFAULT_TTS_TEXT, "voicedesign", vdCustomText, "vd-custom"), { text: "试听自定义" }),
-                h("button", { class: "btn", style: { flex: "none" }, onClick: () => patch("voicedesign", { context: vdCustomText }, "voicedesign") }, "保存此描述"),
-              ),
+          vdGroup === "examples" ? h("div", null,
+            h("div", { class: "dim", style: { marginBottom: 6 } }, "点单选框选中该音色（选中即生效，音色指令自动写入）；🔊 播预生成音频，不耗额度："),
+            VOICE_DESIGN_EXAMPLES.map(function (ex, i) {
+              const key = VD_KEYS[i];
+              const active = vdMode === key;
+              const s = vdSamples.find(function (x) { return x.key === key; });
+              return h("div", { key: key, class: "sample-row", style: { gap: 8, padding: "6px 8px", borderRadius: 6, border: active ? "1px solid var(--accent)" : "1px solid transparent", background: active ? "rgba(75,111,255,.14)" : "transparent" } },
+                h("input", { type: "radio", name: "vd-mode", checked: active, onChange: () => pickVdMode(key), title: "选中即用这个音色", style: { accentColor: "var(--accent)", cursor: "pointer", flex: "none", width: 14, height: 14, margin: 0 } }),
+                h("span", { style: { fontWeight: active ? 600 : 400, cursor: "pointer", flex: "none" }, onClick: () => pickVdMode(key) }, ex.title),
+                h("span", { style: { flex: 1 } }),
+                h(HelpTip, { text: h("div", null,
+                  h("div", null, h("b", { style: { color: "var(--text)" } }, "音色指令："), ex.instruct),
+                  h("div", { style: { marginTop: 6 } }, h("b", { style: { color: "var(--text)" } }, "试听文本："), ex.text.replace(/\[[^\]]*\]/g, "")),
+                ) }),
+                s ? h("button", { type: "button", class: "btn", style: { flex: "none" }, onClick: function () {
+                  if (previewing === "vd:" + key) { playAudio("", "vd:" + key); return; }
+                  playAudio("data:" + (s.mediaType || "audio/wav") + ";base64," + s.data, "vd:" + key);
+                } }, previewing === "vd:" + key ? "⏹ 停止" : "🔊 试听") : h("span", { class: "dim", style: { flex: "none" } }, "音频未生成"),
+              );
+            }),
+          )
+          : vdGroup === "custom" ? h("div", null,
+            h("div", { class: "row" }, Field({ label: "设计音色（音色描述指令，改动即保存）" }, h("textarea", { rows: 3, value: vd.context || "", onInput: (ev) => patch("voicedesign", { context: ev.target.value }, "voicedesign"), placeholder: CUSTOM_VOICE_DEFAULT }))),
+            h("div", { class: "row" },
+              PlayBtn("vd-custom", () => synthPreview(DEFAULT_TTS_TEXT, "voicedesign", undefined, "vd-custom"), { text: "试听设计音色" }),
+              h("span", { class: "dim" }, "切到其它选项会保留这段描述"),
             ),
-          h("div", { class: "divider" }),
-          h("div", { class: "dim", style: { marginBottom: 6 } }, "官方示例（预生成，点击直接播放，下方为音色指令与试听文本）："),
-          vdSamples.map(function (s) {
-            return h("div", { class: "sample-row", key: s.key, style: { flexDirection: "column", alignItems: "stretch", gap: 4, padding: "8px 0" } },
-              h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
-                h("span", { class: "name" }, s.title),
-                h("button", { type: "button", class: "btn", style: { flex: "none" }, onClick: function () {
-                  if (previewing === "vd:" + s.key) { playAudio("", "vd:" + s.key); return; }
-                  playAudio("data:" + (s.mediaType || "audio/wav") + ";base64," + s.data, "vd:" + s.key);
-                  setVdCustomText(s.instruct || "");
-                  setVdReadText(s.text && s.text.replace(/\[[^\]]*\]/g, "") || DEFAULT_TTS_TEXT);
-                } }, previewing === "vd:" + s.key ? "⏹ 停止" : "▶ 播放"),
-              ),
-              s.instruct ? h("div", { class: "dim", style: { fontSize: 11.5 } }, "🎙 音色指令：" + s.instruct) : null,
-              s.text ? h("div", { class: "dim", style: { fontSize: 11.5, color: "var(--text)" } }, "📝 试听文本：" + s.text.replace(/\[[^\]]*\]/g, "")) : null,
-            );
-          }),
+          )
+          : h("div", null,
+            // [2026-09-01 #29] 老大：性别/年龄下拉本身就是锁（后端已改为选择即硬锚点），锁 checkbox 删掉
+            h("div", { class: "row" },
+              Field({ label: "性别" }, h("select", { value: vd.aiGender || "", onInput: (ev) => patch("voicedesign", { aiGender: ev.target.value }, "voicedesign") },
+                [["", "不限"], ["male", "男"], ["female", "女"]].map(function (p) { return h("option", { value: p[0] }, p[1]); }))),
+              Field({ label: "年龄感" }, h("select", { value: normAiAge(vd.aiAge), onInput: (ev) => patch("voicedesign", { aiAge: ev.target.value }, "voicedesign") },
+                Object.keys(AI_AGE_LABELS).map(function (k) { return h("option", { value: k }, AI_AGE_LABELS[k]); }))),
+            ),
+            h("div", { class: "row" }, PlayBtn("vd-ai", () => synthPreview(DEFAULT_TTS_TEXT, "voicedesign", undefined, "vd-ai"), { text: "试听 AI 音色" })),
+          ),
         );
       }
       if (engine === "voiceclone") {

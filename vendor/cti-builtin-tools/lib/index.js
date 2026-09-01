@@ -531,8 +531,10 @@ async function synthesizeXiaomiVoiceDesign(text, cfg, globalCfg, voiceDesc, over
     const gKey = cfg?.aiGender === 'male' ? 'male' : cfg?.aiGender === 'female' ? 'female' : ''
     const aKey = AI_AGE_LABELS[cfg?.aiAge] !== undefined ? cfg.aiAge : ''
     const identity = ageGenderIdentity(aKey, gKey)
-    const lockG = cfg?.lockGender === true
-    const lockA = cfg?.lockAge === true
+    // [2026-09-01 #29] 老大定稿：性别/年龄下拉本身就是锁（checkbox 已删）——选择即硬锚点；
+    // 不限=「每次一致」。质感锁 lockT 仍按配置（lockTimbre）
+    const lockG = true
+    const lockA = true
     const lockT = cfg?.lockTimbre === true
     const gLabel = gKey === 'male' ? '男' : gKey === 'female' ? '女' : ''
     const aLabel = AI_AGE_LABELS[aKey] ?? ''
@@ -1890,7 +1892,8 @@ async function apply(ctx) {
             context: vd.mode === 'ai' ? '（AI 自动发挥模式不使用固定描述，只用锚点：性别/年龄感）' : (vd.context ?? '').slice(0, 300),
             emotion: vd.emotion === true,
             lock: {
-              gender: vd.lockGender === true, timbre: vd.lockTimbre === true, age: vd.lockAge === true,
+              // [2026-09-01 #29] 锁 checkbox 已删：性别/年龄下拉即锁，恒为 true；质感仍按配置
+              gender: true, timbre: vd.lockTimbre === true, age: true,
               genderValue: vd.aiGender ?? '', ageValue: AI_AGE_LABELS[vd.aiAge] ?? '',
             },
           },
