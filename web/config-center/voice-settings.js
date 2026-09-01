@@ -138,6 +138,13 @@
       (async function () { await api("/api/speech", "PUT", next); })();
       setPreviewErr(null);
     }
+    /* 保存 tts 顶层字段（如 defaultEngine）——不是某个引擎的子配置，patch() 管不到 */
+    function patchTts(obj) {
+      const next = Object.assign({}, config, { tts: Object.assign({}, config.tts, obj) });
+      setConfig(next);
+      (async function () { await api("/api/speech", "PUT", next); })();
+      setPreviewErr(null);
+    }
     function patchAsr(obj) {
       const next = Object.assign({}, config, { asr: Object.assign({}, config.asr || {}, obj) });
       setConfig(next);
@@ -354,9 +361,17 @@
       h("div", { class: "cols" },
         h("div", { class: "card" },
           h("div", { class: "card-header", onClick: () => setActiveEngine(null) },
-            h("select", { value: shownEngine, onClick: (ev) => ev.stopPropagation(), onInput: (ev) => setActiveEngine(ev.target.value), style: { minWidth: 180 } },
+            h("select", { value: shownEngine, onClick: (ev) => ev.stopPropagation(), onInput: (ev) => setActiveEngine(ev.target.value), style: { minWidth: 180 }, title: "切换要编辑哪个引擎的参数（不是设默认引擎）" },
               ENGINE_ORDER.map(function (en) { return h("option", { value: en }, ENGINE_LABEL[en]); })),
-            h("span", { class: "chev" }, "默认引擎：" + ENGINE_LABEL[tts.defaultEngine && ENGINE_ORDER.includes(tts.defaultEngine) ? tts.defaultEngine : "edge"]),
+            // [2026-09-01] 默认引擎此前是一行纯文本，改不动（只能靠改 JSON），换成下拉：选中即 PUT 保存
+            h("span", { class: "chev" }, "默认引擎："),
+            h("select", {
+              value: tts.defaultEngine && ENGINE_ORDER.includes(tts.defaultEngine) ? tts.defaultEngine : "edge",
+              onClick: (ev) => ev.stopPropagation(),
+              onInput: (ev) => patchTts({ defaultEngine: ev.target.value }),
+              style: { minWidth: 160 },
+              title: "所有 bot 语音回复用的引擎，选中即刻保存",
+            }, ENGINE_ORDER.map(function (en) { return h("option", { value: en }, ENGINE_LABEL[en]); })),
           ),
           h("div", { class: "map" }, EngineContent(shownEngine)),
         ),
