@@ -158,6 +158,8 @@ export interface AgentDef {
   /** 是否显示工具卡/分割线 */
   showToolCallCards: boolean;
   showAgentDivider: boolean;
+  /** 2026-09-01 是否显示思考层（💭 blockquote）；false = 卡片完全不展示思考过程 */
+  showThinkingCards: boolean;
   /** 默认工作目录（可选；缺省用 store.defaultWorkdir，再兜底 os.homedir()） */
   workdir?: string;
   /** 是否启用（false = 网页停用该 agent，不生成/不启动） */

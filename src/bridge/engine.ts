@@ -54,6 +54,8 @@ export interface EngineOptions {
   contextWindow?: number;
   /** 是否显示工具调用层 */
   showToolCallCards: boolean;
+  /** 是否显示思考层（💭 blockquote）；false = 不积累不渲染，卡片全程无思考过程 */
+  showThinkingCards: boolean;
   /** 是否显示 agent 分割线（Agent|Model|Provider|Session|Cache|平均） */
   showAgentDivider: boolean;
   /** 注入的 systemPrompt 内容（统一注入 + 独立注入拼接，来自 config.env）；空则只用内置默认 */
@@ -627,6 +629,8 @@ export class MessageEngine {
             scheduleTextFlush();
             break;
           case 'thinking':
+            // 2026-09-01 思考层显示开关：false = 不积累（流式/终态卡片都无 💭 块）
+            if (this.opts.showThinkingCards === false) break;
             if (ev.text.trim()) {
               layers.thinking = (layers.thinking + ev.text).slice(-THINKING_BUFFER_CAP);
               // 2026-08-31 修思考层闪烁：thinking chunk 高频（hermes 8000+ 条），每次都刷=整块重绘。

@@ -47,11 +47,15 @@
           providerId: props.agent.providerId, modelId: props.agent.modelId, mcps: (props.agent.mcps || []).slice(),
           port: props.agent.port, workdir: props.agent.workdir, enabled: props.agent.enabled !== false,
           systemPrompt: props.agent.systemPrompt || "",
+          showToolCallCards: props.agent.showToolCallCards !== false,
+          showThinkingCards: props.agent.showThinkingCards !== false,
+          showAgentDivider: props.agent.showAgentDivider !== false,
         };
       }
       return {
         id: "", displayName: "", appId: "", appSecret: "", providerId: (props.providers[0] && props.providers[0].id) || "", modelId: "",
         mcps: [], port: 13600, workdir: "C:\\D\\opt", enabled: true, systemPrompt: "",
+        showToolCallCards: true, showThinkingCards: true, showAgentDivider: true,
       };
     });
     const [saving, setSaving] = useState(false);
@@ -130,6 +134,23 @@
           h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
             h("span", { class: "dim" }, "启用"),
             h(Switch, { checked: f.enabled, onChange: () => upd({ enabled: !f.enabled }) }),
+          ),
+        ),
+        // 2026-09-01 卡片显示开关：工具层 / 思考层 / 状态栏（关 = 流式与最终卡片都不出现对应区块）
+        h("div", { class: "row" },
+          h("div", { style: { display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" } },
+            h("span", { style: { display: "flex", alignItems: "center", gap: 6 } },
+              h("span", { class: "dim", title: "回复卡片里的 🔧 工具执行代码块" }, "工具层"),
+              h(Switch, { checked: f.showToolCallCards, onChange: () => upd({ showToolCallCards: !f.showToolCallCards }) }),
+            ),
+            h("span", { style: { display: "flex", alignItems: "center", gap: 6 } },
+              h("span", { class: "dim", title: "回复卡片里的 💭 思考引用块" }, "思考层"),
+              h(Switch, { checked: f.showThinkingCards, onChange: () => upd({ showThinkingCards: !f.showThinkingCards }) }),
+            ),
+            h("span", { style: { display: "flex", alignItems: "center", gap: 6 } },
+              h("span", { class: "dim", title: "卡片底部的 Agent|Model|Provider|Session|Cache 状态行" }, "状态栏"),
+              h(Switch, { checked: f.showAgentDivider, onChange: () => upd({ showAgentDivider: !f.showAgentDivider }) }),
+            ),
           ),
         ),
         h("div", { class: "row" }, h("div", { style: { width: "100%" } },

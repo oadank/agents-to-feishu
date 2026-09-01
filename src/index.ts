@@ -256,6 +256,7 @@ async function main(): Promise<void> {
     contextWindow: bot.contextWindow,
     showToolCallCards: bot.showToolCallCards,
     showAgentDivider: bot.showAgentDivider,
+    showThinkingCards: bot.showThinkingCards,
     systemPrompt: bot.systemPrompt || undefined,
     speech: bot.speech,
       // 2026-08-31 自动回执：回复发出后，若该会话挂着派活登记，自动把回复转发给派活 bot

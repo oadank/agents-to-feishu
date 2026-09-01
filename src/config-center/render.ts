@@ -120,6 +120,7 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_MODEL_PROVIDER=${prov?.displayName || prov?.id || agent.providerId}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_SHOW_TOOL_CALL_CARDS=${agent.showToolCallCards}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_SHOW_AGENT_DIVIDER=${agent.showAgentDivider}`);
+  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_SHOW_THINKING_CARDS=${agent.showThinkingCards !== false}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_DASHBOARD_PORT=${agent.port}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_PROVIDER_ID=${agent.providerId || ''}`);
   // 状态栏显示模式（2026-08-30 老大要求二选一）：full=图标+文字 | icon=仅图标

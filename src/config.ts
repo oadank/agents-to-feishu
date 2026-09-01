@@ -30,6 +30,8 @@ export interface BotConfig {
   /** 是否显示工具调用卡片 / agent 分割线 */
   showToolCallCards: boolean;
   showAgentDivider: boolean;
+  /** 2026-09-01 是否显示思考层（💭 blockquote） */
+  showThinkingCards: boolean;
   /** dashboard 端口 */
   dashboardPort: number;
   /** 允许的用户列表（* = 所有人） */
@@ -161,6 +163,7 @@ export function loadConfig(opts: LoadOptions = {}): { global: Record<string, str
     contextWindow: Number(get('CONTEXT_WINDOW', '') || '') || undefined,
     showToolCallCards: bool(get('SHOW_TOOL_CALL_CARDS'), true),
     showAgentDivider: bool(get('SHOW_AGENT_DIVIDER'), true),
+    showThinkingCards: bool(get('SHOW_THINKING_CARDS'), true),
     dashboardPort: parseInt(get('DASHBOARD_PORT', '13590') || '13590', 10),
     allowedUsers,
     defaultWorkdir: env.CTI_DEFAULT_WORKDIR ?? global.CTI_DEFAULT_WORKDIR ?? process.env.CTI_USER_HOME ?? os.homedir() ?? '',

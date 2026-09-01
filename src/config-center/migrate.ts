@@ -29,7 +29,7 @@ function parseEnv(text: string): Record<string, string> {
   return out;
 }
 
-export function migrateAgents(opts: { oldEnvFile?: string; dry?: boolean } = {}): { agents: Omit<AgentDef, 'workdir' | 'enabled' | 'showToolCallCards' | 'showAgentDivider'>[]; created: string[] } {
+export function migrateAgents(opts: { oldEnvFile?: string; dry?: boolean } = {}): { agents: Omit<AgentDef, 'workdir' | 'enabled' | 'showToolCallCards' | 'showAgentDivider' | 'showThinkingCards'>[]; created: string[] } {
   const oldFile = opts.oldEnvFile || path.join(process.env.CTI_USER_HOME || 'C:\\Users\\oadan', '.agents-to-im', 'config.env');
   if (!fs.existsSync(oldFile)) throw new Error(`老配置不存在: ${oldFile}`);
 
@@ -48,7 +48,7 @@ export function migrateAgents(opts: { oldEnvFile?: string; dry?: boolean } = {})
   const defaultProvider = store.providers[0]?.id || '';
   const defaultModel = store.providers[0]?.models[0]?.id || '';
 
-  const agents: Omit<AgentDef, 'workdir' | 'enabled' | 'showToolCallCards' | 'showAgentDivider'>[] = [];
+  const agents: Omit<AgentDef, 'workdir' | 'enabled' | 'showToolCallCards' | 'showAgentDivider' | 'showThinkingCards'>[] = [];
   const created: string[] = [];
 
   const PORTS: Record<string, number> = {
@@ -71,6 +71,7 @@ export function migrateAgents(opts: { oldEnvFile?: string; dry?: boolean } = {})
       port: PORTS[id] ?? (13600 + store.agents.length),
       showToolCallCards: true,
       showAgentDivider: true,
+      showThinkingCards: true,
       workdir: 'C:\\D\\opt',
       enabled: true,
     };
