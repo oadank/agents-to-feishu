@@ -116,10 +116,9 @@
         ),
 
         h("div", { class: "row" },
-          Field({ label: "状态栏样式" }, h("select", { value: f.dividerMode || "full", onInput: (e) => upd({ dividerMode: e.target.value }) },
-            h("option", { value: "full" }, "默认（图标 + 文字）"),
-            h("option", { value: "text" }, "文字"),
-            h("option", { value: "icon" }, "图标"),
+          Field({ label: "状态栏样式" }, h("select", { value: (f.dividerMode === "icon" ? "full" : f.dividerMode) || "full", onInput: (e) => upd({ dividerMode: e.target.value }) },
+            h("option", { value: "full" }, "默认（图标 + 数值）"),
+            h("option", { value: "text" }, "带英文标签"),
             h("option", { value: "value" }, "仅数值"))),
           Field({ label: "思考深度" }, h("select", { value: f.thinkingLevel || "default", onInput: (e) => upd({ thinkingLevel: e.target.value }) },
             h("option", { value: "default" }, "默认"),

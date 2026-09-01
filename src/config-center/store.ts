@@ -168,8 +168,8 @@ export interface AgentDef {
   runtime?: string;
   /** 独立注入：该 agent 追加的 systemPrompt（拼接在统一注入之后，首条消息注入） */
   systemPrompt?: string;
-  /** 状态栏样式（2026-08-30 二选一，图标+文字太长）：icon=每段只图标 | text=每段只文字 */
-  dividerMode?: 'full' | 'icon' | 'text' | 'value';
+  /** 状态栏样式（2026-09-01 三选一，数值任何模式下都显示）：full=图标+数值（默认，旧 icon 值按 full 渲染） | text=英文标签+数值 | value=仅数值 */
+  dividerMode?: 'full' | 'text' | 'value' | (string & {});
   /** 思考深度：default=按 runtime 默认 | off=关闭思考提效 | high=强制深度思考（按 runtime 写对应键） */
   thinkingLevel?: 'default' | 'off' | 'high';
   /** 飞书内置能力白名单（2026-08-30 内置化）：缺省=全开。可选值 list_chats/chat_history/send_text/lookup_user/send_image */

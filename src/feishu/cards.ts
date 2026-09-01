@@ -72,11 +72,10 @@ const DIV_IC: Record<string, string> = {
 
 export function buildDividerText(info: DividerInfo): string {
   const show = (f: string) => !info.fields || !info.fields.length || info.fields.includes(f);
-  // 2026-08-30 三模式（按老大给的样例精确实现）：
-  // icon  = 🤖 DSH｜⚙️ glm5.3｜☁️ Ark｜📁 …（图标+文字，全角｜）
-  // text  = Agent: openakita | Model: … | Provider: … | Session: … | Cache: … | 平均: … | Balance: …（带标签，半角 | ）
+  // 2026-09-01 三模式（数值在任何模式下都必须显示，只是标注方式不同）：
+  // full（默认/含旧 icon）= 🤖 DSH｜⚙️ glm5.3｜☁️ Ark｜📁 …（图标+数值，全角｜）
+  // text  = Agent: openakita | Model: … | Provider: … | Session: … | Cache: … | 平均: … | Balance: …（带英文标签，半角 | ）
   // value = openakita | ark-deepseek-v4 | Ar | feb1c821 | 36.42% | 36.42% | ⏱️ 5h0% … | ¥95.55（只有值，无图标无标签）
-  const iconOnly = info.dividerMode === 'icon';
   const textMode = info.dividerMode === 'text';
   const valueMode = info.dividerMode === 'value';
   const parts: string[] = [];
@@ -112,10 +111,9 @@ export function buildDividerText(info: DividerInfo): string {
     const u = usageStr(); if (show('usage') && u) parts.push(`⏱️ ${u}`);
     const b = balanceStr(); if (show('balance') && b) parts.push(b);
   } else {
-    // 图标版（默认/full）：图标+文字
-    const push = (f: string, icon: string, txt: string | null | undefined, keepNum = false): void => {
+    // 图标版（默认/full，含旧 icon 值）：图标+数值
+    const push = (f: string, icon: string, txt: string | null | undefined): void => {
       if (!show(f)) return;
-      if (iconOnly) { parts.push(keepNum && txt ? `${icon} ${txt}` : icon); return; }
       parts.push(txt ? `${icon} ${txt}` : icon);
     };
     push('agent', DIV_IC.agent, info.agent);
@@ -123,15 +121,15 @@ export function buildDividerText(info: DividerInfo): string {
     push('provider', DIV_IC.provider, info.provider);
     push('dir', DIV_IC.dir, info.dir);
     push('session', DIV_IC.session, info.session);
-    push('cache', DIV_IC.cache, info.cacheHitRate != null ? info.cacheHitRate.toFixed(2) + '%' : null, true);
-    push('avg', DIV_IC.avg, info.cacheAvgRate != null ? info.cacheAvgRate.toFixed(2) + '%' : null, true);
+    push('cache', DIV_IC.cache, info.cacheHitRate != null ? info.cacheHitRate.toFixed(2) + '%' : null);
+    push('avg', DIV_IC.avg, info.cacheAvgRate != null ? info.cacheAvgRate.toFixed(2) + '%' : null);
     if (show('context') && info.contextPercent != null) {
       const used = info.contextUsed ?? 0;
       const limit = info.contextLimit ?? 0;
-      push('context', DIV_IC.context, `${info.contextPercent.toFixed(0)}%(${(used / 1000).toFixed(0)}K/${(limit / 1000).toFixed(0)}K)`, true);
+      push('context', DIV_IC.context, `${info.contextPercent.toFixed(0)}%(${(used / 1000).toFixed(0)}K/${(limit / 1000).toFixed(0)}K)`);
     }
-    push('usage', DIV_IC.usage, usageStr(), true);
-    push('balance', DIV_IC.balance, balanceStr(), true);
+    push('usage', DIV_IC.usage, usageStr());
+    push('balance', DIV_IC.balance, balanceStr());
   }
   const text = parts.join(textMode || valueMode ? ' | ' : '｜');
   if (text.length === 0) return 'Agent: N/A';
