@@ -1081,12 +1081,16 @@ export function createConfigServer(opts: ConfigServerOptions) {
             .map((d) => {
               let text = '';
               let createdAt = '';
+              // 2026-09-01：音色 id 只能字母数字（register_voice.py 限制 + 目录名），
+              // 但显示名可以是中文（如 xiaotuantuan → 小团团），存在 meta.json 的 display 字段
+              let display = '';
               try {
                 const meta = JSON.parse(fs.readFileSync(path.join(AUDIO8_VOICES_DIR, d.name, 'meta.json'), 'utf8')) as Record<string, unknown>;
                 text = String(meta.reference_text ?? meta.text ?? '').slice(0, 200);
                 createdAt = String(meta.created_at ?? '');
+                display = String(meta.display ?? '');
               } catch { /* 没 meta.json 也照样列出来 */ }
-              return { name: d.name, text, createdAt };
+              return { name: d.name, display: display || d.name, text, createdAt };
             })
             .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
           return json(res, 200, { ok: true, voices: items });
@@ -1139,7 +1143,14 @@ export function createConfigServer(opts: ConfigServerOptions) {
         } catch (e) {
           return json(res, 200, { ok: false, error: `注册音色失败: ${(e as Error)?.message ?? String(e)}` });
         }
-        return json(res, 200, { ok: true, voice: name, text });
+        // 2026-09-01：把用户填的中文名写回 meta.json 的 display（音色 id 仍是英文，展示用中文）
+        try {
+          const metaPath = path.join(AUDIO8_VOICES_DIR, name, 'meta.json');
+          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as Record<string, unknown>;
+          meta.display = rawName || name;
+          fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+        } catch { /* display 写不进去不影响音色本身 */ }
+        return json(res, 200, { ok: true, voice: name, display: rawName || name, text });
       }
       // 2026-09-01 Audio8 卡照「语音克隆」模板重做：原音可播 + 克隆声实时生成 + 保底音色不可删
       const AUDIO8_SAFE_NAME = /^[A-Za-z0-9_-]{1,64}$/;

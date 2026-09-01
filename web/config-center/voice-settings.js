@@ -79,6 +79,8 @@
     const [a8Text, setA8Text] = useState("");
     const [a8Busy, setA8Busy] = useState(null);      // 正在实时生成克隆声的音色名（生成中禁用按钮）
     const [a8CloneMsg, setA8CloneMsg] = useState(null);
+    const [a8Dur, setA8Dur] = useState(null);        // 克隆声秒表（毫秒）：点按钮即跳，出声即停
+    const a8TickerRef = useRef(null);
     // 语音设计自定义
     const [vdCustomText, setVdCustomText] = useState("年轻的女性声音，普通话标准，语速适中");
     const [vdReadText, setVdReadText] = useState(DEFAULT_TTS_TEXT);
@@ -89,8 +91,9 @@
     const [previewDur, setPreviewDur] = useState(null); // 试听生成用时的实时秒表（按下即开始跳，出音频即停）
     const durTickerRef = useRef(null);
 
-    /* 隐形播放：new Audio 直接播（页面不摆可见播放条），再点=停止，与 input-tools 一致 */
-    function playAudio(dataUrl, tag) {
+    /* 隐形播放：new Audio 直接播（页面不摆可见播放条），再点=停止，与 input-tools 一致
+       2026-09-01：onStart 回调 = 真正开始出声的那一刻（Audio8 克隆声用它停秒表） */
+    function playAudio(dataUrl, tag, onStart) {
       if (previewTagRef.current === tag && previewRef.current) {
         try { previewRef.current.pause(); } catch {}
         previewRef.current = null; previewTagRef.current = null; setPreviewing(null);
@@ -100,6 +103,7 @@
       if (previewErr) setPreviewErr(null);
       const audio = new Audio(dataUrl);
       previewRef.current = audio; previewTagRef.current = tag; setPreviewing(tag);
+      if (onStart) audio.onplaying = () => { if (previewTagRef.current === tag) onStart(); };
       audio.onended = () => { if (previewTagRef.current === tag) { previewRef.current = null; previewTagRef.current = null; setPreviewing(null); stopDurTicker(); } };
       audio.onerror = () => { if (previewTagRef.current === tag) { previewRef.current = null; previewTagRef.current = null; setPreviewing(null); setPreviewErr("音频加载失败"); stopDurTicker(); } };
       audio.play().catch((e) => { if (previewTagRef.current === tag) { previewRef.current = null; previewTagRef.current = null; setPreviewing(null); setPreviewErr("播放失败: " + String(e && e.message || e)); stopDurTicker(); } });
@@ -147,7 +151,7 @@
         const as = await api("/api/speech/asr-sample");
         if (!dead && as.ok) setAsrSample({ url: "data:" + (as.data.mediaType || "audio/wav") + ";base64," + as.data.data, base64: as.data.data });
         const a8 = await api("/api/speech/audio8/voices");
-        if (!dead && a8.ok) setA8Voices(a8.data.voices || []);
+        if (!dead && a8.ok) setA8Voices(normA8Voices(a8.data.voices));
       })();
       return function () { dead = true; if (previewRef.current) { try { previewRef.current.pause(); } catch {} } };
     }, []);
@@ -169,6 +173,13 @@
       (async function () { await api("/api/speech", "PUT", next); })();
       setPreviewErr(null);
     }
+    /* 音色列表归一化：兼容旧格式（字符串数组），并保证 display 有值（中文显示名，缺省用 id） */
+    function normA8Voices(list) {
+      return (list || []).map(function (v) {
+        const name = typeof v === "string" ? v : v.name;
+        return { name: name, display: (typeof v === "string" ? name : (v.display || v.name || name)) };
+      });
+    }
     /* 上传一段参考音频 → ASR 转写 → 服务端注册成 Audio8 音色 */
     async function registerAudio8Voice() {
       const f = a8FileRef.current && a8FileRef.current.files ? a8FileRef.current.files[0] : null;
@@ -187,7 +198,7 @@
       setA8Registering(false);
       if (r.ok) {
         const v = await api("/api/speech/audio8/voices");
-        if (v.ok) setA8Voices(v.data.voices || []);
+        if (v.ok) setA8Voices(normA8Voices(v.data.voices));
         const s = await api("/api/speech"); if (s.httpOk) setConfig(s.data.speech);
         setA8Msg({ ok: true, text: "已注册音色「" + (r.data.voice || "") + "」" + (r.data.text ? "（逐字：" + r.data.text.slice(0, 30) + "…）" : "") });
         setA8Name(""); setA8Text("");
@@ -203,21 +214,38 @@
       if (r.ok) playAudio("data:" + (r.data.mediaType || "audio/wav") + ";base64," + r.data.data, "a8-src:" + name);
       else setPreviewErr(r.data.error || "读取原音失败");
     }
-    /** 克隆声：点一次现算一次（服务端不落盘不缓存，测试垃圾不会堆积）；秒表按下即跳、出声即停 */
+    /* Audio8 克隆声专用秒表（2026-09-01）：点「克隆声」那一瞬间开始跳秒，
+       合成期间一直跳，音频真正出声（onplaying）才停——秒数就显示在按钮后面那一行 */
+    function startA8Ticker() {
+      if (a8TickerRef.current) clearInterval(a8TickerRef.current);
+      const t0 = Date.now();
+      setA8Dur(0);
+      a8TickerRef.current = setInterval(function () { setA8Dur(Date.now() - t0); }, 100);
+    }
+    function stopA8Ticker(ms) {
+      if (a8TickerRef.current) { clearInterval(a8TickerRef.current); a8TickerRef.current = null; }
+      setA8Dur(typeof ms === "number" ? ms : null);
+    }
+    /** 秒表文案：跟在「🔊 克隆声」按钮后面同一行显示（老大：不要放第二行） */
+    function fmtA8Dur(ms) {
+      if (ms === null || ms === undefined) return "";
+      return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms";
+    }
+    /** 克隆声：点一次现算一次（服务端不落盘不缓存，测试垃圾不会堆积） */
     async function playAudio8Clone(name) {
       if (a8Busy) return;
       setA8CloneMsg(null);
       setA8Busy(name);
-      startDurTicker();
+      startA8Ticker();
+      const t0 = Date.now();
       const r = await api("/api/speech/audio8/preview", "POST", { voice: name, text: (ttsText || DEFAULT_TTS_TEXT) });
       setA8Busy(null);
-      const ms = r.data && typeof r.data.elapsedMs === "number" ? r.data.elapsedMs : null;
-      stopDurTicker();
-      if (ms !== null) setPreviewDur(ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms");
+      const ms = r.data && typeof r.data.elapsedMs === "number" ? r.data.elapsedMs : (Date.now() - t0);
       if (r.ok && r.data.dataUrl) {
-        playAudio(r.data.dataUrl, "a8-clone:" + name);
-        setA8CloneMsg({ ok: true, text: "「" + name + "」已实时克隆（" + (ms !== null ? (ms / 1000).toFixed(1) + "s" : "—") + "）" });
+        // 出声那一刻才停表（onplaying 回调），不是接口返回就停
+        playAudio(r.data.dataUrl, "a8-clone:" + name, () => stopA8Ticker(ms));
       } else {
+        stopA8Ticker(ms);
         setPreviewErr((r.data && r.data.error) || "克隆声生成失败");
       }
     }
@@ -226,7 +254,7 @@
       const r = await api("/api/speech/audio8/delete", "POST", { voice: name });
       if (!r.ok) { setA8Msg({ ok: false, text: (r.data && r.data.error) || "删除失败" }); return; }
       const v = await api("/api/speech/audio8/voices");
-      if (v.ok) setA8Voices(v.data.voices || []);
+      if (v.ok) setA8Voices(normA8Voices(v.data.voices));
       const s = await api("/api/speech"); if (s.httpOk) setConfig(s.data.speech);
       setA8Msg({ ok: true, text: "已删除音色「" + name + "」" });
     }
@@ -446,32 +474,38 @@
         const ro = ed ? {} : { disabled: true, style: { opacity: 0.65 } };
         const BUNDLED = "xiaotuantuan";
         const cur = (e.voice || "") || (a8Voices[0] && a8Voices[0].name) || "";
+        // 下拉只列一个音色也行（老大：现在就小团团一个，下拉显示 1 个就行）；显示中文 display，value 用英文 id
+        const selName = a8Voices.length === 0 ? "" : (a8Voices.some(function (v) { return v.name === cur; }) ? cur : a8Voices[0].name);
+        const disp = function (v) { return v.display || v.name; };
         return h("div", null,
-          h("div", { class: "dim", style: { marginBottom: 8 } },
-            "本地零样本克隆：拿一段参考语音克隆人声，纯 CPU 常驻服务（模型常驻内存，短句 ~8s）。原音=你上传的参考语音，克隆声=点一次实时生成一次。"),
           h("div", { class: "row" },
-            Field({ label: "常驻服务" }, h("input", Object.assign({
-              type: "text", value: (e.url || "http://127.0.0.1:18795"),
-              onInput: (ev) => patch("audio8", { url: ev.target.value }),
-              placeholder: "http://127.0.0.1:18795",
-              title: "Audio8 常驻服务地址（模型常驻内存，nssm 服务 audio8-tts 提供）",
-            }, ro))),
+            h("label", { class: "field", style: { flex: "0 1 320px", minWidth: "220px" } }, "常驻服务",
+              h("input", Object.assign({
+                type: "text", value: (e.url || "http://127.0.0.1:18795"),
+                onInput: (ev) => patch("audio8", { url: ev.target.value }),
+                placeholder: "http://127.0.0.1:18795",
+                title: "Audio8 常驻服务地址（模型常驻内存，nssm 服务 audio8-tts 提供）",
+              }, ro))),
             h("button", { type: "button", class: "btn" + (ed ? " primary" : ""), style: { flex: "none" }, onClick: () => setEditing(Object.assign({}, editing, { audio8: !ed })) }, ed ? "保存" : "修改"),
-            h("span", { class: "dim" }, ed ? "改完点保存（输入时已实时写入）" : "已锁定，点修改才能改"),
           ),
           h("div", { class: "divider" }),
-          h("div", { class: "dim", style: { marginBottom: 6 } }, "已保存的克隆音色（点名字=设为默认引擎音色）："),
-          (a8Voices.length === 0) ? h("div", { class: "dim" }, "暂无音色，可在下方上传一段参考语音") :
-            a8Voices.map(function (v) {
-              const isCur = v.name === cur;
-              const busy = a8Busy === v.name;
-              return h("div", { class: "clone-row", key: v.name },
-                h("button", { type: "button", class: "btn" + (isCur ? " primary" : ""), title: "设为默认音色", style: { flex: "none" }, onClick: () => patch("audio8", { voice: v.name }) }, (isCur ? "● " : "○ ") + v.name),
-                h("button", { type: "button", class: "btn", title: "播放参考原音", disabled: !!a8Busy, onClick: () => playAudio8Source(v.name) }, previewing === "a8-src:" + v.name ? "⏹" : "🔊 原音"),
-                h("button", { type: "button", class: "btn", title: "用这个音色实时克隆一段（每次都现算）", disabled: !!a8Busy, onClick: () => playAudio8Clone(v.name) }, busy ? "生成中…" : (previewing === "a8-clone:" + v.name ? "⏹" : "🔊 克隆声")),
-                (v.name === BUNDLED) ? null : h("button", { type: "button", class: "btn", title: "删除这个音色", style: { flex: "none", color: "#ff5f57" }, disabled: !!a8Busy, onClick: () => removeAudio8Voice(v.name) }, "✕"),
-              );
-            }),
+          (a8Voices.length === 0)
+            ? h("div", { class: "dim" }, "克隆列表：暂无音色，可在下方上传一段参考语音")
+            : h("div", { class: "row", style: { margin: "6px 0" } },
+                h("span", { class: "dim", style: { flex: "none" } }, "克隆列表："),
+                h("select", {
+                  value: selName, title: "选中即默认音色",
+                  onChange: (ev) => patch("audio8", { voice: ev.target.value }),
+                  style: { flex: "none", width: "150px" },
+                }, a8Voices.map(function (v) {
+                  return h("option", { key: v.name, value: v.name }, disp(v));
+                })),
+                h("button", { type: "button", class: "btn", title: "播放参考原音", style: { flex: "none" }, disabled: !!a8Busy, onClick: () => playAudio8Source(selName) }, previewing === "a8-src:" + selName ? "⏹" : "🔊 原音"),
+                h("button", { type: "button", class: "btn", title: "用这个音色实时克隆一段（每次都现算）", style: { flex: "none" }, disabled: !!a8Busy, onClick: () => playAudio8Clone(selName) }, (a8Busy === selName) ? "生成中…" : (previewing === "a8-clone:" + selName ? "⏹" : "🔊 克隆声")),
+                // 秒表跟在克隆声按钮后面同一行：点下去就跳，音频出声才停
+                h("span", { class: "dim", style: { flex: "none", fontVariantNumeric: "tabular-nums" }, title: "克隆声生成耗时（点到出声）" }, fmtA8Dur(a8Dur)),
+                (selName === BUNDLED) ? null : h("button", { type: "button", class: "btn", title: "删除这个音色", style: { flex: "none", color: "#ff5f57" }, disabled: !!a8Busy, onClick: () => removeAudio8Voice(selName) }, "✕"),
+              ),
           a8CloneMsg ? h("div", { class: "dim", style: { marginTop: 4 } }, a8CloneMsg.text) : null,
           h("div", { class: "divider" }),
           h("div", { class: "dim", style: { marginBottom: 6 } }, "添加克隆音色（上传语音作参考，mp3/wav/m4a ≤20MB，建议 15-30 秒）："),
