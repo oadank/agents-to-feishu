@@ -49,7 +49,7 @@ node scripts\setup.mjs --yes --creds creds.json --apps apps.json
 
 ```
 nssm start config-center   # 配置中心 :13600（没有这个服务就先 scripts\deploy-agents.ps1 -Start）
-curl http://127.0.0.1:13600/health
+curl http://127.0.0.1:13600/api/agents   # 有 JSON 即正常（没有 /health 路由，别用）
 for %b in (claude codex) do nssm start %b
 node scripts\feishu-verify.mjs claude "gh api user --jq .login"
 ```

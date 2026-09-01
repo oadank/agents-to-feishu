@@ -218,7 +218,7 @@ async function main() {
 
   // ⑦ 验证清单
   console.log('── ⑦ 验证（部署完成后逐条跑）──');
-  console.log(`  1. 配置中心: curl http://127.0.0.1:13600/health（没起就 nssm start config-center）`);
+  console.log(`  1. 配置中心: curl http://127.0.0.1:13600/api/agents 有 JSON 即正常（没起就 nssm start config-center）`);
   console.log(`  2. 每个服务: nssm status <bot>；日志 logs/<bot>-out.log / <bot>-err.log`);
   console.log(`  3. 飞书私信: node scripts/feishu-verify.mjs <bot> "gh api user --jq .login"`);
   console.log(`  4. 引擎补漏: 缺的引擎按上面 hint 安装后 nssm restart <bot>`);
