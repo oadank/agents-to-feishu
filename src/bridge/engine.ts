@@ -355,6 +355,7 @@ export class MessageEngine {
     // yes：立即中断当前任务，队列随即消费新消息
     try {
       await this.opts.provider.interrupt();
+      await this.opts.sessions?.interrupt(chatId); // [2026-09-02] 标记会话中断→下条消息保留历史（不再丢上下文）
     } catch (e) {
       console.warn(`[engine] interrupt failed:`, e);
     }
@@ -440,6 +441,10 @@ export class MessageEngine {
     const { provider, sessions } = this.opts;
     const session = sessions.getOrCreate(chatId);
     const fresh = sessions.consumeFresh(session);
+    // [2026-09-02 修复] 中断插队后保留历史：status==='interrupted'（卡片"是"/自动插队/或 /stop 触发）时，
+    // 下条消息把 session.context 作为 history 传给 provider，避免"新建会话丢上下文"。
+    const interrupted = session.status === 'interrupted';
+    if (interrupted) session.status = 'running'; // 消费中断标记（仅一次）
 
     // 状态条：可变，随流式更新取最新真实数据（ACP sessionId + 当日 stats 命中率）
     // Ark 用量 / 余额按 provider 分流【后台异步预取，不阻塞首屏】：卡片先出、用缓存旧值或
@@ -622,7 +627,7 @@ export class MessageEngine {
         freshSession: fresh,
         systemPrompt: this.buildSystemPrompt(),
         workdir: session.workdir,
-        ...(fresh && session.context.length > 0 ? { history: [...session.context] } : {}),
+        ...((fresh || interrupted) && session.context.length > 0 ? { history: [...session.context] } : {}),
       })) {
         switch (ev.type) {
           case 'text':

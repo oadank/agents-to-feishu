@@ -330,6 +330,15 @@ export class OpenClawProvider implements RuntimeProvider {
       fullPrompt = `${params.systemPrompt || ''}\n\n${params.text}`;
       session.personaInjected = true;
     }
+    // [2026-09-02 修复] 中断插队保留历史：仅 sessionInterrupted 注入 bridge 存的 session.context；
+    // /new（freshSession）清空白语义不注入；正常轮次靠 harness session 自带历史不注入。
+    const historyText = sessionInterrupted && params.history && params.history.length > 0
+      ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
+      : '';
+    if (historyText) {
+      fullPrompt = `${historyText}\n\n---\n\n${fullPrompt}`;
+      rtLog(`[openclaw] interrupted: injected ${params.history?.length ?? 0} history turns into new session`);
+    }
 
     const child = this.child!;
     const promptId = this.nextId++;
