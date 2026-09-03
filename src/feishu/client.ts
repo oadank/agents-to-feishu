@@ -310,6 +310,18 @@ export class FeishuClient {
     });
   }
 
+  /** [2026-09-03] 发文件（file_key 需先上传）——视频/大文件等以文件消息投递，飞书端可预览/下载 */
+  async sendFile(chatId: string, fileKey: string): Promise<void> {
+    await this.sdk.im.message.create({
+      params: { receive_id_type: 'chat_id' },
+      data: {
+        receive_id: chatId,
+        msg_type: 'file',
+        content: JSON.stringify({ file_key: fileKey }),
+      },
+    });
+  }
+
   /** 上传文件到飞书，返回 file_key */
   async uploadFile(filePath: string, fileType: 'stream' | 'opus' | 'mp4' | 'pdf' | 'doc' | 'xls' | 'ppt' = 'stream'): Promise<string> {
     const fs = await import('node:fs');

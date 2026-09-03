@@ -11,6 +11,7 @@ import { FeishuClient } from './feishu/client.js';
 import { SessionManager } from './bridge/session.js';
 import { MessageEngine } from './bridge/engine.js';
 import { createDshProvider } from './providers/dsh.js';
+import { createDeeptutorProvider } from './providers/deeptutor.js';
 import { createOpenClawProvider } from './providers/openclaw.js';
 import { createOpencodeProvider } from './providers/opencode.js';
 import { createReasonixProvider } from './providers/reasonix.js';
@@ -140,6 +141,7 @@ function rtLog(msg: string): void {
 
 const BOT_RUNTIMES: Record<string, () => RuntimeProvider> = {
   dsh: createDshProvider,
+  deeptutor: createDeeptutorProvider,
   openclaw: createOpenClawProvider,
   opencode: createOpencodeProvider,
   reasonix: createReasonixProvider,

@@ -530,6 +530,8 @@ export class MessageEngine {
     const layers: TurnLayers = { text: '', thinking: '', toolLines: [] };
     let voiceText = ''; // agent 专门写的【语音】口语块；空=本回复无语音
     const pendingVoiceIds: string[] = []; // [2026-09-01] send_voice 工具产物（voiceId=sha256），本轮结束后投递到飞书
+    let deeptutorSpoken = ''; // [2026-09-03] deeptutor 语音口语稿（voice_reply 事件携带），结束走控制中心 TTS
+    const pendingMedia: Array<{ url: string; mime_type: string; filename: string }> = []; // [2026-09-03] deeptutor 图片/视频/文件兜底投递
     let hadError = false;
     let seq = 0;
 
@@ -622,7 +624,13 @@ export class MessageEngine {
       const turnStartTs = Date.now(); // litellm 中转 bot 补拉用量用（按时间窗过滤记账库）
       let gotRealUsage = false; // 只有"非全 0"的 usage 事件才算真实（gemini CLI 恒发 0 值事件）
       for await (const ev of provider.streamChat({
-        text: `${text}${VOICE_RULE_TURN}`,
+        text: `${text}${provider.name === 'deeptutor' ? '' : VOICE_RULE_TURN}`,
+        // [2026-09-03] deeptutor 语音标记：attachments 带 audio 项 = 本轮来自语音
+        // 消息，provider 据此给 DeepTutor 拼 [语音消息] 前缀触发其语音契约（自动
+        // 回语音 artifact，再由 sources 钩子投递）。其他 provider 忽略。
+        ...((provider.name === 'deeptutor' && opts?.replyAudio)
+          ? { attachments: [{ type: 'audio' as const, text: '' }] }
+          : {}),
         sessionKey: session.id,
         freshSession: fresh,
         systemPrompt: this.buildSystemPrompt(),
@@ -676,6 +684,17 @@ export class MessageEngine {
             scheduleFlush();
             break;
           }
+          // [2026-09-03] deeptutor 语音口语稿：DeepTutor 产出口语稿，实际发声走
+          // 控制中心 TTS（sendVoiceReply）——音色控制中心统一改、全局生效。
+          case 'voice_reply':
+            deeptutorSpoken = ev.text.trim();
+            console.log(`[engine] deeptutor 语音口语稿捕获 len=${deeptutorSpoken.length}`);
+            break;
+          // [2026-09-03] deeptutor 图片/视频/文件成品：收集待收尾统一投递飞书
+          case 'media_send':
+            pendingMedia.push({ url: ev.url, mime_type: ev.mime_type, filename: ev.filename });
+            console.log(`[engine] deeptutor 成品待投递: ${ev.filename} (${ev.mime_type})`);
+            break;
           case 'usage':
             if (ev.usage.inputTokens + ev.usage.outputTokens + (ev.usage.cacheReadTokens ?? 0) > 0) gotRealUsage = true;
             if (ev.sessionId) { acpSessionId = ev.sessionId; console.log(`[engine][usage] sessionId=${ev.sessionId.slice(0,8)} hit=${ev.usage.cacheReadTokens} input=${ev.usage.inputTokens}`); }
@@ -752,7 +771,9 @@ export class MessageEngine {
       // 语音回复：用户发的是语音（或要求语音）⇒ 必须回语音。
       // 2026-08-30 兜底（老大实测抓到）：模型没写【语音】块、或块太短（<4 字，reasonix 实测只写 2 字）
       // 时，用正文纯文本（去代码块/markdown，截 200 字）兜底 TTS——保证"发语音 → 回语音"。
-      if (opts?.replyAudio) {
+      // [2026-09-03] deeptutor 整段跳过：其语音走 DeepTutor 侧 TTS 契约（sources
+      // artifact → voiceId 钩子投递），不走桥接【语音】块，避免双语音。
+      if (opts?.replyAudio && provider.name !== 'deeptutor') {
         // 2026-08-30 诊断：语音分支入口必打日志（reasonix 曾静默跳过整个分支，无日志无法定位）
         console.log(`[engine] 语音分支: replyAudio=${!!opts?.replyAudio} voiceText.len=${voiceText.trim().length} speech.enabled=${this.opts.speech?.enabled !== false}`);
         let spoken = voiceText.trim();
@@ -787,6 +808,43 @@ export class MessageEngine {
           await this.sendVoiceObjectById(chatId, vid);
         } catch (e) {
           console.warn(`[engine] send_voice 投递失败 voiceId=${vid.slice(0, 26)}…: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      // [2026-09-03] deeptutor 语音投递：口语稿 → 控制中心 TTS（sendVoiceReply）→ opus → 飞书。
+      // 音色随控制中心语音配置全局变；失败只记日志不阻塞（文字回复已发出）。
+      if (deeptutorSpoken) {
+        try {
+          await this.sendVoiceReply(chatId, deeptutorSpoken);
+        } catch (e) {
+          console.warn(`[engine] deeptutor 语音投递失败: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      // [2026-09-03] deeptutor 图片/视频/文件成品投递：下载 → 按类型上传 → 发消息
+      // （image → 图片消息；video/其他 → 文件消息，飞书端可预览/下载）。
+      for (const m of pendingMedia) {
+        const tmpDir = path.join(os.tmpdir(), 'agents-to-feishu-media');
+        const ext = path.extname(m.filename) || (m.mime_type.includes('png') ? '.png' : m.mime_type.includes('jpeg') ? '.jpg' : '.bin');
+        const tmpFile = path.join(tmpDir, `media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
+        try {
+          fs.mkdirSync(tmpDir, { recursive: true });
+          const r = await fetch(m.url);
+          if (!r.ok) throw new Error(`下载失败 HTTP ${r.status}`);
+          const data = Buffer.from(await r.arrayBuffer());
+          if (data.length < 256) throw new Error(`文件过小 ${data.length}B`);
+          fs.writeFileSync(tmpFile, data);
+          if (m.mime_type.startsWith('image/')) {
+            const imageKey = await this.opts.feishu.uploadImage(tmpFile);
+            await this.opts.feishu.sendImage(chatId, imageKey);
+            console.log(`[engine] deeptutor 图片已投递 chat=${chatId} file=${m.filename} (${data.length}B)`);
+          } else {
+            const fileKey = await this.opts.feishu.uploadFile(tmpFile, 'stream');
+            await this.opts.feishu.sendFile(chatId, fileKey);
+            console.log(`[engine] deeptutor 文件已投递 chat=${chatId} file=${m.filename} (${data.length}B, ${m.mime_type})`);
+          }
+        } catch (e) {
+          console.warn(`[engine] deeptutor 成品投递失败 ${m.filename}: ${e instanceof Error ? e.message : String(e)}`);
+        } finally {
+          try { fs.unlinkSync(tmpFile); } catch { /* 忽略 */ }
         }
       }
     } catch (e) {

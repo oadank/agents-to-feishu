@@ -10,6 +10,14 @@ export type StreamEvent =
   | { type: 'text'; text: string } // 已提交的正文增量
   | { type: 'thinking'; text: string } // 思考层增量（可选）
   | { type: 'tool'; tool: string; input?: string; status?: 'running' | 'done' | 'error'; output?: string } // 工具调用；output=工具结果文本（dsh ACP rawOutput，send_voice 投递靠它拿 voiceId）
+  // [2026-09-03] deeptutor 语音回复：DeepTutor 只产出口语稿（artifact.transcript），
+  // 实际发声由桥接用控制中心 TTS 合成（engine.sendVoiceReply）——音色在控制中心
+  // 统一改，全局生效。
+  | { type: 'voice_reply'; text: string }
+  // [2026-09-03] deeptutor 图片/视频/文件兜底投递：DeepTutor 生成的成品 artifact
+  // （生图/生视频），url 为完整可下载地址。engine 收尾时下载并按类型发飞书
+  // （image → 图片消息；video/其他 → 文件消息）——不依赖模型"知道要发"。
+  | { type: 'media_send'; url: string; mime_type: string; filename: string }
   | { type: 'permission'; request: PermissionRequest } // 权限申请（卡片弹窗）
   | { type: 'question'; question: QuestionRequest } // AskUserQuestion 选择题/填空题（卡片弹窗）
   | { type: 'usage'; usage: UsageInfo; sessionId?: string } // token 统计（缓存命中率/上下文）；sessionId = ACP 真实会话 id（状态条显示用）
