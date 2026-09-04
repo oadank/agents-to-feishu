@@ -604,6 +604,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
           workdir: body.workdir ? String(body.workdir) : (store.defaultWorkdir || ''),
           enabled: body.enabled !== false,
           systemPrompt: body.systemPrompt ?? '',
+          runtime: body.runtime ? String(body.runtime) : undefined,
         };
         if (!agent.id || agent.id.includes('/') || agent.id.includes('\\')) {
           return json(res, 400, { error: 'id 必填且不能含路径分隔符' });
@@ -644,6 +645,8 @@ export function createConfigServer(opts: ConfigServerOptions) {
             dividerMode: body.dividerMode ?? a.dividerMode,
             thinkingLevel: body.thinkingLevel ?? a.thinkingLevel,
             feishuCaps: Array.isArray(body.feishuCaps) ? body.feishuCaps : a.feishuCaps,
+            // 2026-09-05 新增：runtime 透传（zcode 等新运行时经网页/API 建站时可选）
+            runtime: body.runtime ?? a.runtime,
           };
           save(store);
           // 2026-08-30 修复（老大：更改配置必须穿透）：此前只写 store 就返回 ⇒ CLI 配置文件
