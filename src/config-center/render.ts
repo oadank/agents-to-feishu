@@ -131,6 +131,13 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   // 真实模型 ID + 网关 base_url（provider 端读这两个跑真实值，而非只读展示标签 MODEL_GROUP）
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_MODEL=${model?.id || agent.modelId}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_BASE_URL=${acpGatewayBaseUrl(agent.id) || prov?.baseURL || ''}`);
+  if (agent.runtime === 'zcode') {
+    // zcode 穿透：真实 key 随 config.<bot>.env 下发，provider 组装 ZCode Protocol 的
+    // runtimeModel（inline apiKey）在 session/create|resume 时注入——网页切 provider/model
+    // → apply → 下条消息生效。key 来源与 claude 的 ANTHROPIC_AUTH_TOKEN 同源（凭证层）。
+    const zk = (prov?.apiKeyEnv ? (readCredentialKey(prov.apiKeyEnv) || readOldEnvKey(prov.apiKeyEnv)) : '') || '';
+    lines.push(`CTI_BOT_${agent.id.toUpperCase()}_API_KEY=${zk}`);
+  }
   lines.push('');
   // 注入（systemPrompt）：统一注入(全局) + 独立注入(该 agent)。值用 JSON 字符串编码，
   // loadConfig 读取时 JSON.parse 还原（支持多行/引号）。空字符串也写，保证键存在。

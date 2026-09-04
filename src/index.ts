@@ -21,6 +21,7 @@ import { createGeminiProvider } from './providers/gemini.js';
 import { createHermesProvider } from './providers/hermes.js';
 import { createCodexProvider } from './providers/codex.js';
 import { createClaudeProvider } from './providers/claude.js';
+import { createZcodeProvider } from './providers/zcode.js';
 import { handleCommand } from './commands.js';
 import type { RuntimeProvider } from './providers/types.js';
 import { transcribe } from './voice/asr.js';
@@ -151,6 +152,7 @@ const BOT_RUNTIMES: Record<string, () => RuntimeProvider> = {
   hermes: createHermesProvider,
   codex: createCodexProvider,
   claude: createClaudeProvider,
+  zcode: createZcodeProvider,
 };
 
 function resolveProvider(runtime: string): RuntimeProvider {

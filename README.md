@@ -33,6 +33,16 @@ config-store.json（唯一真相源：providers 池 / mcps 池 / agents 分配�
   `<home>/.agents-to-feishu/.credentials.yaml`（`KEY=value` 或 `KEY: value`）或直接在网页填。
 - 配置中心服务：nssm 服务名 `agentsconfig`，端口默认 13600，网页 `http://<host>:13600`。
 
+## ZCode 运行时接入（2026-09-05）
+
+第 12 个 agent：ZCode 桌面版内置 CLI 经 **ZCode Protocol**（`zcode.cjs app-server --stdio`，换行分隔 JSON，非 ACP）常驻接入。
+
+- **依赖**：ZCode 桌面版（CLI 位于 `C:\Program Files\ZCode\resources\glm\zcode.cjs`），`CTI_ZCODE_CLI` 可覆盖路径。
+- **配置穿透（唯一模型来源）**：config-store 选的 provider/model/key 经配置中心渲染进 `config.<bot>.env`，provider 读 `CTI_BOT_<ID>_MODEL / _BASE_URL / _API_KEY / _CONTEXT_WINDOW` 组装协议的 `runtimeModel`（inline apiKey），在 `session/create|resume` 时下发——网页切模型 → apply → 下条消息生效，不依赖也不修改 `~/.zcode/cli/config.json`。
+- **思考/工具卡**：provider 忠实产出 `thinking` / `tool` 流事件（思考=reasoning_delta、工具卡=tool.updated），engine 按配置中心 `showThinkingCards` / `showToolCallCards` 开关过滤——网页即可开关。
+- **会话**：sessionKey → zcode sessionId 映射落盘 `~/.agents-to-feishu/runtime/zcode-sessions.json`，桥接重启自动 `session/resume` 续上下文；`/new` 关闭重建；`/stop` 走 `session/stop`。
+- **冒烟**：`node node_modules/tsx/dist/cli.mjs scripts/zcode-smoke.mjs`（两轮对话验证流式 + 会话连续性 + 穿透）。
+
 ## 配置中心 API
 
 | 方法 | 路径 | 说明 |
