@@ -83,16 +83,24 @@ const RETRYABLE_RE = /502|503|504|429|backend request failed|ECONNRESET|ETIMEDOU
 const NON_RETRYABLE_RE = /permission|forbidden|content.?policy|invalid_api_key|authentication|api[_ ]?key|unauthorized|context.?length|max.?token|too long/i;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/** 从 ~/.dsh/.credentials.yaml 读 ANTHROPIC_AUTH_TOKEN（兜底） */
-function readAnthropicAuthToken(): string {  const explicit = process.env.ANTHROPIC_AUTH_TOKEN;
-  if (explicit) return explicit;
-  try {
-    const cred = `${process.env.USERPROFILE || process.env.HOME || 'C:\\Users\\oadan'}\\.dsh\\.credentials.yaml`;
-    const txt = fs.readFileSync(cred, 'utf-8');
-    const m = txt.match(/^\s*ANTHROPIC_AUTH_TOKEN\s*:\s*(\S+)/m);
-    if (m) return m[1];
-  } catch {}
-  return '';
+/**
+ * 读取 claude 子进程的门禁凭证 —— **唯一来源是配置中心**。
+ *
+ * [2026-09-04 老大定规矩] 凭证只能来自配置中心：配置中心把设置渲染成
+ * `config.<bot>.env`，进程启动时由 src/index.ts 灌进 process.env，这里直接读。
+ * **拿不到就返回空，由调用方明确报错 —— 绝不偷偷兜底、绝不去别的凭证文件里乱找。**
+ *
+ * 历史教训（已废弃的两版兜底，都错了）：
+ *   1. 去 `~/.dsh/.credentials.yaml` 找 `ANTHROPIC_AUTH_TOKEN:` —— 那个文件里
+ *      **根本没有这个键**（只有 LITELLM/ARK/GW/DEEPSEEK_API_KEY），兜底永远返回空；
+ *   2. 改成"按 baseUrl 挑 key"—— 虽然能读到正确值，但本质仍是让 claude 去读
+ *      **属于 dsh(DeepSeek Harness) 的凭证文件**，跨系统耦合，且把问题藏起来。
+ *
+ * 为什么必须响亮失败：静默退化成"没有 token 直连官方 API"，表现是各种莫名其妙
+ * 的 401/未登录，排查成本极高。不如当场说清楚"配置中心没给 key"。
+ */
+function readAnthropicAuthToken(): string {
+  return process.env.ANTHROPIC_AUTH_TOKEN || '';
 }
 
 /**
@@ -187,7 +195,15 @@ export class ClaudeProvider implements RuntimeProvider {
     }
     if (this.q) return;
     const queue = new PushQueue<{ type: 'user'; message: { role: 'user'; content: unknown[] }; parent_tool_use_id: null; shouldQuery: boolean }>();
+    // [2026-09-04] 凭证只认配置中心；拿不到就当场报错，不静默退化成直连官方 API。
     const authToken = readAnthropicAuthToken();
+    if (!authToken) {
+      throw new Error(
+        '[claude provider] ANTHROPIC_AUTH_TOKEN 未配置。凭证只能由配置中心写入 ' +
+          'config.<bot>.env（进程启动时灌进 process.env）；按规矩拿不到就直接报错，' +
+          '不去别的文件兜底。请到配置中心检查该 agent 的 provider / key 配置。',
+      );
+    }
     // 2026-08-31 坑（读 SDK 源码实锤）：sdk.mjs 里 `env = options.env ? {...options.env} : {...process.env}`
     // —— 传了 env 就【整体替换】子进程环境，不是合并！此前只传 2-3 个变量 ⇒ 桥接灌回的
     // GITHUB_TOKEN/用户配置全丢（agent 说"token 无效/未登录"的真根因之一）。
@@ -197,7 +213,8 @@ export class ClaudeProvider implements RuntimeProvider {
       ANTHROPIC_BASE_URL: this.baseUrl,
       PATH: buildWindowsPath(process.env.PATH),
     };
-    if (authToken) env.ANTHROPIC_AUTH_TOKEN = authToken;
+    // 走到这里 authToken 必然有值（无值已在上面抛错），直接赋值即可。
+    env.ANTHROPIC_AUTH_TOKEN = authToken;
     try {
       const q = query({
         prompt: queue,
