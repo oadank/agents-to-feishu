@@ -71,7 +71,40 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
   };
 }
 
-// ── 配置中心穿透：config.<bot>.env → env → runtimeModel ──
+// ── 配置中心穿透：config.<bot>.env → env → runtimeModel / mcpServers ──
+
+/** 配置中心 MCP 池条目（render 写进 CTI_BOT_<ID>_MCP_SERVERS 的 JSON） */
+interface CtiMcpDef { id: string; displayName?: string; transport?: string; url?: string; command?: string; args?: string[]; env?: Record<string, string> }
+
+/** 读配置中心勾选的 MCP 池，映射为 ZCode Protocol 的 mcpServers（stdio / http 两种形态） */
+function buildMcpServers(): Array<Record<string, unknown>> | null {
+  const botId = (process.env.CTI_BOT || 'zcode').toUpperCase();
+  const raw = process.env[`CTI_BOT_${botId}_MCP_SERVERS`] || '';
+  if (!raw.trim()) return null;
+  let defs: CtiMcpDef[];
+  try { defs = JSON.parse(raw); } catch { rtLog('[zcode] MCP_SERVERS JSON 解析失败，忽略'); return null; }
+  const out: Array<Record<string, unknown>> = [];
+  for (const d of defs) {
+    if (d.transport === 'stdio' && d.command) {
+      out.push({
+        name: d.displayName || d.id,
+        command: d.command,
+        args: d.args || [],
+        env: Object.entries(d.env || {}).map(([name, value]) => ({ name, value })),
+      });
+    } else if (d.url) {
+      // streamable-http / sse → 协议的 http / sse
+      out.push({
+        name: d.displayName || d.id,
+        type: d.transport === 'sse' ? 'sse' : 'http',
+        url: d.url,
+        headers: [] as Array<{ name: string; value: string }>,
+      });
+    }
+  }
+  rtLog(`[zcode] mcpServers 配置中心穿透 ${out.length} 个: ${out.map((m) => m.name).join(', ')}`);
+  return out.length > 0 ? out : null;
+}
 
 /** 组装 runtimeModel（ZCode Protocol $f：客户端下发的模型注册表）。缺配置返回 null。 */
 function buildRuntimeModel(): Record<string, unknown> | null {
@@ -89,11 +122,14 @@ function buildRuntimeModel(): Record<string, unknown> | null {
   }
   const contextWindow = Number(process.env[`${p}CONTEXT_WINDOW`] || '') || 1000000;
   const providerLabel = process.env[`${p}MODEL_PROVIDER`] || 'config-center';
+  // 思考深度穿透（配置中心 agent.thinkingLevel）：off = 关思考提效（GLM-5.3 默认思考可达 1.9 万字/轮）
+  const thinkingLevelEnv = (process.env[`${p}THINKING_LEVEL`] || '').toLowerCase();
+  const thoughtLevel = thinkingLevelEnv === 'off' ? 'disabled' : 'enabled';
   return {
     revision: '1',
     generatedAt: Date.now(),
     model: { providerId: 'zcc', modelId },
-    thoughtLevel: 'enabled',
+    thoughtLevel,
     provider: {
       providerId: 'zcc',
       kind: 'openai-compatible',
@@ -170,9 +206,24 @@ interface TurnSink {
   lastEventAt: number;
   /** 本轮是否已发过 usage（telemetry usage.delta 先到则 turn.completed 不重复发） */
   usageSent: boolean;
+  /** 思考流策略（2026-09-05 二次修复）：GLM 工具循环每轮都出新思考，💭尾部滑动窗口会整窗
+   * 轮转（视觉=正文反复从头重打）。流式只转发前 THINK_STREAM_HEAD 字后冻结💭；终态补发真实
+   * 思考尾部（终卡仍显示 1500 字尾部，保真不闪）。 */
+  reasoningBuf: string;
+  reasoningFull: string;
+  reasoningForwarded: number;
+  reasoningLastEmit: number;
+  reasoningFrozen: boolean;
   /** 终态收尾：结束 streamChat 的事件循环（queue 先排空再退出，保证顺序） */
   settle: (err?: string) => void;
 }
+
+/** 流式阶段转发的思考上限（字符）：💭 尾窗 400，转 400 字后冻结，杜绝整窗轮转 */
+const THINK_STREAM_HEAD = Number(process.env.CTI_ZCODE_THINK_HEAD || 400);
+/** 终态补发的思考尾部长度（引擎终卡显示 1500 字尾窗） */
+const THINK_TAIL = 1100;
+/** 思考流合并窗口（毫秒）：低于引擎 1.8s 的💭节流即无意义 */
+const THINK_MERGE_MS = 1200;
 
 export class ZcodeProvider implements RuntimeProvider {
   readonly name = 'zcode';
@@ -349,12 +400,14 @@ export class ZcodeProvider implements RuntimeProvider {
         });
         break;
       case 'interaction/requestPermission': {
-        // 权限申请：选 allow 类选项自动批准（app-server 默认 yolo，此路径一般不触发）
-        const options = (msg.params?.options ?? []) as Array<{ optionId?: string; kind?: string }>;
-        const allow = options.find((o) => String(o.kind || '').startsWith('allow'))
-          || options.find((o) => /allow|once|always/i.test(String(o.optionId || '')))
+        // 权限申请：按 options 里的 allow 类选项批准（app-server 默认 yolo，此路径一般不触发；
+        // 2026-09-05 加固：优先 allow_always > allow_once，与服务器 wNi 映射对齐，防猜错 optionId 被判 deny）
+        const options = (msg.params?.options ?? []) as Array<{ optionId?: string; kind?: string; label?: string }>;
+        const allow = options.find((o) => String(o.kind || '') === 'allow_always')
+          || options.find((o) => String(o.kind || '') === 'allow_once')
+          || options.find((o) => /allow|once|always|proceed/i.test(String(o.optionId || '') + String(o.label || '')))
           || options[0];
-        rtLog(`[zcode] 权限自动批准 tool=${msg.params?.toolName ?? '?'} option=${allow?.optionId ?? 'n/a'}`);
+        rtLog(`[zcode] 权限自动批准 tool=${msg.params?.toolName ?? '?'} risk=${msg.params?.riskLevel ?? '?'} option=${allow?.optionId ?? JSON.stringify(options).slice(0, 120)}`);
         this.replyServerRequest(id, { optionId: allow?.optionId ?? 'allowOnce' });
         break;
       }
@@ -389,8 +442,27 @@ export class ZcodeProvider implements RuntimeProvider {
         const kind = String(payload.kind || '');
         const delta = String(payload.delta ?? '');
         if (!delta) break;
-        if (kind === 'text_delta') sink.emit({ type: 'text', text: delta });
-        else if (kind === 'reasoning_delta') sink.emit({ type: 'thinking', text: delta });
+        if (kind === 'text_delta') { sink.emit({ type: 'text', text: delta }); break; }
+        if (kind === 'reasoning_delta') {
+          // 全量留存（终态补发尾部用）；流式只转发头部 THINK_STREAM_HEAD 字后冻结💭
+          sink.reasoningFull += delta;
+          if (sink.reasoningFrozen) break;
+          sink.reasoningBuf += delta;
+          const now = Date.now();
+          if (sink.reasoningForwarded >= THINK_STREAM_HEAD || (sink.reasoningForwarded + sink.reasoningBuf.length) > THINK_STREAM_HEAD) {
+            const head = sink.reasoningBuf.slice(0, Math.max(0, THINK_STREAM_HEAD - sink.reasoningForwarded));
+            if (head) { sink.emit({ type: 'thinking', text: head }); sink.reasoningForwarded += head.length; }
+            sink.reasoningBuf = '';
+            sink.reasoningFrozen = true; // 冻结：杜绝💭尾窗整窗轮转（闪烁根因）
+            break;
+          }
+          if (now - sink.reasoningLastEmit >= THINK_MERGE_MS && sink.reasoningBuf) {
+            sink.reasoningLastEmit = now;
+            sink.emit({ type: 'thinking', text: sink.reasoningBuf });
+            sink.reasoningForwarded += sink.reasoningBuf.length;
+            sink.reasoningBuf = '';
+          }
+        }
         break;
       }
       case 'part.delta': {
@@ -418,6 +490,11 @@ export class ZcodeProvider implements RuntimeProvider {
         break;
       }
       case 'turn.completed': {
+        // 终态补发真实思考尾部（流式阶段冻结了💭，终卡仍显示尾部 1500 字窗口，保真）
+        if (sink.reasoningFull.length > sink.reasoningForwarded + 100) {
+          sink.emit({ type: 'thinking', text: `\n……\n${sink.reasoningFull.slice(-THINK_TAIL)}` });
+        }
+        sink.reasoningBuf = '';
         if (!sink.usageSent) {
           const usage = this.extractUsage(payload);
           if (usage) { sink.usageSent = true; sink.emit({ type: 'usage', usage, sessionId: sink.sessionId }); }
@@ -502,6 +579,7 @@ export class ZcodeProvider implements RuntimeProvider {
     }
 
     const runtimeModel = buildRuntimeModel();
+    const mcpServers = buildMcpServers();
     const workspace = { workspaceKey: cwd, workspacePath: cwd };
     let sessionId = '';
 
@@ -512,7 +590,9 @@ export class ZcodeProvider implements RuntimeProvider {
         const r = await this.request('session/resume', {
           sessionId: savedId,
           workspace,
+          mode: 'yolo',
           ...(runtimeModel ? { runtimeModel } : {}),
+          ...(mcpServers ? { mcpServers } : {}),
         }, 30000);
         sessionId = String(r?.session?.sessionId || r?.sessionId || savedId);
         rtLog(`[zcode] session resumed: ${sessionId.slice(0, 8)} (session=${sessionKey.slice(0, 12)})`);
@@ -524,7 +604,9 @@ export class ZcodeProvider implements RuntimeProvider {
     if (!sessionId) {
       const r = await this.request('session/create', {
         workspace,
+        mode: 'yolo', // 交互会话默认 build=全审批；无头 bot 必须显式 yolo，否则一切工具调用被 "Permission request failed" 拦截
         ...(runtimeModel ? { runtimeModel } : {}),
+        ...(mcpServers ? { mcpServers } : {}),
         titleGenerationEnabled: false, // bot 会话无需自动标题，省一次 LLM 调用
       }, 60000);
       sessionId = String(r?.session?.sessionId || r?.sessionId || '');
@@ -586,6 +668,11 @@ export class ZcodeProvider implements RuntimeProvider {
       emit: (ev) => { queue.push(ev); poke(); },
       lastEventAt: Date.now(),
       usageSent: false,
+      reasoningBuf: '',
+      reasoningFull: '',
+      reasoningForwarded: 0,
+      reasoningLastEmit: 0,
+      reasoningFrozen: false,
       settle: (err?: string) => {
         if (err && !settleErr) settleErr = err;
         settled = true;

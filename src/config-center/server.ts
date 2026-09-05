@@ -235,6 +235,8 @@ export function createConfigServer(opts: ConfigServerOptions) {
     { runtime: 'openakita', display: 'OpenAkita', files: ['C:\\D\\opt\\agents-to-feishu\\scripts\\openakita-acp-server.py'], envKey: 'CTI_OPENAKITA_SERVER', command: 'scripts/openakita-acp-server.py' },
     // dsh: provider 用 node 当执行器，真程序 = DSH harness 的 ACP demo 入口 bin.ts
     { runtime: 'dsh', display: 'DSH', files: ['C:\\D\\opt\\deepseek-harness\\deepseek-harness\\packages\\examples\\acp-demo\\src\\bin.ts'], envKey: 'CTI_DSH_HARNESS_PATH', command: 'packages/examples/acp-demo/src/bin.ts' },
+    // zcode: provider 用 node 当执行器，真程序 = ZCode 桌面版内置 CLI（app-server --stdio）
+    { runtime: 'zcode', display: 'ZCode', files: ['C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs', 'C:\\Users\\oadan\\AppData\\Local\\Programs\\ZCode\\resources\\glm\\zcode.cjs'], envKey: 'CTI_ZCODE_CLI', command: 'zcode.cjs' },
   ];
 
   // ── 每个 runtime 的"启动环境模板"（配置页可看/可改，保存后穿透给 agent）──
@@ -596,7 +598,8 @@ export function createConfigServer(opts: ConfigServerOptions) {
           appSecret: String(body.appSecret || ''),
           providerId: String(body.providerId || store.providers[0]?.id || ''),
           modelId: String(body.modelId || ''),
-          mcps: Array.isArray(body.mcps) ? body.mcps : [],
+          // 默认勾选全部 MCP（2026-09-05 老大反馈：新建 bot 默认全空导致能力缺失；不要的取消勾选即可）
+          mcps: Array.isArray(body.mcps) ? body.mcps : store.mcps.map((m) => m.id),
           port: Number(body.port || 13600),
           showToolCallCards: body.showToolCallCards !== false,
           showAgentDivider: body.showAgentDivider !== false,

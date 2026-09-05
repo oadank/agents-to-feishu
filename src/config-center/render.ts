@@ -137,6 +137,23 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
     // → apply → 下条消息生效。key 来源与 claude 的 ANTHROPIC_AUTH_TOKEN 同源（凭证层）。
     const zk = (prov?.apiKeyEnv ? (readCredentialKey(prov.apiKeyEnv) || readOldEnvKey(prov.apiKeyEnv)) : '') || '';
     lines.push(`CTI_BOT_${agent.id.toUpperCase()}_API_KEY=${zk}`);
+    // zcode MCP 穿透：勾选的 MCP 池渲染成 JSON，provider 映射为协议 mcpServers
+    // （stdio → command/args/env；streamable-http/sse → http/sse + url），session/create|resume 下发。
+    const mcpDefs = (agent.mcps || [])
+      .map((id) => store.mcps.find((m) => m.id === id))
+      .filter((m): m is NonNullable<typeof m> => !!m)
+      .map((m) => ({
+        id: m.id,
+        displayName: m.displayName,
+        transport: m.transport,
+        url: m.url || '',
+        command: m.command || '',
+        args: m.args || [],
+        env: m.env || {},
+      }));
+    lines.push(`CTI_BOT_${agent.id.toUpperCase()}_MCP_SERVERS=${JSON.stringify(mcpDefs)}`);
+    // 思考深度穿透：off = 关思考提效（GLM-5.3 默认思考可单轮 1.9 万字，💭滑窗高频全换）
+    lines.push(`CTI_BOT_${agent.id.toUpperCase()}_THINKING_LEVEL=${agent.thinkingLevel || 'default'}`);
   }
   lines.push('');
   // 注入（systemPrompt）：统一注入(全局) + 独立注入(该 agent)。值用 JSON 字符串编码，
