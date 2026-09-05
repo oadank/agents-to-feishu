@@ -30,16 +30,20 @@
     const [err, setErr] = useState(null);
     const pickerRef = {};
 
-    // 启动参数：初始化自当前生效 env（rt.env = 模板 + 用户覆盖合并），全部模板键可编辑。
-    // 开关型键（rt.envFlags）值非空 = 勾选；其余键文本输入。默认值全部预设好（老大要求：装上就能启动）。
+    // 启动参数：envMeta = 每键【真实生效值】（覆盖 > 实际解析 > provider 内部默认）。
+    // secret=掩码显示（未改动不落覆盖）；readonly=随 Agent 上下文自动注入（纯展示行）。
+    // 全部框直接填好真实值，无空白框（老大要求：显示真实配置供学习参观）。
     const initEnv = rt.env || {};
     const tpl = rt.envTpl || {};
     const flags = rt.envFlags || [];
     const labels = rt.envLabels || {};
-    const keys = Object.keys(tpl);
+    const meta = rt.envMeta || null;
+    const keys = meta ? Object.keys(meta) : Object.keys(tpl);
     const [envValues, setEnvValues] = useState(function () {
       const v = {};
-      for (const k of keys) v[k] = initEnv[k] !== undefined ? initEnv[k] : (tpl[k] || "");
+      for (const k of keys) {
+        v[k] = meta ? meta[k].value : (initEnv[k] !== undefined ? initEnv[k] : (tpl[k] || ""));
+      }
       return v;
     });
     const hasParams = keys.length > 0;
@@ -60,9 +64,12 @@
 
     async function saveAll() {
       setSaving(true); setSaved(""); setErr(null);
-      // 穿透所有启动参数：开关键 = 勾选 ? 模板默认值 : 空（剔除）；文本键 = 输入值（空 = 剔除覆盖）
+      // 穿透启动参数：readonly 键（跟随 Agent）跳过；secret 键掩码未改动跳过；其余 = 当前输入值（空 = 剔除覆盖回默认）
       const envBody = {};
       for (const k of keys) {
+        const m = meta ? meta[k] : null;
+        if (m && m.readonly) continue;                                   // 跟随 Agent 自动注入，不落覆盖
+        if (m && m.secret && envValues[k] === m.value) continue;         // 掩码未改动 = 保持凭证层/默认
         if (flags.includes(k)) envBody[k] = envValues[k] ? envValues[k] : "";
         else envBody[k] = envValues[k] !== undefined ? envValues[k] : "";
       }
@@ -104,20 +111,30 @@
       !rt.detected && rt.install ? h("div", { class: "row kv" }, h("span", { class: "k" }, "安装提示:"),
         h("span", { class: "v" }, rt.install)) : null,
       hasParams ? h("div", { class: "env-box" },
-        h("div", { class: "env-title" }, "启动参数（已预设正确默认值；勾选/填写后保存自动重启生效）"),
+        h("div", { class: "env-title" }, "启动参数（框内为当前真实生效值；改动后保存自动重启生效）"),
         keys.map(function (k) {
           const isFlag = flags.includes(k);
           const label = labels[k] || k;
+          const m = meta ? meta[k] : null;
+          const noteEl = (m && m.note) ? h("span", { class: "dim", style: { fontSize: 11, marginLeft: 6 } }, m.note) : null;
+          if (m && m.readonly) {
+            // 跟随 Agent 上下文自动注入：纯展示（当前真实值），不提供输入
+            return h("div", { class: "row kv", key: k },
+              h("span", { class: "k" }, label),
+              h("span", { class: "v" }, h("b", null, envValues[k] || "（自动）"), noteEl));
+          }
           if (isFlag) {
             return h("div", { class: "row kv", key: k },
               h("span", { class: "k" }, label),
-              h(Switch, { checked: !!envValues[k], onChange: function () { setEnvValues(Object.assign({}, envValues, { [k]: envValues[k] ? "" : (tpl[k] || "1") })); setSaved(""); setErr(null); } }));
+              h(Switch, { checked: !!envValues[k], onChange: function () { setEnvValues(Object.assign({}, envValues, { [k]: envValues[k] ? "" : (tpl[k] || "1") })); setSaved(""); setErr(null); } }),
+              noteEl);
           }
           return h("div", { class: "row kv", key: k },
             h("span", { class: "k" }, label),
             h("input", { type: "text", value: envValues[k] || "", placeholder: tpl[k] || "",
               onInput: function (e) { setEnvValues(Object.assign({}, envValues, { [k]: e.target.value })); setSaved(""); setErr(null); },
-              style: { minWidth: 220 } }));
+              style: { minWidth: 260 } }),
+            noteEl);
         }),
       ) : null,
       h("div", { class: "divider" }),

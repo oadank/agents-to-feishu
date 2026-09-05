@@ -673,6 +673,70 @@ export function createConfigServer(opts: ConfigServerOptions) {
             if (v === '') { delete env[k]; continue; }
             env[k] = v;
           }
+          // envMeta：每个键的【真实生效值】（覆盖 > 实际解析值 > provider 内部默认）。
+          // 2026-09-05 老大要求：框里直接写好真实值供学习参观，不留空白。
+          // secret=掩码显示（未改动不落覆盖）；readonly=随 Agent 上下文自动注入（不渲染输入框）。
+          const envMeta: Record<string, { value: string; secret?: boolean; readonly?: boolean; note?: string }> = {};
+          const firstAgent = load().agents.find((a: AgentDef) => (a.runtime || 'dsh') === rt.runtime && a.enabled !== false);
+          const rtProv = firstAgent ? findProvider(load(), firstAgent.providerId) : undefined;
+          const maskKey = (s: string): string => (!s ? '' : s.length <= 8 ? s.slice(0, 2) + '***' : s.slice(0, 6) + '***' + s.slice(-3));
+          const pushMeta = (k: string, value: string, opts?: { secret?: boolean; readonly?: boolean; note?: string }): void => {
+            envMeta[k] = { value: over[k] !== undefined && over[k] !== '' ? over[k] : value, secret: opts?.secret, readonly: opts?.readonly, note: opts?.note };
+          };
+          switch (rt.runtime) {
+            case 'claude':
+              pushMeta('ANTHROPIC_BASE_URL', rtProv?.baseURL || 'http://127.0.0.1:4000', { note: '留空=回落 LiteLLM 网关' });
+              pushMeta('ANTHROPIC_AUTH_TOKEN', maskKey(readCredentialKey(rtProv?.apiKeyEnv || '') || readOldEnvKey(rtProv?.apiKeyEnv || '')), { secret: true, note: '留空=凭证层自动读取' });
+              pushMeta('ANTHROPIC_MODEL', `跟随 Agent 所选（当前 ${firstAgent ? firstAgent.modelId : '—'}）`, { readonly: true });
+              pushMeta('ANTHROPIC_PERMISSION_MODE', 'bypassPermissions');
+              pushMeta('CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT', '1');
+              pushMeta('CLAUDE_CODE_MAX_CONTEXT_TOKENS', '1000000');
+              break;
+            case 'zcode':
+              pushMeta('CTI_ZCODE_CLI', resolvedPath, { note: '留空=自动探测桌面版内置 CLI' });
+              pushMeta('CTI_ZCODE_STALL_MS', '300000');
+              pushMeta('CTI_ZCODE_THINK_HEAD', '400');
+              break;
+            case 'opencode':
+              pushMeta('CTI_OPENCODE_EXEC', resolvedPath, { note: '留空=自动探测 npm 全局位置' });
+              pushMeta('CTI_OPENCODE_TIMEOUT_MS', '300000');
+              pushMeta('CTI_OPENCODE_IDLE_TIMEOUT_MS', '1800000');
+              break;
+            case 'gemini':
+              pushMeta('CTI_GEMINI_CLI_PATH', resolvedPath, { note: '留空=PATH 查找' });
+              pushMeta('CTI_GEMINI_BASE_URL', rtProv?.baseURL || 'http://127.0.0.1:4000', { note: '留空=跟随 Agent 所选 Provider' });
+              pushMeta('CTI_GEMINI_API_KEY', maskKey(readCredentialKey(rtProv?.apiKeyEnv || 'LITELLM_API_KEY') || readOldEnvKey(rtProv?.apiKeyEnv || 'LITELLM_API_KEY')), { secret: true, note: '留空=凭证层自动读取' });
+              pushMeta('CTI_GEMINI_PROMPT_TIMEOUT_MS', '600000');
+              break;
+            case 'openakita':
+              pushMeta('CTI_OPENAKITA_SERVER', resolvedPath, { note: '留空=项目 scripts/ 内置脚本' });
+              pushMeta('CTI_OPENAKITA_WORKSPACE', path.join(os.homedir(), '.openakita', 'workspaces', 'default'), { note: '留空=OpenAkita 默认工作区' });
+              break;
+            case 'openclaw':
+              pushMeta('CTI_OPENCLAW_EXEC', resolvedPath, { note: '留空=自动探测 npm 全局位置' });
+              pushMeta('CTI_OPENCLAW_STATE_DIR', path.join(os.homedir(), '.openclaw'), { note: '留空=OpenClaw 自管' });
+              break;
+            case 'mimo':
+              pushMeta('CTI_MIMO_EXEC', resolvedPath, { note: '留空=自动探测 npm 全局位置' });
+              break;
+            case 'reasonix':
+              pushMeta('CTI_REASONIX_EXEC', resolvedPath, { note: '留空=自动探测安装位置/PATH' });
+              pushMeta('CTI_REASONIX_TIMEOUT_MS', '300000');
+              break;
+            case 'hermes':
+              pushMeta('CTI_HERMES_CLI_PATH', resolvedPath, { note: '留空=PATH 查找' });
+              break;
+            case 'dsh':
+              pushMeta('CTI_DSH_HARNESS_PATH', resolvedPath.replace(/\\packages\\examples\\acp-demo\\src\\bin\.ts$/, ''), { note: 'DeepSeek Harness 根目录' });
+              break;
+            case 'deeptutor':
+              pushMeta('CTI_DEEPTUTOR_TOKEN', maskKey(process.env.CTI_DEEPTUTOR_TOKEN || ''), { secret: true, note: '本机免鉴权留空；多用户部署填 Bearer Token' });
+              break;
+          }
+          // 模板里还没出现的键 → 兜底填真实/模板值（保证无空白框）
+          for (const [k, v] of Object.entries(tpl)) {
+            if (!envMeta[k]) envMeta[k] = { value: over[k] !== undefined && over[k] !== '' ? over[k] : (v !== '' ? v : (env[k] || '（自动）')), note: ENV_LABELS[k] };
+          }
           return {
             runtime: rt.runtime, display: rt.display, command: rt.command,
             envKey: rt.envKey, configured, resolvedPath, detected,
@@ -682,6 +746,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
             envTpl: Object.keys(tpl).reduce<Record<string, string>>((a, k) => { a[k] = tpl[k]; return a; }, {}), // 默认模板（含空提示）
             envOver: Object.assign({}, over),      // 用户覆盖（仅显式保存的）
             env,                                    // 最终生效值（模板+覆盖合并）
+            envMeta,                                // 每键真实生效值（secret 掩码 / readonly 跟随 Agent）
             envFlags: ENV_FLAG_KEYS[rt.runtime] || [],   // 开关型键（网页渲染成打勾开关）
             envLabels: ENV_LABELS,                       // 键的中文说明
           };
