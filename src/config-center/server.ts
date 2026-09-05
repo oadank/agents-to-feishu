@@ -230,8 +230,10 @@ export function createConfigServer(opts: ConfigServerOptions) {
   // install = 未检测到时给用户的安装提示（'' = 作者自研未公开，参照 src/providers 对接同类 CLI）
   // service = 服务型运行时（非 CLI）：值 = 承载服务地址的 env 名（探测=HTTP 健康检查，路径栏=服务地址）
   const REL_RUNTIMES: Array<{ runtime: string; display: string; where?: string; files?: string[]; envKey: string; command: string; install?: string; service?: string }> = [
-    // claude: provider 首选 CTI_CLAUDE_CLI_PATH，缺失时探测 C:\WINDOWS\system32\claude.bat，都不在回落 'claude'
-    { runtime: 'claude',    display: 'Claude',    files: ['C:\\WINDOWS\\system32\\claude.bat', 'C:\\Windows\\System32\\claude.bat'], envKey: 'CTI_CLAUDE_CLI_PATH', command: 'claude', install: 'npm i -g @anthropic-ai/claude-code', },
+    // claude: 官方 npm 包的 claude（where 查找，npm 目录先于 system32 命中）。
+    // 2026-09-05 修正：不再探测 system32\claude.bat——那是 cc-haha 的启动壳，不是官方 claude。
+    // bot 实际 CLI = CTI_CLAUDE_CLI_PATH（config.claude.env，指向官方 npm claude.exe）。
+    { runtime: 'claude',    display: 'Claude',    where: 'claude',    envKey: 'CTI_CLAUDE_CLI_PATH', command: 'claude', install: 'npm i -g @anthropic-ai/claude-code', },
     // codex: provider executable='codex'，spawn 'codex app-server' → PATH 命令
     { runtime: 'codex',     display: 'Codex',     where: 'codex',     envKey: 'CTI_CODEX_CLI_PATH', command: 'codex', install: 'npm i -g @openai/codex', },
     // gemini: provider CTI_GEMINI_CLI_PATH || 'gemini' → PATH 命令
