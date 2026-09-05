@@ -24,7 +24,7 @@
 
   function RuntimeCard(props) {
     const { rt, store, onChanged } = props;
-    const [path, setPath] = useState(rt.configured || "");   // 自定义 CLI 路径（浏览选；空=系统探测）
+    const [path, setPath] = useState(rt.configured || (rt.kind === "service" ? (rt.resolvedPath || "") : ""));   // CLI 路径 / 服务地址
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState("");
     const [err, setErr] = useState(null);
@@ -66,6 +66,7 @@
         if (flags.includes(k)) envBody[k] = envValues[k] ? envValues[k] : "";
         else envBody[k] = envValues[k] !== undefined ? envValues[k] : "";
       }
+      if (rt.kind === "service" && rt.envKey) envBody[rt.envKey] = path; // 服务地址穿透给 agent 配置
       // 保存（写 config-open runtimeEnv/cliPath）
       const r = await api("/api/runtimes", "POST", { runtime: rt.runtime, cliPath: path, env: envBody });
       if (!r.ok) { setSaving(false); setErr(r.data?.error || "保存失败"); return; }
@@ -80,14 +81,26 @@
     return h("div", { class: "card" },
       h("div", { class: "rthead" },
         h("span", { class: "rt-name" }, rt.display),
-        rt.detected ? h("span", { class: "tag ok" }, "✓ 已检测到 CLI") : h("span", { class: "tag err" }, "✗ 未检测到"),
-        path && path !== rt.resolvedPath ? h("span", { class: "tag info" }, "自定义路径") : null,
+        rt.kind === "service"
+          ? (rt.detected ? h("span", { class: "tag ok" }, "✓ 服务在线") : h("span", { class: "tag err" }, "✗ 服务未响应"))
+          : (rt.detected ? h("span", { class: "tag ok" }, "✓ 已检测到 CLI") : h("span", { class: "tag err" }, "✗ 未检测到")),
+        path && path !== rt.resolvedPath ? h("span", { class: "tag info" }, "自定义") : null,
       ),
-      h("div", { class: "row kv" }, h("span", { class: "k" }, "对接 CLI:"),
-        h("span", { class: "v" }, path || rt.resolvedPath || "—"),
-        h("button", { class: "btn", onClick: openPicker }, "📁 浏览"),
-        h("input", { ref: function (n) { pickerRef.current = n; }, type: "file", style: { display: "none" },
-          accept: ".exe,.cmd,.bat,.cjs,.js,.ps1,.py", onChange: onFileChosen })),
+      rt.kind === "service" ? [
+        // 服务型运行时: 服务地址可编辑 (存 cliPath + 穿透 env), 在线探测, 当前生效模型
+        h("div", { class: "row kv" }, h("span", { class: "k" }, "服务地址:"),
+          h("input", { type: "text", value: path, placeholder: rt.resolvedPath || "http://127.0.0.1:8001",
+            onInput: function (e) { setPath(e.target.value); setSaved(""); setErr(null); },
+            style: { minWidth: 260 } })),
+        rt.activeModel ? h("div", { class: "row kv" }, h("span", { class: "k" }, "当前生效模型:"),
+          h("span", { class: "v" }, h("b", null, rt.activeModel), h("span", { class: "dim" }, "（配置中心推送 · DeepTutor 设置内可切回）"))) : null,
+      ] : [
+        h("div", { class: "row kv" }, h("span", { class: "k" }, "对接 CLI:"),
+          h("span", { class: "v" }, path || rt.resolvedPath || "—"),
+          h("button", { class: "btn", onClick: openPicker }, "📁 浏览"),
+          h("input", { ref: function (n) { pickerRef.current = n; }, type: "file", style: { display: "none" },
+            accept: ".exe,.cmd,.bat,.cjs,.js,.ps1,.py", onChange: onFileChosen })),
+      ],
       !rt.detected && rt.install ? h("div", { class: "row kv" }, h("span", { class: "k" }, "安装提示:"),
         h("span", { class: "v" }, rt.install)) : null,
       hasParams ? h("div", { class: "env-box" },

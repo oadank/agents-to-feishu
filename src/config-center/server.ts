@@ -142,7 +142,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
       // 失败不阻塞 apply（bot 用 DeepTutor 上次保存的配置），原因记录在返回值与日志。
       if ((agent.runtime || '') === 'deeptutor') {
         try {
-          const r = await syncDeepTutorModel(store, agent);
+          const r = await syncDeepTutorModel(store, agent, extra);
           if (r.pushed) log(`apply ${agentId}: DeepTutor 模型已推送并生效`);
           else if (r.error) log(`apply ${agentId}: DeepTutor 推送失败（不阻塞）: ${r.error}`);
           else if (r.skipped && r.skipped !== 'unchanged') log(`apply ${agentId}: DeepTutor 推送跳过: ${r.skipped}`);
@@ -228,7 +228,8 @@ export function createConfigServer(opts: ConfigServerOptions) {
   //   command = 展示用命令名
   //   envKey  = provider 读取的覆盖环境变量（配置中心保存自定义路径后渲染成它）
   // install = 未检测到时给用户的安装提示（'' = 作者自研未公开，参照 src/providers 对接同类 CLI）
-  const REL_RUNTIMES: Array<{ runtime: string; display: string; where?: string; files?: string[]; envKey: string; command: string; install?: string }> = [
+  // service = 服务型运行时（非 CLI）：值 = 承载服务地址的 env 名（探测=HTTP 健康检查，路径栏=服务地址）
+  const REL_RUNTIMES: Array<{ runtime: string; display: string; where?: string; files?: string[]; envKey: string; command: string; install?: string; service?: string }> = [
     // claude: provider 首选 CTI_CLAUDE_CLI_PATH，缺失时探测 C:\WINDOWS\system32\claude.bat，都不在回落 'claude'
     { runtime: 'claude',    display: 'Claude',    files: ['C:\\WINDOWS\\system32\\claude.bat', 'C:\\Windows\\System32\\claude.bat'], envKey: 'CTI_CLAUDE_CLI_PATH', command: 'claude', install: 'npm i -g @anthropic-ai/claude-code', },
     // codex: provider executable='codex'，spawn 'codex app-server' → PATH 命令
@@ -252,7 +253,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
     { runtime: 'dsh', display: 'DSH', files: ['C:\\D\\opt\\deepseek-harness\\deepseek-harness\\packages\\examples\\acp-demo\\src\\bin.ts'], envKey: 'CTI_DSH_HARNESS_PATH', command: 'packages/examples/acp-demo/src/bin.ts', install: '开源项目 DeepSeek Harness：clone 安装后，到本页把 harness 路径填好', },
     // zcode: provider 用 node 当执行器，真程序 = ZCode 桌面版内置 CLI（app-server --stdio）
     // deeptutor: 自包含 HTTP 服务（非 CLI），provider 直连其服务端口；无 CLI 可探测 → 恒可用
-    { runtime: 'deeptutor', display: 'DeepTutor', envKey: 'CTI_DEEPTUTOR_SERVICE', command: 'deeptutor', install: '开源项目 DeepTutor：按其文档部署服务后使用', },
+    { runtime: 'deeptutor', display: 'DeepTutor', envKey: 'CTI_DEEPTUTOR_BASE', command: 'deeptutor', install: '开源项目 DeepTutor：按其文档部署服务后使用', service: 'CTI_DEEPTUTOR_BASE', },
     { runtime: 'zcode', display: 'ZCode', files: ['C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs', 'C:\\Users\\oadan\\AppData\\Local\\Programs\\ZCode\\resources\\glm\\zcode.cjs'], envKey: 'CTI_ZCODE_CLI', command: 'zcode.cjs', install: '下载安装 ZCode 桌面版（z.ai 官方产品）', },
   ];
 
@@ -305,7 +306,9 @@ export function createConfigServer(opts: ConfigServerOptions) {
     dsh: {
       'CTI_DSH_HARNESS_PATH': '',          // DeepSeek Harness 根目录（默认留空 → 探测/运行时页手填）
     },
-    // deeptutor：自包含 HTTP 服务，无 CLI 启动参数（服务可达性由 provider 报错提示）
+    deeptutor: {
+      'CTI_DEEPTUTOR_TOKEN': '',           // 多用户鉴权部署的 Bearer Token（本机免鉴权留空）
+    },
   };
   /** 开关型 env（网页渲染成打勾开关；值非空 = 勾选）。其余 envTpl 键渲染成文本输入。 */
   const ENV_FLAG_KEYS: Record<string, string[]> = {
@@ -338,6 +341,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
     'CTI_REASONIX_TIMEOUT_MS': 'prompt 超时（毫秒，留空=默认）',
     'CTI_HERMES_CLI_PATH': 'hermes CLI 路径（留空=PATH 查找）',
     'CTI_DSH_HARNESS_PATH': 'DeepSeek Harness 根目录',
+    'CTI_DEEPTUTOR_TOKEN': 'Bearer Token（多用户鉴权部署才填）',
   };
 
   /** 读取 config-open.json 里用户配置的 runtime 启动环境覆盖 { runtime: { ENV: value } } */
@@ -378,8 +382,25 @@ export function createConfigServer(opts: ConfigServerOptions) {
     return {};
   }
 
+  /** 服务型运行时探测：HTTP 健康检查 /api/settings + 当前生效模型（llm.active_model_id） */
+  async function probeService(rt: (typeof REL_RUNTIMES)[number], overrideBase: string): Promise<{ detected: boolean; resolvedPath: string; activeModel?: string }> {
+    const base = (overrideBase || process.env[rt.service!] || 'http://127.0.0.1:8001').replace(/\/+$/, '');
+    try {
+      const r = await fetch(base + '/api/settings', { signal: AbortSignal.timeout(4000) });
+      if (!r.ok) return { detected: false, resolvedPath: base };
+      let activeModel = '';
+      try {
+        const j = await r.json() as any;
+        activeModel = String(j?.catalog?.services?.llm?.active_model_id || '').replace(/^llm-model-/, '');
+      } catch { /* 在线但无模型信息 */ }
+      return { detected: true, resolvedPath: base, activeModel };
+    } catch {
+      return { detected: false, resolvedPath: base };
+    }
+  }
+
   /** 探测某 runtime 的 CLI 是否在系统里（file 型同步；where 型异步回调） */
-  function probeRuntimeCli(rt: (typeof REL_RUNTIMES)[number], configured: string | undefined): Promise<{ detected: boolean; resolvedPath: string }> {
+  function probeRuntimeCli(rt: (typeof REL_RUNTIMES)[number], configured: string | undefined): Promise<{ detected: boolean; resolvedPath: string; activeModel?: string }> {
     return new Promise((resolve) => {
       const finishWhere = (): void => {
         if (!rt.where) { resolve({ detected: true, resolvedPath: rt.command }); return; }
@@ -391,9 +412,18 @@ export function createConfigServer(opts: ConfigServerOptions) {
           resolve({ detected: true, resolvedPath: real });
         });
       };
-      // 用户显式配置了 CLI 路径 → 优先用它（存在性仍检测）
+      // 用户显式配置了 CLI 路径/服务地址 → 优先用它（CLI 查存在性；服务型按 URL 探测）
       if (configured) {
+        if (rt.service && /^https?:\/\//.test(configured)) {
+          probeService(rt, configured).then(resolve);
+          return;
+        }
         resolve({ detected: (() => { try { return fs.existsSync(configured); } catch { return false; } })(), resolvedPath: configured });
+        return;
+      }
+      // 服务型运行时（deeptutor 等）：探测 = HTTP 健康检查（/api/settings），顺带取当前生效模型
+      if (rt.service) {
+        probeService(rt, process.env[rt.service] || '').then(resolve);
         return;
       }
       // provider 源码里的真实候选可执行文件 → 命中第一个存在的；全脱靶则回退 PATH 查找
@@ -632,7 +662,8 @@ export function createConfigServer(opts: ConfigServerOptions) {
         const envMap = readRuntimeEnvOverrides();
         const list = await Promise.all(REL_RUNTIMES.map(async (rt) => {
           const configured = cliMap[rt.runtime] || '';
-          const { detected, resolvedPath } = await probeRuntimeCli(rt, configured || undefined);
+          const probe = await probeRuntimeCli(rt, configured || undefined);
+          const detected = probe.detected, resolvedPath = probe.resolvedPath;
           // 启动 env：默认模板 + 用户覆盖合并（用户优先；空字符串 = 剔除该键 → 不返回它）
           const tpl = ENV_TPL[rt.runtime] || {};
           const over = envMap[rt.runtime] || {};
@@ -645,6 +676,8 @@ export function createConfigServer(opts: ConfigServerOptions) {
           return {
             runtime: rt.runtime, display: rt.display, command: rt.command,
             envKey: rt.envKey, configured, resolvedPath, detected,
+            kind: rt.service ? 'service' : 'cli',
+            activeModel: (probe as any).activeModel || '',
             install: rt.install || '',
             envTpl: Object.keys(tpl).reduce<Record<string, string>>((a, k) => { a[k] = tpl[k]; return a; }, {}), // 默认模板（含空提示）
             envOver: Object.assign({}, over),      // 用户覆盖（仅显式保存的）

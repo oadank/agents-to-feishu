@@ -34,13 +34,16 @@ function rtLog(msg: string): void {
   try { fs.appendFileSync(file, `[sync-deeptutor] ${msg}\n`, 'utf-8'); } catch { /* 忽略 */ }
 }
 
+// 服务地址/Token 解析优先级：运行时页覆盖（runtimeEnv）> 进程 env > 默认 8001
+let _envOverride: Record<string, string> | undefined;
 function dtBase(): string {
-  return (process.env.CTI_DEEPTUTOR_BASE || 'http://127.0.0.1:8001').replace(/\/$/, '');
+  const v = (_envOverride && _envOverride.CTI_DEEPTUTOR_BASE) || process.env.CTI_DEEPTUTOR_BASE || 'http://127.0.0.1:8001';
+  return v.replace(/\/+$/, '');
 }
 
 function dtHeaders(): Record<string, string> {
   const h: Record<string, string> = { 'content-type': 'application/json' };
-  const token = process.env.CTI_DEEPTUTOR_TOKEN || '';
+  const token = (_envOverride && _envOverride.CTI_DEEPTUTOR_TOKEN) || process.env.CTI_DEEPTUTOR_TOKEN || '';
   if (token) h.authorization = `Bearer ${token}`;
   return h;
 }
@@ -59,8 +62,9 @@ function normalizeOpenAiBase(baseURL: string): string {
  * 推送 config-store 选的 provider/model 到 DeepTutor 并切 active。
  * 返回是否发生实际推送（幂等跳过时为 false）。
  */
-export async function syncDeepTutorModel(store: ConfigStore, agent: AgentDef): Promise<{ pushed: boolean; skipped?: string; error?: string }> {
+export async function syncDeepTutorModel(store: ConfigStore, agent: AgentDef, envOverride?: Record<string, string>): Promise<{ pushed: boolean; skipped?: string; error?: string }> {
   if ((agent.runtime || '') !== 'deeptutor') return { pushed: false, skipped: 'not-deeptutor' };
+  _envOverride = envOverride;
   const prov = agent.providerId ? findProvider(store, agent.providerId) : undefined;
   if (!prov) return { pushed: false, skipped: 'no-provider' };
   // 仅 openai 兼容通道（anthropic-messages 等 binding 需另行适配 DeepTutor 的 api_format 枚举）
