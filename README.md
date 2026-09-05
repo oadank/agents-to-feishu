@@ -38,8 +38,11 @@ config-store.json（唯一真相源：providers 池 / mcps 池 / agents 分配�
 第 12 个 agent：ZCode 桌面版内置 CLI 经 **ZCode Protocol**（`zcode.cjs app-server --stdio`，换行分隔 JSON，非 ACP）常驻接入。
 
 - **依赖**：ZCode 桌面版（CLI 位于 `C:\Program Files\ZCode\resources\glm\zcode.cjs`），`CTI_ZCODE_CLI` 可覆盖路径。
-- **配置穿透（唯一模型来源）**：config-store 选的 provider/model/key 经配置中心渲染进 `config.<bot>.env`，provider 读 `CTI_BOT_<ID>_MODEL / _BASE_URL / _API_KEY / _CONTEXT_WINDOW` 组装协议的 `runtimeModel`（inline apiKey），在 `session/create|resume` 时下发——网页切模型 → apply → 下条消息生效，不依赖也不修改 `~/.zcode/cli/config.json`。
-- **思考/工具卡**：provider 忠实产出 `thinking` / `tool` 流事件（思考=reasoning_delta、工具卡=tool.updated），engine 按配置中心 `showThinkingCards` / `showToolCallCards` 开关过滤——网页即可开关。
+- **配置穿透（唯一模型来源）**：config-store 选的 provider/model/key 经配置中心渲染进 `config.<bot>.env`，provider 读 `CTI_BOT_<ID>_MODEL / _BASE_URL / _API_KEY / _CONTEXT_WINDOW / _THINKING_LEVEL` 组装协议的 `runtimeModel`（inline apiKey），在 `session/create|resume` 时下发——网页切模型 → apply → 下条消息生效，不依赖也不修改 `~/.zcode/cli/config.json`。
+- **MCP 穿透**：配置中心勾选的 MCP 池渲染成 `CTI_BOT_<ID>_MCP_SERVERS` JSON，provider 映射为协议 `mcpServers`（stdio → command/args/env；streamable-http → http url）随会话下发。会话级注入，不写客户端配置文件；`~/.zcode/cli/config.json` 的 `mcp.servers` 可作为桌面端/CLI 自己的补充层，两层同名会话内自动去重。
+- **权限（无头必读）**：app-server 交互会话默认 build 模式 = 一切工具调用需审批（无头场景表现为 "Permission request failed" 全拦截）。provider 在 create/resume 显式传 `mode: 'yolo'` 解决；服务器→客户端的 `interaction/requestPermission` 兜底自动选 allow 选项。
+- **思考层与闪烁**：GLM-5.3 工具循环每轮都出新思考（单轮可达 1.9 万字），引擎💭块是尾部 400 字滑动窗口——高频转发会让整窗内容反复全换（视觉=正文从头重打）。provider 流式只转发思考前 400 字后冻结，`turn.completed` 补发真实尾部 1100 字（终卡 1500 尾窗保真）。终态全量推送仍有一次正常闪动（全 bot 共有的引擎收尾）。
+- **工具环境坑**：app-server 的 Bash 工具 PATH 是内部构建的精简清单，不含用户级 Python——已用 `~/bin/python|python3|py` shim 根治（Git Bash 会执行 ~/bin 下无扩展名脚本）。
 - **会话**：sessionKey → zcode sessionId 映射落盘 `~/.agents-to-feishu/runtime/zcode-sessions.json`，桥接重启自动 `session/resume` 续上下文；`/new` 关闭重建；`/stop` 走 `session/stop`。
 - **冒烟**：`node node_modules/tsx/dist/cli.mjs scripts/zcode-smoke.mjs`（两轮对话验证流式 + 会话连续性 + 穿透）。
 
