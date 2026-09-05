@@ -18,20 +18,37 @@ config-store.json（唯一真相源：providers 池 / mcps 池 / agents 分配�
         └── 网页（概览 / Agent 分配置 / 总配置·模型 / 总配置·MCP / 看图配置）
 ```
 
-## 快速开始（clone 后用）
+## 快速开始（新机器 clone 后 10 分钟上手）
+
+> 前置：Node.js ≥ 20（Windows 建议 Git Bash）。各 Agent 的 CLI（claude/codex/gemini/opencode…）
+> 装一个配一个——配置中心会**自动探测**（PATH 查找 + 常见安装位置），运行时管理页显示「✓ 已检测到」即可用。
 
 1. 安装依赖：`npm install`
-2. 生成并编辑配置：见「配置」
-3. （可选）把 `config-store.json` 里各 Agent 的 provider 换成你有 key 的服务（volc-ark / gw / litellm / deepseek-official 池里选）
-4. 看图：在 `vision` 段填视觉模型（默认免费 agnes-ai，`VISION_API_KEY` 放 `<home>/.agents-to-feishu/.credentials.yaml`）
-5. 启动：每个 Agent 一个进程（服务名 = agent 短名，如 `gemini`、`dsh`）
+2. 启动配置中心（首次运行自动生成 `~/.agents-to-feishu/config-store.json` 骨架）：
+   `npm run config-center`，浏览器打开 `http://localhost:13600`
+3. 网页「总配置」：建一个模型 Provider（填你的 baseURL + API Key + 模型，如 `https://ark.cn-beijing.volces.com/api/plan/v3` + 火山方舟 key；或任何 OpenAI 兼容网关）
+4. 网页「Agent 分配置」：新建 Agent——飞书应用凭证（App ID/Secret，[创建应用指南](https://open.feishu.cn/document/home/introduction-to-custom-app-creation/overview)）、
+   选 runtime（自动探测到的 CLI）、选 provider/model、勾选 MCP、设端口。保存即自动渲染配置。
+5. 启动该 Agent 的桥接进程（每个 Agent 一个进程）：
+   ```bash
+   node node_modules/tsx/dist/cli.mjs --require node_modules/tsx/dist/preflight.cjs src/index.ts
+   ```
+   开发环境可临时用环境变量指明身份：`CTI_BOT=<agentId> node node_modules/tsx/dist/cli.mjs src/index.ts`
+   （Windows 长期运行建议用 nssm/计划任务把该命令注册成服务，服务环境需带 `CTI_BOT=<agentId>` 和 `CTI_USER_HOME`）
+6. 在飞书里给这个 bot 发第一条消息——闭环完成。
+
+**凭证存放**：网页填写的 key 存 `~/.agents-to-feishu/.credentials.yaml`（项目自有凭证层，`KEY: value` 格式）；
+也兼容读取 `~/.dsh/.credentials.yaml`（历史遗留）。**不要把 key 提交进仓库。**
+
+**跨机器适配**：代码中无机器特定路径——用户目录一律 `os.homedir()` 解析，CLI 路径 = 配置中心「运行时管理」页
+可覆盖（写进 config-open.json）+ 自动探测兜底。遇到"命令不存在"，优先查该页的探测状态。
 
 ## 配置
 
 - 配置存储文件：`~/.agents-to-feishu/config-store.json`（未生成则首次创建默认骨架）
 - 凭证：每个 provider/看图的水平，可在对应 `apiKeyEnv` 的背后放
   `<home>/.agents-to-feishu/.credentials.yaml`（`KEY=value` 或 `KEY: value`）或直接在网页填。
-- 配置中心服务：nssm 服务名 `agentsconfig`，端口默认 13600，网页 `http://<host>:13600`。
+- 配置中心服务：端口默认 13600，网页 `http://<host>:13600`（本机长期运行可注册为 nssm 服务 `agentsconfig`）。
 
 ## ZCode 运行时接入（2026-09-05）
 

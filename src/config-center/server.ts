@@ -294,25 +294,30 @@ export function createConfigServer(opts: ConfigServerOptions) {
   /** 探测某 runtime 的 CLI 是否在系统里（file 型同步；where 型异步回调） */
   function probeRuntimeCli(rt: (typeof REL_RUNTIMES)[number], configured: string | undefined): Promise<{ detected: boolean; resolvedPath: string }> {
     return new Promise((resolve) => {
+      const finishWhere = (): void => {
+        if (!rt.where) { resolve({ detected: true, resolvedPath: rt.command }); return; }
+        execFile('C:\\Windows\\System32\\where.exe', [rt.where], { timeout: 8000 }, (err, stdout) => {
+          if (err) { resolve({ detected: false, resolvedPath: rt.command }); return; }
+          const lines = String(stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+          // 优先挑真实可执行文件（.cmd/.bat/.exe），避免显示无扩展名的 npm shim（如裸 codex/gemini）
+          const real = lines.find((l) => /\.(cmd|bat|exe)$/i.test(l)) || lines[0] || rt.command;
+          resolve({ detected: true, resolvedPath: real });
+        });
+      };
       // 用户显式配置了 CLI 路径 → 优先用它（存在性仍检测）
       if (configured) {
         resolve({ detected: (() => { try { return fs.existsSync(configured); } catch { return false; } })(), resolvedPath: configured });
         return;
       }
-      // provider 源码里的真实候选可执行文件 → 命中第一个存在的
+      // provider 源码里的真实候选可执行文件 → 命中第一个存在的；全脱靶则回退 PATH 查找
+      // （2026-09-05：候选列表写的是本机安装位置，别人机器 npm 全局路径不同——按 command 名查 PATH 兜底）
       if (rt.files && rt.files.length > 0) {
         const hit = rt.files.find((p0) => { try { return fs.existsSync(p0); } catch { return false; } });
-        resolve({ detected: !!hit, resolvedPath: hit || rt.command });
+        if (hit) { resolve({ detected: true, resolvedPath: hit }); return; }
+        finishWhere();
         return;
       }
-      if (!rt.where) { resolve({ detected: true, resolvedPath: rt.command }); return; }
-      execFile('C:\\Windows\\System32\\where.exe', [rt.where], { timeout: 8000 }, (err, stdout) => {
-        if (err) { resolve({ detected: false, resolvedPath: rt.command }); return; }
-        const lines = String(stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-        // 优先挑真实可执行文件（.cmd/.bat/.exe），避免显示无扩展名的 npm shim（如裸 codex/gemini）
-        const real = lines.find((l) => /\.(cmd|bat|exe)$/i.test(l)) || lines[0] || rt.command;
-        resolve({ detected: true, resolvedPath: real });
-      });
+      finishWhere();
     });
   }
 
@@ -977,7 +982,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
       if (p === '/api/speech/asr-sample' && method === 'GET') {
         const store = load();
         try {
-          const homeDir = process.env.CTI_USER_HOME || 'C:\\Users\\oadan';
+          const homeDir = process.env.CTI_USER_HOME || os.homedir();
           const sampleDir = path.join(homeDir, '.agents-to-feishu');
           const samplePath = path.join(sampleDir, 'asr-sample.wav');
           if (!fs.existsSync(samplePath) || fs.statSync(samplePath).size === 0) {
@@ -1031,7 +1036,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
       if (p === '/api/speech/voice-clone/preview' && method === 'GET') {
         const id = u.searchParams.get('id') || '';
         if (!/^[0-9a-zA-Z-]{8,}$/.test(id)) return json(res, 200, { ok: false, error: 'invalid id' });
-        const homeDir = process.env.CTI_USER_HOME || 'C:\\Users\\oadan';
+        const homeDir = process.env.CTI_USER_HOME || os.homedir();
         const candidates = [
           path.join(homeDir, '.agents-to-feishu', 'voiceclone-samples', `${id}-preview.mp3`),
           path.join(homeDir, '.dsh', 'voiceclone-samples', `${id}-preview.mp3`),
@@ -1056,7 +1061,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
         if (bytes.byteLength > 10 * 1024 * 1024) return json(res, 200, { ok: false, error: '音频需在 10MB 以内' });
         const mediaType = String(body.mediaType || 'audio/wav');
         const isMp3 = /mp3|mpeg/i.test(mediaType);
-        const homeDir = process.env.CTI_USER_HOME || 'C:\\Users\\oadan';
+        const homeDir = process.env.CTI_USER_HOME || os.homedir();
         const sampleDir = path.join(homeDir, '.agents-to-feishu', 'voiceclone-samples');
         fs.mkdirSync(sampleDir, { recursive: true });
         const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;

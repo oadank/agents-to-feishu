@@ -242,7 +242,7 @@ async function main(): Promise<void> {
   const sessions = new SessionManager({
     defaultWorkdir: bot.defaultWorkdir,
     // 2026-08-31 重启保记忆：会话（含 context 历史）落盘，启动自动恢复
-    persistFile: path.join(process.env.CTI_USER_HOME || 'C:/Users/oadan', '.agents-to-feishu', 'runtime', `sessions-${process.env.CTI_BOT || 'default'}.json`),
+    persistFile: path.join(process.env.CTI_USER_HOME || os.homedir(), '.agents-to-feishu', 'runtime', `sessions-${process.env.CTI_BOT || 'default'}.json`),
     // 2026-08-29 修复：把 chatId 透传给 provider.resetSession —— 此前丢弃导致
     // in-process 组（dsh 等 6 个）的 map 条目从不删除，只能靠空闲回收/LRU 兜底。
     onSessionReset: async (chatId: string) => { await provider.resetSession(chatId); },

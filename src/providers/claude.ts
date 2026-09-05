@@ -14,6 +14,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Query, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -35,7 +36,7 @@ let _claudeSessionFile: string | null = null;
 function claudeSessionFile(): string {
   if (!_claudeSessionFile) {
     _claudeSessionFile = path.join(
-      process.env.CTI_USER_HOME || 'C:\Users\oadan',
+      process.env.CTI_USER_HOME || os.homedir(),
       '.agents-to-feishu', 'runtime', 'claude-session.txt',
     );
   }

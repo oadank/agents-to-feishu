@@ -24,16 +24,26 @@ const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 /** 项目内建技能目录（可分发，不依赖 dsh 的 ~/.dsh/skills） */
 export const PROJECT_SKILLS_DIR = path.join(PROJECT_ROOT, 'skills');
 
-/** 从 ~/.dsh/.credentials.yaml 读取一个 key 的真实值（apply 时注入 config.env） */
+/**
+ * 从凭证文件读取一个 key 的真实值（apply 时注入 config.env）。
+ * 查找顺序：① ~/.agents-to-feishu/.credentials.yaml（项目自有凭证层，别人机器零依赖）
+ * ② ~/.dsh/.credentials.yaml（本机历史遗留，兼容保留）。
+ * 网页「总配置」里填的 key 优先于这两个文件（写入项目凭证文件）。
+ */
 export function readCredentialKey(key: string): string {
   try {
     const home = process.env.CTI_USER_HOME || os.homedir();
-    const p = path.join(home, '.dsh', '.credentials.yaml');
-    if (!fs.existsSync(p)) return '';
-    const txt = fs.readFileSync(p, 'utf-8');
-    const m = txt.match(new RegExp(`^\\s*${key}\\s*:\\s*(.+)`, 'm'));
-    if (!m) return '';
-    return m[1].trim().replace(/^["']|["']$/g, '');
+    const candidates = [
+      path.join(home, '.agents-to-feishu', '.credentials.yaml'),
+      path.join(home, '.dsh', '.credentials.yaml'),
+    ];
+    for (const p of candidates) {
+      if (!fs.existsSync(p)) continue;
+      const txt = fs.readFileSync(p, 'utf-8');
+      const m = txt.match(new RegExp(`^\\s*${key}\\s*:\\s*(.+)`, 'm'));
+      if (m) return m[1].trim().replace(/^["']|["']$/g, '');
+    }
+    return '';
   } catch { return ''; }
 }
 
@@ -56,7 +66,7 @@ export function readOldEnvKey(key: string, oldEnvFile?: string): string {
  */
 export function readAgentEnvKey(agentId: string, key: string): string {
   try {
-    const home = process.env.CTI_HOME || path.join(process.env.CTI_USER_HOME || 'C:\\Users\\oadan', '.agents-to-feishu');
+    const home = process.env.CTI_HOME || path.join(process.env.CTI_USER_HOME || os.homedir(), '.agents-to-feishu');
     const f = path.join(home, `config.${agentId}.env`);
     if (!fs.existsSync(f)) return '';
     const m = fs.readFileSync(f, 'utf-8').match(new RegExp(`^\\s*${key}\\s*=\\s*(.+)`, 'm'));
@@ -65,7 +75,7 @@ export function readAgentEnvKey(agentId: string, key: string): string {
 }
 
 /** 默认 claude CLI 路径（官方 @anthropic-ai/claude-code 的 bin/claude.exe） */
-const DEFAULT_CLAUDE_CLI = 'C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe';
+const DEFAULT_CLAUDE_CLI = path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
 
 // ── config.env 渲染 ──
 
@@ -97,7 +107,7 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   const prefix = `CTI_BOT_${agent.id.toUpperCase()}_`;
   // 工作目录：unified（store.defaultWorkdir）+ per-agent 覆盖，不再硬编码 C:\D\opt
   const workdir = resolveAgentWorkdir(store, agent);
-  const botHome = path.join(process.env.CTI_USER_HOME || 'C:\\Users\\oadan', '.dsh', `${agent.id}-bot`);
+  const botHome = path.join(process.env.CTI_USER_HOME || os.homedir(), '.dsh', `${agent.id}-bot`);
   const harness = globalExtra.CTI_DSH_HARNESS_PATH || process.env.CTI_DSH_HARNESS_PATH || 'C:\\D\\opt\\deepseek-harness\\deepseek-harness';
   // 引擎类型：dsh（DSH harness ACP） vs CLI 型（opencode/reasonix/claude 等，走各自 CLI/app-server）
   const isDsh = !agent.runtime || agent.runtime === 'dsh';
@@ -186,7 +196,7 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
     lines.push('');
   }
   lines.push('# ── 子进程环境（provider key 由凭证层注入下方 globalExtra）──');
-  lines.push(`CTI_USER_HOME=${process.env.CTI_USER_HOME || 'C:\\Users\\oadan'}`);
+  lines.push(`CTI_USER_HOME=${process.env.CTI_USER_HOME || os.homedir()}`);
   lines.push('');
   // 全局键（展示用）
   if (mcpGlobalKeys.length) {
@@ -215,7 +225,7 @@ export function renderCordisYml(store: ConfigStore, agent: AgentDef): string {
   const model = findModel(store, agent.providerId, agent.modelId);
   if (!model) throw new Error(`provider ${prov.id} 没有模型 "${agent.modelId}"`);
 
-  const botHome = path.join(process.env.CTI_USER_HOME || 'C:\\Users\\oadan', '.dsh', `${agent.id}-bot`);
+  const botHome = path.join(process.env.CTI_USER_HOME || os.homedir(), '.dsh', `${agent.id}-bot`);
   const personaPath = path.join(botHome, 'persona.md');
 
   const L: string[] = [];
@@ -524,9 +534,9 @@ export function writeAgentArtifacts(
   // 2026-08-29 修复：写入目录必须与读取方 loadConfig（config.ts:106：CTI_HOME || USERPROFILE/.agents-to-feishu）
   // 同源解析，否则只设 CTI_HOME 没设 CTI_USER_HOME 时会"配置中心写成功、bot 读的是另一份"。
   const configHome = process.env.CTI_HOME
-    || path.join(process.env.CTI_USER_HOME || process.env.USERPROFILE || 'C:\\Users\\oadan', '.agents-to-feishu');
+    || path.join(process.env.CTI_USER_HOME || process.env.USERPROFILE || os.homedir(), '.agents-to-feishu');
   const configEnvPath = path.join(configHome, `config.${agent.id}.env`);
-  const cordisYmlPath = path.join(process.env.CTI_USER_HOME || 'C:\\Users\\oadan', '.dsh', `${agent.id}-bot`, 'cordis.yml');
+  const cordisYmlPath = path.join(process.env.CTI_USER_HOME || os.homedir(), '.dsh', `${agent.id}-bot`, 'cordis.yml');
 
   fs.mkdirSync(path.dirname(configEnvPath), { recursive: true });
   fs.mkdirSync(path.dirname(cordisYmlPath), { recursive: true });
@@ -542,7 +552,7 @@ export function writeAgentArtifacts(
     const personaGlobal = _store.injection?.enabled === false ? '' : (_store.injection?.global ?? '');
     const personaCustom = agent.systemPrompt ?? '';
     const personaBody = [personaGlobal, personaCustom].filter((s) => s && s.trim()).join('\n\n---\n\n');
-    const personaPath = path.join(process.env.CTI_USER_HOME || 'C:\\Users\\oadan', '.dsh', `${agent.id}-bot`, 'persona.md');
+    const personaPath = path.join(process.env.CTI_USER_HOME || os.homedir(), '.dsh', `${agent.id}-bot`, 'persona.md');
     fs.mkdirSync(path.dirname(personaPath), { recursive: true });
     fs.writeFileSync(personaPath, personaBody, 'utf-8');
   }
@@ -635,7 +645,7 @@ function ensureCodexProvider(toml: string, provName: string, baseUrl: string, ke
 
 /** 根据 agent.runtime 把 provider/model/key 写进对应 CLI 配置文件（幂等，不存在则跳过） */
 export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra: Record<string, string> = {}): void {
-  const hunme = process.env.CTI_USER_HOME || 'C:\\Users\\oadan';
+  const hunme = process.env.CTI_USER_HOME || os.homedir();
   const prov = findProvider(store, agent.providerId);
   const modelId = findModel(store, agent.providerId, agent.modelId)?.id || agent.modelId;
   if (!prov) return;
