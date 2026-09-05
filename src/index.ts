@@ -180,26 +180,6 @@ interface FeishuMessageEventData {
   };
 }
 
-/**
- * 过期消息保护（2026-08-29）：普通消息按 chat 串行排队，若某一轮卡死（网关挂住连接/
- * 截断流但不回终止事件），后面排队的消息会一直堵着，等恢复后集中补跑——用户就会看到
- * "一小时前的提问被翻出来回答"。超过此年龄的消息轮到时直接跳过并提示，不再喂给模型。
- *
- * 覆盖两种情况：① 投递延迟（bot 掉线后迟到的事件）② 排队等待过久。
- * 默认 10 分钟（CTI_MSG_MAX_AGE_MS 可调，单位毫秒；0 = 不限制）。
- */
-const MSG_MAX_AGE_MS = Number(process.env.CTI_MSG_MAX_AGE_MS ?? 600_000);
-
-/** 解析飞书 create_time（毫秒；个别场景为秒）为"距今毫秒数"；无法解析/未来时间返回 null */
-function msgAgeMs(createTime: string | undefined): number | null {
-  if (!createTime) return null;
-  const raw = Number(createTime);
-  if (!Number.isFinite(raw) || raw <= 0) return null;
-  const ms = raw < 1e12 ? raw * 1000 : raw; // 秒级时间戳兜底
-  const age = Date.now() - ms;
-  return age >= 0 ? age : null; // 时钟漂移/未来时间：不判过期，宁可放行
-}
-
 async function main(): Promise<void> {
   const { global, bot, botName } = loadConfig();
   console.log(`[agents-to-feishu] 启动 bot=${botName} runtime=${bot.runtime} agent=${bot.agentName}`);
@@ -571,16 +551,6 @@ async function handleIncoming(
     await engine.sendInterruptCard(chatId, msg.message_id);
   }
   await engine.enqueueChat(chatId, async () => {
-    // 过期消息保护：排队/投递过久的旧消息轮到时直接跳过，不回答过时问题（见 MSG_MAX_AGE_MS 注释）
-    if (MSG_MAX_AGE_MS > 0) {
-      const ageMs = msgAgeMs(msg.create_time);
-      if (ageMs != null && ageMs > MSG_MAX_AGE_MS) {
-        const mins = Math.round(ageMs / 60_000);
-        console.log(`[agents-to-feishu] SKIP stale message mid=${msg.message_id.slice(0, 12)} age=${mins}min > ${Math.round(MSG_MAX_AGE_MS / 60_000)}min`);
-        await engine.sendText(chatId, `⏭️ 该消息发送于约 ${mins} 分钟前，等待过久已判定为过期，未处理。如仍需处理请重新发送。`);
-        return;
-      }
-    }
     // 排队轮到时，若该消息已被插队卡"取消"则跳过
     if (msg.message_id && engine.isMessageCancelled(msg.message_id)) {
       engine.clearCancelled(msg.message_id);
