@@ -11,6 +11,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createConfigServer } from './server.js';
+import { readStore } from './store.js';
+import { autoStartEnabled, killAll } from './process-manager.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -64,6 +66,20 @@ async function main(): Promise<void> {
   await server.listen();
   console.log(`config-center 就绪，监听 ${hosts.join(' + ')}:${args.port}（Tailscale 远程访问用 http://${hosts[hosts.length - 1]}:${args.port}/）`);
   console.log(`config-center 前端目录: ${args.staticDir}`);
+
+  // 进程托管自举（2026-09-05 "别人下载即用"）：无 nssm 服务的启用 agent 自动以子进程拉起
+  // （本机 nssm 机器行为不变：服务自启，管理器不抢）。CTI_PROC_MANAGER=off 可关闭。
+  if (process.env.CTI_PROC_MANAGER !== 'off') {
+    try {
+      const store = readStore();
+      await autoStartEnabled(store.agents.filter((a) => a.enabled !== false).map((a) => a.id));
+    } catch (e) {
+      console.warn('[config-center] 进程托管自举失败:', e instanceof Error ? e.message : String(e));
+    }
+  }
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(sig, () => { killAll(); process.exit(0); });
+  }
 
   // 2026-08-30 修复开机竞态：断电/重启后 Tailscale 网卡常晚于本服务就绪，
   // 启动瞬间探测不到 ⇒ 只绑 127.0.0.1 ⇒ 老大从 Tailscale 打不开 13600。

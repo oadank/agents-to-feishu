@@ -46,7 +46,7 @@
           id: props.agent.id, displayName: props.agent.displayName, appId: props.agent.appId || "", appSecret: props.agent.appSecret || "",
           providerId: props.agent.providerId, modelId: props.agent.modelId, mcps: (props.agent.mcps || []).slice(),
           port: props.agent.port, workdir: props.agent.workdir, enabled: props.agent.enabled !== false,
-          systemPrompt: props.agent.systemPrompt || "",
+          systemPrompt: props.agent.systemPrompt || "", runtime: props.agent.runtime || "dsh",
           showToolCallCards: props.agent.showToolCallCards !== false,
           showThinkingCards: props.agent.showThinkingCards !== false,
           showAgentDivider: props.agent.showAgentDivider !== false,
@@ -54,7 +54,7 @@
       }
       return {
         id: "", displayName: "", appId: "", appSecret: "", providerId: (props.providers[0] && props.providers[0].id) || "", modelId: "",
-        mcps: [], port: 13600, workdir: "C:\\D\\opt", enabled: true, systemPrompt: "",
+        mcps: [], port: 13600, workdir: "", enabled: true, systemPrompt: "", runtime: "dsh",
         showToolCallCards: true, showThinkingCards: true, showAgentDivider: true,
       };
     });
@@ -107,6 +107,13 @@
         h("div", { class: "row" },
           Field({ label: "飞书 AppId" }, h("input", { type: "text", value: f.appId, onInput: (e) => upd({ appId: e.target.value }) })),
           Field({ label: "飞书 AppSecret" }, h(SecretInput, { value: f.appSecret, onInput: (e) => upd({ appSecret: e.target.value }) })),
+        ),
+        h("div", { class: "row" },
+          Field({ label: "运行时（CLI 引擎）" }, h("select", { value: f.runtime || "dsh", onInput: (e) => upd({ runtime: e.target.value }) },
+            (props.runtimes || []).map(function (rt) {
+              const tag = rt.detected ? " ✓" : (rt.install ? " ✗（" + rt.install + "）" : " ✗（未检测到，作者自研运行时）");
+              return h("option", { value: rt.runtime }, rt.display + tag);
+            }))),
         ),
         h("div", { class: "row" },
           Field({ label: "Provider" }, h("select", { value: f.providerId, onInput: (e) => onProviderChange(e.target.value) },
@@ -190,6 +197,7 @@
     const [gsettings, setGsettings] = useState({ groupMentionOnly: true });
     const [userAuth, setUserAuth] = useState("");
     const [authListLabel, setAuthListLabel] = useState(""); // P1 修复：登录状态按钮独立 state（原与更换用户共用 userAuth，文案串台）
+    const [runtimes, setRuntimes] = useState([]);            // 运行时清单（探测状态 + 安装提示），弹窗 runtime 下拉用
 
     async function load() {
       const r = await api("/api/store");
@@ -199,6 +207,8 @@
         const ins = await api("/api/agents/installed");
         setInstalled((ins.httpOk && Array.isArray(ins.data.installed)) ? new Set(ins.data.installed) : null);
         setSvcStatus((ins.data && ins.data.status) || {});
+        const rt = await api("/api/runtimes");
+        if (rt.httpOk && Array.isArray(rt.data.runtimes)) setRuntimes(rt.data.runtimes);
         const gs = await api("/api/settings");
         if (gs.httpOk && gs.data) setGsettings(gs.data);
         const v = await api("/api/vision");
@@ -355,6 +365,17 @@
               h("div", { class: "actions" },
                 h("button", { class: "btn primary", onClick: () => openEdit(a) }, "编辑"),
                 h("button", { class: "btn warn", onClick: () => restartAgent(a.id), disabled: restarting === a.id }, restarting === a.id ? "重启中…" : "重启服务"),
+                h("button", { class: "btn", onClick: async () => {
+                  const r = await api("/api/agents/" + encodeURIComponent(a.id) + "/start", "POST");
+                  if (!r.ok) setErr("启动失败: " + (r.data?.error || ""));
+                  else setErr(null);
+                  load();
+                } }, "启动"),
+                h("button", { class: "btn", onClick: async () => {
+                  const r = await api("/api/agents/" + encodeURIComponent(a.id) + "/stop", "POST");
+                  if (!r.ok) setErr("停止失败: " + (r.data?.error || ""));
+                  load();
+                } }, "停止"),
               ),
             );
           }),
@@ -365,6 +386,7 @@
         agent: isNew ? null : editAgent,
         providers: store.providers,
         mcps: store.mcps,
+        runtimes: runtimes,
         onClose: () => setEditAgent(null),
         onDelete: function (a) {
           if (!window.confirm("确认删除 Agent " + (a.displayName || a.id) + "? 删除后此 Agent 不再运行。")) return;

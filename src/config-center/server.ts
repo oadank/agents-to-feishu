@@ -31,6 +31,7 @@ import {
   readStore, writeStore, findProvider, DEFAULT_SPEECH, DEFAULT_INJECTION, defaultStorePath,
 } from './store.js';
 import { writeAgentArtifacts, readCredentialKey, readOldEnvKey } from './render.js';
+import { startAgent as pmStart, stopAgent as pmStop, restartAgent as pmRestart, statusAll as pmStatus } from './process-manager.js';
 import { buildAgentRuntimeState, type AgentRuntimeState } from './runtime.js';
 import { lookImage } from '../vision/look.js';
 import {
@@ -213,30 +214,31 @@ export function createConfigServer(opts: ConfigServerOptions) {
   //   where   = provider 用命令名 spawn 的，走 PATH 探测（从 where 输出挑真实 .cmd/.exe）
   //   command = 展示用命令名
   //   envKey  = provider 读取的覆盖环境变量（配置中心保存自定义路径后渲染成它）
-  const REL_RUNTIMES: Array<{ runtime: string; display: string; where?: string; files?: string[]; envKey: string; command: string }> = [
+  // install = 未检测到时给用户的安装提示（'' = 作者自研未公开，参照 src/providers 对接同类 CLI）
+  const REL_RUNTIMES: Array<{ runtime: string; display: string; where?: string; files?: string[]; envKey: string; command: string; install?: string }> = [
     // claude: provider 首选 CTI_CLAUDE_CLI_PATH，缺失时探测 C:\WINDOWS\system32\claude.bat，都不在回落 'claude'
-    { runtime: 'claude',    display: 'Claude',    files: ['C:\\WINDOWS\\system32\\claude.bat', 'C:\\Windows\\System32\\claude.bat'], envKey: 'CTI_CLAUDE_CLI_PATH', command: 'claude' },
+    { runtime: 'claude',    display: 'Claude',    files: ['C:\\WINDOWS\\system32\\claude.bat', 'C:\\Windows\\System32\\claude.bat'], envKey: 'CTI_CLAUDE_CLI_PATH', command: 'claude', install: 'npm i -g @anthropic-ai/claude-code', },
     // codex: provider executable='codex'，spawn 'codex app-server' → PATH 命令
-    { runtime: 'codex',     display: 'Codex',     where: 'codex',     envKey: 'CTI_CODEX_CLI_PATH', command: 'codex' },
+    { runtime: 'codex',     display: 'Codex',     where: 'codex',     envKey: 'CTI_CODEX_CLI_PATH', command: 'codex', install: 'npm i -g @openai/codex', },
     // gemini: provider CTI_GEMINI_CLI_PATH || 'gemini' → PATH 命令
-    { runtime: 'gemini',    display: 'Gemini',    where: 'gemini',    envKey: 'CTI_GEMINI_CLI_PATH', command: 'gemini' },
+    { runtime: 'gemini',    display: 'Gemini',    where: 'gemini',    envKey: 'CTI_GEMINI_CLI_PATH', command: 'gemini', install: 'npm i -g @google/gemini-cli', },
     // hermes: provider CTI_HERMES_CLI_PATH || 'hermes' → PATH 命令（真实装在本机 Local\hermes 的 venv exe）
-    { runtime: 'hermes',    display: 'Hermes',    where: 'hermes',    envKey: 'CTI_HERMES_CLI_PATH', command: 'hermes' },
+    { runtime: 'hermes',    display: 'Hermes',    where: 'hermes',    envKey: 'CTI_HERMES_CLI_PATH', command: 'hermes', install: '', },
     // opencode: provider 候选 exe（opencode-windows-x64\bin\opencode.exe，baseline 兜底）
-    { runtime: 'opencode',  display: 'OpenCode',  files: ['C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\node_modules\\opencode-windows-x64\\bin\\opencode.exe', 'C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\node_modules\\opencode-windows-x64-baseline\\bin\\opencode.exe'], envKey: 'CTI_OPENCODE_EXEC', command: 'opencode' },
+    { runtime: 'opencode',  display: 'OpenCode',  files: ['C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\node_modules\\opencode-windows-x64\\bin\\opencode.exe', 'C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\node_modules\\opencode-windows-x64-baseline\\bin\\opencode.exe'], envKey: 'CTI_OPENCODE_EXEC', command: 'opencode', install: 'npm i -g opencode-ai', },
     // openclaw: provider 候选 %USERPROFILE%\AppData\Roaming\npm\openclaw.exe
-    { runtime: 'openclaw',  display: 'OpenClaw',  files: ['C:\\Users\\oadan\\AppData\\Roaming\\npm\\openclaw.exe'], envKey: 'CTI_OPENCLAW_EXEC', command: 'openclaw' },
+    { runtime: 'openclaw',  display: 'OpenClaw',  files: ['C:\\Users\\oadan\\AppData\\Roaming\\npm\\openclaw.exe'], envKey: 'CTI_OPENCLAW_EXEC', command: 'openclaw', install: 'npm i -g openclaw', },
     // mimo: provider 候选 mimocode-windows-x64\bin\mimo.exe（baseline 兜底）
-    { runtime: 'mimo',      display: 'MiMo',      files: ['C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\@mimo-ai\\cli\\node_modules\\@mimo-ai\\mimocode-windows-x64\\bin\\mimo.exe', 'C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\@mimo-ai\\cli\\node_modules\\@mimo-ai\\mimocode-windows-x64-baseline\\bin\\mimo.exe'], envKey: 'CTI_MIMO_EXEC', command: 'mimo' },
+    { runtime: 'mimo',      display: 'MiMo',      files: ['C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\@mimo-ai\\cli\\node_modules\\@mimo-ai\\mimocode-windows-x64\\bin\\mimo.exe', 'C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\@mimo-ai\\cli\\node_modules\\@mimo-ai\\mimocode-windows-x64-baseline\\bin\\mimo.exe'], envKey: 'CTI_MIMO_EXEC', command: 'mimo', install: 'npm i -g @mimo-ai/cli', },
     // reasonix: provider 候选 reasonix-cli.exe（Local\Programs）> npm 包内 reasonix.exe
-    { runtime: 'reasonix',  display: 'Reasonix',  files: ['C:\\Users\\oadan\\AppData\\Local\\Programs\\Reasonix\\reasonix-cli.exe', 'C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\reasonix\\node_modules\\@reasonix\\cli-win32-x64\\bin\\reasonix.exe'], envKey: 'CTI_REASONIX_EXEC', command: 'reasonix' },
+    { runtime: 'reasonix',  display: 'Reasonix',  files: ['C:\\Users\\oadan\\AppData\\Local\\Programs\\Reasonix\\reasonix-cli.exe', 'C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\reasonix\\node_modules\\@reasonix\\cli-win32-x64\\bin\\reasonix.exe'], envKey: 'CTI_REASONIX_EXEC', command: 'reasonix', install: '', },
     // openakita: provider 用 venv python 当执行器，ARG 的 ACP server 脚本才是真程序（相对 agents-to-feishu 根）
     // 探测/显示以 ACP server 脚本为准（python 仅执行器，显示 python 会误导）
-    { runtime: 'openakita', display: 'OpenAkita', files: ['C:\\D\\opt\\agents-to-feishu\\scripts\\openakita-acp-server.py'], envKey: 'CTI_OPENAKITA_SERVER', command: 'scripts/openakita-acp-server.py' },
+    { runtime: 'openakita', display: 'OpenAkita', files: ['C:\\D\\opt\\agents-to-feishu\\scripts\\openakita-acp-server.py'], envKey: 'CTI_OPENAKITA_SERVER', command: 'scripts/openakita-acp-server.py', install: '', },
     // dsh: provider 用 node 当执行器，真程序 = DSH harness 的 ACP demo 入口 bin.ts
-    { runtime: 'dsh', display: 'DSH', files: ['C:\\D\\opt\\deepseek-harness\\deepseek-harness\\packages\\examples\\acp-demo\\src\\bin.ts'], envKey: 'CTI_DSH_HARNESS_PATH', command: 'packages/examples/acp-demo/src/bin.ts' },
+    { runtime: 'dsh', display: 'DSH', files: ['C:\\D\\opt\\deepseek-harness\\deepseek-harness\\packages\\examples\\acp-demo\\src\\bin.ts'], envKey: 'CTI_DSH_HARNESS_PATH', command: 'packages/examples/acp-demo/src/bin.ts', install: '', },
     // zcode: provider 用 node 当执行器，真程序 = ZCode 桌面版内置 CLI（app-server --stdio）
-    { runtime: 'zcode', display: 'ZCode', files: ['C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs', 'C:\\Users\\oadan\\AppData\\Local\\Programs\\ZCode\\resources\\glm\\zcode.cjs'], envKey: 'CTI_ZCODE_CLI', command: 'zcode.cjs' },
+    { runtime: 'zcode', display: 'ZCode', files: ['C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs', 'C:\\Users\\oadan\\AppData\\Local\\Programs\\ZCode\\resources\\glm\\zcode.cjs'], envKey: 'CTI_ZCODE_CLI', command: 'zcode.cjs', install: '下载安装 ZCode 桌面版（z.ai 官方产品）', },
   ];
 
   // ── 每个 runtime 的"启动环境模板"（配置页可看/可改，保存后穿透给 agent）──
@@ -708,11 +710,41 @@ export function createConfigServer(opts: ConfigServerOptions) {
           return json(res, 200, { ok: true, skipped: true, message: 'restartOnApply=false（测试模式），跳过重启' });
         }
         try {
-          await restartAgentProcess(id);
-          return json(res, 200, { ok: true, service: id });
+          const mode = await pmRestart(id);
+          return json(res, 200, { ok: true, service: id, mode });
         } catch (e) {
           return json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
         }
+      }
+
+      // POST /api/agents/:id/start | /stop —— 进程托管启停（有 nssm 服务转发 nssm；无则配置中心子进程托管，别人机器零 nssm 依赖）
+      if (routeMatch(p, '/api/agents/:id/start') && method === 'POST') {
+        const id = param(p, '/api/agents/:id/start', 'id');
+        const store = load();
+        if (!store.agents.find((a) => a.id === id)) return json(res, 404, { error: `agent ${id} 不存在` });
+        const r = await pmStart(id);
+        return json(res, 200, { ok: true, ...r });
+      }
+      if (routeMatch(p, '/api/agents/:id/stop') && method === 'POST') {
+        const id = param(p, '/api/agents/:id/stop', 'id');
+        const r = await pmStop(id);
+        return json(res, 200, { ok: true, ...r });
+      }
+
+      // GET /api/proc-status —— 子进程托管状态（pid/uptime/重启计数/日志尾巴）
+      if (p === '/api/proc-status' && method === 'GET') {
+        return json(res, 200, { procs: pmStatus() });
+      }
+
+      // GET /api/bootstrap —— 首跑引导数据（fresh = 一个 agent 都没建；runtimes 带安装提示）
+      if (p === '/api/bootstrap' && method === 'GET') {
+        const store = load();
+        return json(res, 200, {
+          fresh: store.agents.length === 0,
+          agentCount: store.agents.length,
+          feishuAppGuide: 'https://open.feishu.cn/document/home/introduction-to-custom-app-creation/overview',
+          runtimes: REL_RUNTIMES.map((rt) => ({ runtime: rt.runtime, display: rt.display, install: rt.install || '' })),
+        });
       }
 
       // GET /api/agents/:id/status
@@ -1590,21 +1622,13 @@ export function createConfigServer(opts: ConfigServerOptions) {
 // ── 进程重启（独立于服务，供 apply 调用）──
 
 /**
- * 重启某 agent 的 ACP 进程：通过 nssm 重启名为 <agentId> 的服务（服务名 = agent 短名，如 dsh/gemini）。
- * 若服务不存在，记录提示（不阻塞）。
+ * 重启某 agent 的 ACP 进程（apply 后真实生效）。
+ * 2026-09-05 委托进程管理器：有 nssm 服务走 nssm restart；没有（别人机器）走子进程托管重启，
+ * 零 nssm 依赖。失败不阻塞 apply（配置文件已写好，进程起不起得来看状态页排障）。
  */
 export function restartAgentProcess(agentId: string): Promise<void> {
-  return new Promise((resolve) => {
-    const serviceName = agentId; // 服务名 = agent 短名（用户要求：避免 agents-to-feishu-xxx 长名）
-    execFile('C:\\Windows\\System32\\nssm.exe', ['restart', serviceName], { timeout: 20000 }, (err) => {
-      if (!err) { console.log(`[config-center] nssm restart ${serviceName} ok`); return resolve(); }
-      // fallback：尝试 agentsconfig::restart 子命令（若存在）
-      execFile('C:\\Windows\\System32\\nssm.exe', ['get', serviceName, 'Application'], { timeout: 8000 }, (e2) => {
-        if (!e2) return resolve();
-        console.log(`[config-center] nssm restart ${serviceName} failed (${err.message}); agent 服务可能未建`);
-        resolve();
-      });
-    });
+  return pmRestart(agentId).then((r) => {
+    console.log(`[config-center] restart ${agentId} mode=${r.mode}`);
   });
 }
 

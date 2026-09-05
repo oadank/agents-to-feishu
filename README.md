@@ -27,14 +27,13 @@ config-store.json（唯一真相源：providers 池 / mcps 池 / agents 分配�
 2. 启动配置中心（首次运行自动生成 `~/.agents-to-feishu/config-store.json` 骨架）：
    `npm run config-center`，浏览器打开 `http://localhost:13600`
 3. 网页「总配置」：建一个模型 Provider（填你的 baseURL + API Key + 模型，如 `https://ark.cn-beijing.volces.com/api/plan/v3` + 火山方舟 key；或任何 OpenAI 兼容网关）
-4. 网页「Agent 分配置」：新建 Agent——飞书应用凭证（App ID/Secret，[创建应用指南](https://open.feishu.cn/document/home/introduction-to-custom-app-creation/overview)）、
-   选 runtime（自动探测到的 CLI）、选 provider/model、勾选 MCP、设端口。保存即自动渲染配置。
-5. 启动该 Agent 的桥接进程（每个 Agent 一个进程）：
-   ```bash
-   node node_modules/tsx/dist/cli.mjs --require node_modules/tsx/dist/preflight.cjs src/index.ts
-   ```
-   开发环境可临时用环境变量指明身份：`CTI_BOT=<agentId> node node_modules/tsx/dist/cli.mjs src/index.ts`
-   （Windows 长期运行建议用 nssm/计划任务把该命令注册成服务，服务环境需带 `CTI_BOT=<agentId>` 和 `CTI_USER_HOME`）
+4. 网页「Agent 分配置」：新建 Agent——选运行时（自动探测到的 CLI，未检测到的会给出安装命令）、
+   飞书应用凭证（App ID/Secret，[创建应用指南](https://open.feishu.cn/document/home/introduction-to-custom-app-creation/overview)）、
+   选 provider/model、勾选 MCP、设端口。保存即自动渲染配置。
+5. 启动 bot：网页 Agent 卡片点「**启动**」即可——配置中心内置进程托管（无 nssm 依赖，崩溃自动重启、
+   停止/重启都在网页点）。`CTI_PROC_MANAGER=off` 可关闭托管。
+   Windows 长期部署也可改为 nssm 系统服务（服务环境需带 `CTI_BOT=<agentId>` 与 `CTI_USER_HOME`），
+   有同名服务时托管自动让位给 nssm。也可以手动前台跑：`CTI_BOT=<agentId> npm run bot`
 6. 在飞书里给这个 bot 发第一条消息——闭环完成。
 
 **凭证存放**：网页填写的 key 存 `~/.agents-to-feishu/.credentials.yaml`（项目自有凭证层，`KEY: value` 格式）；
