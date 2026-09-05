@@ -1,4 +1,4 @@
-/* 运行时管理页 —— 每个 Agent 真实对接的 CLI 程序/路径 + 检测状态 + 启动参数开关（自动推导 + 可点开关） */
+/* 运行时管理页 —— 每个 Agent 真实对接的 CLI 程序/路径 + 检测状态 + 启动参数开关（模板驱动 + 可点开关/输入） */
 (function () {
   "use strict";
   const { h, render } = preact;
@@ -30,13 +30,19 @@
     const [err, setErr] = useState(null);
     const pickerRef = {};
 
-    // 开关状态：初始化自当前生效 env（rt.env），可点
+    // 启动参数：初始化自当前生效 env（rt.env = 模板 + 用户覆盖合并），全部模板键可编辑。
+    // 开关型键（rt.envFlags）值非空 = 勾选；其余键文本输入。默认值全部预设好（老大要求：装上就能启动）。
     const initEnv = rt.env || {};
-    const [permOn, setPermOn] = useState(!!initEnv.ANTHROPIC_PERMISSION_MODE && initEnv.ANTHROPIC_PERMISSION_MODE !== '');
-    const [silenceOn, setSilenceOn] = useState(initEnv.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT === '1');
-
-    // 只对该 runtime 有可点开关的（claude）；其他 runtime 无特殊启动参数
-    const hasToggles = rt.runtime === 'claude';
+    const tpl = rt.envTpl || {};
+    const flags = rt.envFlags || [];
+    const labels = rt.envLabels || {};
+    const keys = Object.keys(tpl);
+    const [envValues, setEnvValues] = useState(function () {
+      const v = {};
+      for (const k of keys) v[k] = initEnv[k] !== undefined ? initEnv[k] : (tpl[k] || "");
+      return v;
+    });
+    const hasParams = keys.length > 0;
 
     function openPicker() {
       if (window.showOpenFilePicker) {
@@ -54,16 +60,11 @@
 
     async function saveAll() {
       setSaving(true); setSaved(""); setErr(null);
-      // 这里只写"启动参数开关"（claude 的权限/告警两个），
-      // baseURL / 模型 / 上下文 由后端 render 自动注入（取自 Agent 分配置），不在运行时页手填。
-      var envBody = {};
-      if (hasToggles) {
-        envBody.ANTHROPIC_PERMISSION_MODE = permOn ? 'bypassPermissions' : '';
-        envBody.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT = silenceOn ? '1' : '';
-        // 清掉旧版可能残留的手填 env（避免覆盖 render 自动注入）
-        envBody.ANTHROPIC_BASE_URL = '';
-        envBody.ANTHROPIC_MODEL = '';
-        envBody.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '';
+      // 穿透所有启动参数：开关键 = 勾选 ? 模板默认值 : 空（剔除）；文本键 = 输入值（空 = 剔除覆盖）
+      const envBody = {};
+      for (const k of keys) {
+        if (flags.includes(k)) envBody[k] = envValues[k] ? envValues[k] : "";
+        else envBody[k] = envValues[k] !== undefined ? envValues[k] : "";
       }
       // 保存（写 config-open runtimeEnv/cliPath）
       const r = await api("/api/runtimes", "POST", { runtime: rt.runtime, cliPath: path, env: envBody });
@@ -87,14 +88,24 @@
         h("button", { class: "btn", onClick: openPicker }, "📁 浏览"),
         h("input", { ref: function (n) { pickerRef.current = n; }, type: "file", style: { display: "none" },
           accept: ".exe,.cmd,.bat,.cjs,.js,.ps1,.py", onChange: onFileChosen })),
-      hasToggles ? h("div", { class: "env-box" },
-        h("div", { class: "env-title" }, "启动参数（打勾 = 启用，保存后自动重启生效）"),
-        h("div", { class: "row kv" },
-          h("span", { class: "k" }, "自动跳过审批 / 最大权限运行"),
-          h(Switch, { checked: permOn, onChange: function () { setPermOn(!permOn); setSaved(""); setErr(null); } })),
-        h("div", { class: "row kv" },
-          h("span", { class: "k" }, "消除未知模型告警"),
-          h(Switch, { checked: silenceOn, onChange: function () { setSilenceOn(!silenceOn); setSaved(""); setErr(null); } })),
+      !rt.detected && rt.install ? h("div", { class: "row kv" }, h("span", { class: "k" }, "安装提示:"),
+        h("span", { class: "v" }, rt.install)) : null,
+      hasParams ? h("div", { class: "env-box" },
+        h("div", { class: "env-title" }, "启动参数（已预设正确默认值；勾选/填写后保存自动重启生效）"),
+        keys.map(function (k) {
+          const isFlag = flags.includes(k);
+          const label = labels[k] || k;
+          if (isFlag) {
+            return h("div", { class: "row kv", key: k },
+              h("span", { class: "k" }, label),
+              h(Switch, { checked: !!envValues[k], onChange: function () { setEnvValues(Object.assign({}, envValues, { [k]: envValues[k] ? "" : (tpl[k] || "1") })); setSaved(""); setErr(null); } }));
+          }
+          return h("div", { class: "row kv", key: k },
+            h("span", { class: "k" }, label),
+            h("input", { type: "text", value: envValues[k] || "", placeholder: tpl[k] || "",
+              onInput: function (e) { setEnvValues(Object.assign({}, envValues, { [k]: e.target.value })); setSaved(""); setErr(null); },
+              style: { minWidth: 220 } }));
+        }),
       ) : null,
       h("div", { class: "divider" }),
       h("div", { class: "row" },
@@ -125,7 +136,7 @@
       h("h1", null, inIframe ? null : h("button", { class: "btn", style: { fontSize: 12 }, onClick: () => { location.href = "./"; } }, "←"), " 🧩 运行时管理"),
       h("div", { class: "note-box" },
         "这里管理每个 Agent 实际对接的 AI CLI 程序。模型 / Provider / 上下文自动取自「Agent 分配置」；" +
-        "这里只管「对接哪个 CLI」和「启动参数开关」。改完点「保存并应用」即自动重启对应 Agent 生效。"),
+        "每个 runtime 的启动参数已预设正确默认值（装上对应 CLI 即可不报错启动），可在此微调。改完点「保存并应用」即自动重启对应 Agent 生效。"),
       runtimes.map(function (rt) { return h(RuntimeCard, { rt: rt, store: store, key: rt.runtime, onChanged: load }); }),
     );
   }

@@ -223,7 +223,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
     // gemini: provider CTI_GEMINI_CLI_PATH || 'gemini' → PATH 命令
     { runtime: 'gemini',    display: 'Gemini',    where: 'gemini',    envKey: 'CTI_GEMINI_CLI_PATH', command: 'gemini', install: 'npm i -g @google/gemini-cli', },
     // hermes: provider CTI_HERMES_CLI_PATH || 'hermes' → PATH 命令（真实装在本机 Local\hermes 的 venv exe）
-    { runtime: 'hermes',    display: 'Hermes',    where: 'hermes',    envKey: 'CTI_HERMES_CLI_PATH', command: 'hermes', install: '', },
+    { runtime: 'hermes',    display: 'Hermes',    where: 'hermes',    envKey: 'CTI_HERMES_CLI_PATH', command: 'hermes', install: '开源项目 Hermes Agent：安装后 PATH 自动探测/到本页填路径', },
     // opencode: provider 候选 exe（opencode-windows-x64\bin\opencode.exe，baseline 兜底）
     { runtime: 'opencode',  display: 'OpenCode',  files: ['C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\node_modules\\opencode-windows-x64\\bin\\opencode.exe', 'C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\node_modules\\opencode-windows-x64-baseline\\bin\\opencode.exe'], envKey: 'CTI_OPENCODE_EXEC', command: 'opencode', install: 'npm i -g opencode-ai', },
     // openclaw: provider 候选 %USERPROFILE%\AppData\Roaming\npm\openclaw.exe
@@ -231,18 +231,21 @@ export function createConfigServer(opts: ConfigServerOptions) {
     // mimo: provider 候选 mimocode-windows-x64\bin\mimo.exe（baseline 兜底）
     { runtime: 'mimo',      display: 'MiMo',      files: ['C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\@mimo-ai\\cli\\node_modules\\@mimo-ai\\mimocode-windows-x64\\bin\\mimo.exe', 'C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\@mimo-ai\\cli\\node_modules\\@mimo-ai\\mimocode-windows-x64-baseline\\bin\\mimo.exe'], envKey: 'CTI_MIMO_EXEC', command: 'mimo', install: 'npm i -g @mimo-ai/cli', },
     // reasonix: provider 候选 reasonix-cli.exe（Local\Programs）> npm 包内 reasonix.exe
-    { runtime: 'reasonix',  display: 'Reasonix',  files: ['C:\\Users\\oadan\\AppData\\Local\\Programs\\Reasonix\\reasonix-cli.exe', 'C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\reasonix\\node_modules\\@reasonix\\cli-win32-x64\\bin\\reasonix.exe'], envKey: 'CTI_REASONIX_EXEC', command: 'reasonix', install: '', },
+    { runtime: 'reasonix',  display: 'Reasonix',  files: ['C:\\Users\\oadan\\AppData\\Local\\Programs\\Reasonix\\reasonix-cli.exe', 'C:\\Users\\oadan\\AppData\\Roaming\\npm\\node_modules\\reasonix\\node_modules\\@reasonix\\cli-win32-x64\\bin\\reasonix.exe'], envKey: 'CTI_REASONIX_EXEC', command: 'reasonix', install: '开源项目 Reasonix：安装后自动探测/到本页填路径', },
     // openakita: provider 用 venv python 当执行器，ARG 的 ACP server 脚本才是真程序（相对 agents-to-feishu 根）
     // 探测/显示以 ACP server 脚本为准（python 仅执行器，显示 python 会误导）
-    { runtime: 'openakita', display: 'OpenAkita', files: ['C:\\D\\opt\\agents-to-feishu\\scripts\\openakita-acp-server.py'], envKey: 'CTI_OPENAKITA_SERVER', command: 'scripts/openakita-acp-server.py', install: '', },
+    { runtime: 'openakita', display: 'OpenAkita', files: ['C:\\D\\opt\\agents-to-feishu\\scripts\\openakita-acp-server.py'], envKey: 'CTI_OPENAKITA_SERVER', command: 'scripts/openakita-acp-server.py', install: '开源项目 OpenAkita：安装后自动探测/到本页填路径', },
     // dsh: provider 用 node 当执行器，真程序 = DSH harness 的 ACP demo 入口 bin.ts
-    { runtime: 'dsh', display: 'DSH', files: ['C:\\D\\opt\\deepseek-harness\\deepseek-harness\\packages\\examples\\acp-demo\\src\\bin.ts'], envKey: 'CTI_DSH_HARNESS_PATH', command: 'packages/examples/acp-demo/src/bin.ts', install: '', },
+    { runtime: 'dsh', display: 'DSH', files: ['C:\\D\\opt\\deepseek-harness\\deepseek-harness\\packages\\examples\\acp-demo\\src\\bin.ts'], envKey: 'CTI_DSH_HARNESS_PATH', command: 'packages/examples/acp-demo/src/bin.ts', install: '开源项目 DeepSeek Harness：clone 安装后，到本页把 harness 路径填好', },
     // zcode: provider 用 node 当执行器，真程序 = ZCode 桌面版内置 CLI（app-server --stdio）
+    // deeptutor: 自包含 HTTP 服务（非 CLI），provider 直连其服务端口；无 CLI 可探测 → 恒可用
+    { runtime: 'deeptutor', display: 'DeepTutor', envKey: 'CTI_DEEPTUTOR_SERVICE', command: 'deeptutor', install: '开源项目 DeepTutor：按其文档部署服务后使用', },
     { runtime: 'zcode', display: 'ZCode', files: ['C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs', 'C:\\Users\\oadan\\AppData\\Local\\Programs\\ZCode\\resources\\glm\\zcode.cjs'], envKey: 'CTI_ZCODE_CLI', command: 'zcode.cjs', install: '下载安装 ZCode 桌面版（z.ai 官方产品）', },
   ];
 
   // ── 每个 runtime 的"启动环境模板"（配置页可看/可改，保存后穿透给 agent）──
   // key = env 变量名，value = 默认建议值（用户可在配置页覆盖；空字符串 = 删除该 env）
+  // 2026-09-05 老大要求：每个 runtime 的正确启动参数都预设好，别人装上 agent 就能不报错启动。
   const ENV_TPL: Record<string, Record<string, string>> = {
     claude: {
       'ANTHROPIC_BASE_URL': '',            // 直连网关（默认留空 → provider 回落 LiteLLM；用户填网关 URL 即直连）
@@ -252,7 +255,76 @@ export function createConfigServer(opts: ConfigServerOptions) {
       'CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT': '1', // 消第三方模型不识别告警
       'CLAUDE_CODE_MAX_CONTEXT_TOKENS': '1000000', // 第三方 1M 上下文
     },
-    // 其他 runtime 的启动参数模板可后续补充（目前缺省为空，仅 claude 需要直连/权限类 env）
+    zcode: {
+      'CTI_ZCODE_CLI': '',                 // zcode.cjs 路径（默认留空 → 探测 Program Files 标准安装位）
+      'CTI_ZCODE_STALL_MS': '300000',      // 流空闲看门狗：5min 零事件判卡死（长任务可调大）
+      'CTI_ZCODE_THINK_HEAD': '400',       // 流式思考转发上限：防💭滑动窗口高频全换（闪烁根因）
+    },
+    opencode: {
+      'CTI_OPENCODE_EXEC': '',             // opencode.exe 路径（默认留空 → 探测 npm 全局位置）
+      'CTI_OPENCODE_TIMEOUT_MS': '300000', // 单 prompt 卡死看门狗
+      'CTI_OPENCODE_IDLE_TIMEOUT_MS': '1800000', // 会话空闲回收（30min）
+    },
+    gemini: {
+      'CTI_GEMINI_CLI_PATH': '',           // gemini CLI 路径（默认留空 → PATH 查找）
+      'CTI_GEMINI_BASE_URL': '',           // 默认留空 → 用所选 provider 网关
+      'CTI_GEMINI_API_KEY': '',            // 默认留空 → 凭证层读取
+      'CTI_GEMINI_PROMPT_TIMEOUT_MS': '',  // 留空 → provider 内部默认
+    },
+    openakita: {
+      'CTI_OPENAKITA_SERVER': '',          // ACP server 脚本（默认留空 → 项目 scripts/ 相对路径）
+      'CTI_OPENAKITA_WORKSPACE': '',       // 留空 → provider 内部默认
+    },
+    openclaw: {
+      'CTI_OPENCLAW_EXEC': '',             // openclaw.exe 路径（默认留空 → 探测 npm 全局位置）
+      'CTI_OPENCLAW_STATE_DIR': '',        // 留空 → openclaw 自管
+    },
+    mimo: {
+      'CTI_MIMO_EXEC': '',                 // mimo.exe 路径（默认留空 → 探测 npm 全局位置）
+    },
+    reasonix: {
+      'CTI_REASONIX_EXEC': '',             // reasonix-cli.exe 路径（默认留空 → 探测安装位置/PATH）
+      'CTI_REASONIX_TIMEOUT_MS': '',       // 留空 → provider 内部默认
+    },
+    hermes: {
+      'CTI_HERMES_CLI_PATH': '',           // hermes CLI 路径（默认留空 → PATH 查找）
+    },
+    dsh: {
+      'CTI_DSH_HARNESS_PATH': '',          // DeepSeek Harness 根目录（默认留空 → 探测/运行时页手填）
+    },
+    // deeptutor：自包含 HTTP 服务，无 CLI 启动参数（服务可达性由 provider 报错提示）
+  };
+  /** 开关型 env（网页渲染成打勾开关；值非空 = 勾选）。其余 envTpl 键渲染成文本输入。 */
+  const ENV_FLAG_KEYS: Record<string, string[]> = {
+    claude: ['ANTHROPIC_PERMISSION_MODE', 'CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT'],
+  };
+  /** env 键的中文说明（网页展示） */
+  const ENV_LABELS: Record<string, string> = {
+    'ANTHROPIC_BASE_URL': '直连网关 URL（留空=走 LiteLLM 回落）',
+    'ANTHROPIC_AUTH_TOKEN': '直连网关 key（留空=凭证层读取）',
+    'ANTHROPIC_MODEL': '模型名（留空=用所选模型）',
+    'ANTHROPIC_PERMISSION_MODE': '自动跳过审批 / 最大权限运行',
+    'CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT': '消除未知模型告警',
+    'CLAUDE_CODE_MAX_CONTEXT_TOKENS': '最大上下文 tokens',
+    'CTI_ZCODE_CLI': 'zcode.cjs 路径（留空=自动探测）',
+    'CTI_ZCODE_STALL_MS': '流空闲看门狗（毫秒）',
+    'CTI_ZCODE_THINK_HEAD': '流式思考转发上限（字符）',
+    'CTI_OPENCODE_EXEC': 'opencode.exe 路径（留空=自动探测）',
+    'CTI_OPENCODE_TIMEOUT_MS': '单轮卡死看门狗（毫秒）',
+    'CTI_OPENCODE_IDLE_TIMEOUT_MS': '会话空闲回收（毫秒）',
+    'CTI_GEMINI_CLI_PATH': 'gemini CLI 路径（留空=PATH 查找）',
+    'CTI_GEMINI_BASE_URL': '网关 URL（留空=用所选 provider）',
+    'CTI_GEMINI_API_KEY': 'API key（留空=凭证层读取）',
+    'CTI_GEMINI_PROMPT_TIMEOUT_MS': 'prompt 超时（毫秒，留空=默认）',
+    'CTI_OPENAKITA_SERVER': 'ACP server 脚本路径',
+    'CTI_OPENAKITA_WORKSPACE': '工作空间目录（留空=默认）',
+    'CTI_OPENCLAW_EXEC': 'openclaw.exe 路径（留空=自动探测）',
+    'CTI_OPENCLAW_STATE_DIR': '状态目录（留空=自管）',
+    'CTI_MIMO_EXEC': 'mimo.exe 路径（留空=自动探测）',
+    'CTI_REASONIX_EXEC': 'reasonix-cli.exe 路径（留空=自动探测）',
+    'CTI_REASONIX_TIMEOUT_MS': 'prompt 超时（毫秒，留空=默认）',
+    'CTI_HERMES_CLI_PATH': 'hermes CLI 路径（留空=PATH 查找）',
+    'CTI_DSH_HARNESS_PATH': 'DeepSeek Harness 根目录',
   };
 
   /** 读取 config-open.json 里用户配置的 runtime 启动环境覆盖 { runtime: { ENV: value } } */
@@ -560,9 +632,12 @@ export function createConfigServer(opts: ConfigServerOptions) {
           return {
             runtime: rt.runtime, display: rt.display, command: rt.command,
             envKey: rt.envKey, configured, resolvedPath, detected,
+            install: rt.install || '',
             envTpl: Object.keys(tpl).reduce<Record<string, string>>((a, k) => { a[k] = tpl[k]; return a; }, {}), // 默认模板（含空提示）
             envOver: Object.assign({}, over),      // 用户覆盖（仅显式保存的）
             env,                                    // 最终生效值（模板+覆盖合并）
+            envFlags: ENV_FLAG_KEYS[rt.runtime] || [],   // 开关型键（网页渲染成打勾开关）
+            envLabels: ENV_LABELS,                       // 键的中文说明
           };
         }));
         return json(res, 200, { runtimes: list });

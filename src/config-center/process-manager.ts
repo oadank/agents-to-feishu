@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildWindowsPath } from '../providers/win-spawn-env.js';
 
 function log(msg: string): void {
   console.log(`[proc-manager] ${msg}`);
@@ -94,13 +95,17 @@ function spawnChild(agentId: string): void {
 
   const { preflight, loader } = resolveTsx();
   const entry = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'index.ts');
+  // 环境契约与 nssm 服务部署完全一致（2026-09-05 老大要求：两种启动方式的配置信息必须一致）：
+  //   nssm 服务 = CTI_BOT / CTI_HOME / CTI_USER_HOME / PATH(补全列表)
+  //   子进程    = 同样四件套；PATH 统一走 buildWindowsPath 收口（providers 同源），
+  //               缺的键按配置中心自身环境 / os.homedir() 解析，零机器路径写死。
   const env: NodeJS.ProcessEnv = { ...process.env, CTI_BOT: agentId };
-  // 兜底关键身份变量（配置中心进程缺省时按本机解析，不写死路径）
   if (!env.CTI_USER_HOME) env.CTI_USER_HOME = os.homedir();
   if (!env.CTI_HOME) env.CTI_HOME = path.join(os.homedir(), '.agents-to-feishu');
   // 桥接进程的 USERPROFILE/HOME 必须指向真实用户目录（index.ts 对 systemprofile 有兜底，这里直接给对）
   env.USERPROFILE = env.CTI_USER_HOME;
   env.HOME = env.CTI_USER_HOME;
+  env.PATH = buildWindowsPath(env.PATH);
 
   const child = spawn(process.execPath, [
     '--require', preflight,
@@ -111,7 +116,7 @@ function spawnChild(agentId: string): void {
   m.child = child;
   m.startedAt = Date.now();
   m.desired = true;
-  log(`child spawned agent=${agentId} pid=${child.pid}`);
+  log(`child spawned agent=${agentId} pid=${child.pid} | env 契约: CTI_BOT=${agentId} CTI_HOME=${env.CTI_HOME} CTI_USER_HOME=${env.CTI_USER_HOME} PATH 段=${(env.PATH || '').split(';').filter(Boolean).length}`);
   child.stdout?.on('data', (c: Buffer) => pushTail(m, c.toString()));
   child.stderr?.on('data', (c: Buffer) => pushTail(m, c.toString()));
   child.on('error', (err) => {
