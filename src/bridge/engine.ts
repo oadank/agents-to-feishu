@@ -604,12 +604,21 @@ export class MessageEngine {
       if (flushTimer) return;
       flushTimer = setTimeout(() => { flushTimer = null; void doFlush(); }, FLUSH_INTERVAL_MS);
     };
+    // 工具事件节流：[2026-09-05] 工具卡片本来每事件立即整卡重绘，AI 连发多条工具状态
+    // （call/update/finish）时一帧内多次全量刷新 = 正文闪烁。收敛到 300ms 窗口内合并一次，
+    // 工具行本身低频离散，300ms 感观即时、又避免高频整卡重绘。
+    let toolFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleToolFlush = (): void => {
+      if (toolFlushTimer) return;
+      toolFlushTimer = setTimeout(() => { toolFlushTimer = null; scheduleFlush(); }, 300);
+    };
     /** 停止定时器并等待在途 PATCH 完成（防止最终卡被过期的流式视图覆盖） */
     const quiesce = async (): Promise<void> => {
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       // 节流兜底定时器也要清：否则 FINAL 渲染后被过期的流式视图覆盖（终卡闪回旧内容）
       if (textFlushTimer) { clearTimeout(textFlushTimer); textFlushTimer = null; }
       if (thinkFlushTimer) { clearTimeout(thinkFlushTimer); thinkFlushTimer = null; }
+      if (toolFlushTimer) { clearTimeout(toolFlushTimer); toolFlushTimer = null; }
       while (flushing) await new Promise((r) => setTimeout(r, 25));
     };
 
@@ -681,7 +690,7 @@ export class MessageEngine {
               if (idx >= 0) layers.toolLines[idx] = `${mark} ${layers.toolLines[idx]}`;
               else layers.toolLines.push(`${mark} ${toolStartLine(ev.tool, ev.input)}`);
             }
-            scheduleFlush();
+            scheduleToolFlush();
             break;
           }
           // [2026-09-03] deeptutor 语音口语稿：DeepTutor 产出口语稿，实际发声走

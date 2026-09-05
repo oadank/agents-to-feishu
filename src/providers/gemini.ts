@@ -33,6 +33,10 @@ function extractSessionId(msg: GeminiServerMessage): string {
 export class GeminiProvider implements RuntimeProvider {
   readonly name = 'gemini';
 
+  /** 会话复用：sessionKey → app-server 会话（gemini 每次必须开新 session，靠此映射跨消息复用上下文） */
+  private sessions = new Map<string, { sessionId: string; lastUsed: number; personaInjected: boolean }>();
+  private static readonly MAX_SESSIONS = 20;
+
   private client: GeminiAppServerClient | null = null;
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -93,9 +97,16 @@ export class GeminiProvider implements RuntimeProvider {
     }
   }
 
-  async resetSession(_sessionKey?: string): Promise<void> {
-    // gemini 每次 streamChat 都新建 session（app-server 模式），无需缓存清理
-    rtLog(`[gemini] resetSession called`);
+  async resetSession(sessionKey?: string): Promise<void> {
+    // gemini 跨消息靠 sessionKey → app-server 会话映射复用上下文；重置时清掉对应映射，
+    // 下条消息（freshSession=true）会为新 sessionKey 开全新会话。
+    if (sessionKey) {
+      this.sessions.delete(sessionKey);
+      rtLog(`[gemini] resetSession key=${sessionKey.slice(0, 8)} -> dropped, next msg opens fresh session`);
+    } else {
+      this.sessions.clear();
+      rtLog(`[gemini] resetSession: all sessions dropped`);
+    }
   }
 
   async interrupt(): Promise<void> {
@@ -123,34 +134,50 @@ export class GeminiProvider implements RuntimeProvider {
     const settledP = new Promise<void>((r) => { settleResolve = r; });
 
     let thinkingBuffer = '';
-    const sessionIdPromise: Promise<string> = (async () => {
-      // 2026-08-30：session/new 同样加 120s 超时护栏（与 hermes 同款，防 app-server 挂起卡队列）
-      const newSession = await Promise.race([
-        client.call<{ sessionId: string; models?: { currentModelId?: string } }>('session/new', {
-        cwd: params.sessionKey ? process.env.CTI_DEFAULT_WORKDIR || process.cwd() : process.env.CTI_DEFAULT_WORKDIR || process.cwd(),
-        mcpServers: [],
-        }),
-        new Promise<never>((_, reject) => setTimeout(
-          () => reject(new Error('session/new 超时 120s（app-server 无响应）')),
-          120_000,
-        )),
-      ]);
-      return newSession.sessionId;
-    })();
 
-    let sessionId: string;
-    try { sessionId = await sessionIdPromise; }
-    catch (e) {
-      yield { type: 'error', message: `Gemini session/new 失败: ${e instanceof Error ? e.message : String(e)}` };
-      yield { type: 'done' };
-      return;
+    // [2026-09-05 修复] 复用 app-server 会话：此前每次消息都新建 session 且不带 history，
+    // 导致 bot 完全没有跨消息记忆（"你说得对，我确实没有你刚才那段话的上下文记忆"）。
+    // 现在按 sessionKey 复用会话，跟 openclaw 同款——只有 /new（freshSession=true）或
+    // 中断后才开新会话，正常轮次靠 app-server 会话自带上下文。
+    const { sessionKey } = params;
+    let session = this.sessions.get(sessionKey);
+
+    if (this.sessions.size >= GeminiProvider.MAX_SESSIONS && !this.sessions.has(sessionKey)) {
+      let oldestKey: string | null = null, oldestAt = Infinity;
+      for (const [k, s] of this.sessions) if (s.lastUsed < oldestAt) { oldestAt = s.lastUsed; oldestKey = k; }
+      if (oldestKey) this.sessions.delete(oldestKey);
     }
-    rtLog(`[gemini] session created: ${sessionId.slice(0, 8)}`);
 
-    // 首条消息注入人设
-    let fullPrompt = params.text;
-    if (params.systemPrompt) {
-      fullPrompt = `${params.systemPrompt}\n\n${params.text}`;
+    if (!session || params.freshSession) {
+      try {
+        // 2026-08-30：session/new 加 120s 超时护栏（与 hermes 同款，防 app-server 挂起卡队列）
+        const newSession = await Promise.race([
+          client.call<{ sessionId: string }>('session/new', {
+            cwd: process.env.CTI_DEFAULT_WORKDIR || process.cwd(),
+            mcpServers: [],
+          }),
+          new Promise<never>((_, reject) => setTimeout(
+            () => reject(new Error('session/new 超时 120s（app-server 无响应）')),
+            120_000,
+          )),
+        ]);
+        session = { sessionId: newSession.sessionId, lastUsed: Date.now(), personaInjected: false };
+        this.sessions.set(sessionKey, session);
+      } catch (e) {
+        yield { type: 'error', message: `Gemini session/new 失败: ${e instanceof Error ? e.message : String(e)}` };
+        yield { type: 'done' };
+        return;
+      }
+    }
+
+    const sessionId = session.sessionId;
+    session.lastUsed = Date.now();
+    rtLog(`[gemini] session ${params.freshSession ? 'CREATED' : 'REUSED'} ${sessionId.slice(0, 8)} key=${sessionKey.slice(0, 8)}`);
+
+    // 人设：仅新会话首条消息注入；[2026-09-05] 中断保留历史：注入 bridge 存的 session.context。
+    // /new（freshSession）清空白语义不注入；正常轮次靠 app-server 会话自带历史不注入。
+    if (!session.personaInjected) {
+      session.personaInjected = true;
     }
 
     // 订阅 server notifications → push 事件
@@ -234,6 +261,18 @@ export class GeminiProvider implements RuntimeProvider {
           break;
       }
     });
+
+    // 人设 + 上下文拼接：[2026-09-05] 新会话首条注入 systemPrompt；
+    // 中断（sessionKey 首次出现时为 null，无法区分）仅靠 app-server 会话，故正常轮次不注入 history；
+    // 但若 bridge 显式传了 history（/compact 摘要或中断保留），优先注入以保上下文。
+    const historyText = params.history && params.history.length > 0
+      ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
+      : '';
+    const promptParts: string[] = [];
+    if (params.systemPrompt) promptParts.push(params.systemPrompt);
+    if (historyText) promptParts.push(historyText);
+    promptParts.push(params.text);
+    const fullPrompt = promptParts.join('\n\n---\n\n');
 
     // 发送 prompt（后台任务：gemini 的 session/prompt 响应只在 turn 结束返回，绝不能 await 它——
     // 否则流式事件（thought/tool/text）全堵死到 turn 结束才一次性吐出，卡片全程卡"思考中"、

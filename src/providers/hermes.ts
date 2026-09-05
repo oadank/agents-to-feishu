@@ -33,6 +33,10 @@ function extractSessionId(msg: HermesServerMessage): string {
 export class HermesProvider implements RuntimeProvider {
   readonly name = 'hermes';
 
+  /** 会话复用：sessionKey → app-server 会话（hermes 每次必须开新 session，靠此映射跨消息复用上下文） */
+  private sessions = new Map<string, { sessionId: string; lastUsed: number; personaInjected: boolean }>();
+  private static readonly MAX_SESSIONS = 20;
+
   private client: HermesAppServerClient | null = null;
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -68,9 +72,16 @@ export class HermesProvider implements RuntimeProvider {
     }
   }
 
-  async resetSession(_sessionKey?: string): Promise<void> {
-    // hermes 每次 streamChat 都新建 session（app-server 模式），无需缓存清理
-    rtLog(`[hermes] resetSession called`);
+  async resetSession(sessionKey?: string): Promise<void> {
+    // hermes 跨消息靠 sessionKey → app-server 会话映射复用上下文；重置时清掉对应映射，
+    // 下条消息（freshSession=true）会为新 sessionKey 开全新会话。
+    if (sessionKey) {
+      this.sessions.delete(sessionKey);
+      rtLog(`[hermes] resetSession key=${sessionKey.slice(0, 8)} -> dropped, next msg opens fresh session`);
+    } else {
+      this.sessions.clear();
+      rtLog(`[hermes] resetSession: all sessions dropped`);
+    }
   }
 
   async interrupt(): Promise<void> {
@@ -98,35 +109,55 @@ export class HermesProvider implements RuntimeProvider {
     const settledP = new Promise<void>((r) => { settleResolve = r; });
 
     let thinkingBuffer = '';
-    const sessionIdPromise: Promise<string> = (async () => {
-      // 2026-08-30 修复：session/new 也挂起过（app-server 无响应）——120s 超时护栏
-      const newSession = await Promise.race([
-        client.call<{ sessionId: string; models?: { currentModelId?: string } }>('session/new', {
-        cwd: params.sessionKey ? process.env.CTI_DEFAULT_WORKDIR || process.cwd() : process.env.CTI_DEFAULT_WORKDIR || process.cwd(),
-        mcpServers: [], // 必传：hermes ACP 强制要求该字段（去掉会报 Invalid params）；与老项目 hermes-provider.ts:204 一致
-        }),
-        new Promise<never>((_, reject) => setTimeout(
-          () => reject(new Error('session/new 超时 120s（app-server 无响应）')),
-          120_000,
-        )),
-      ]);
-      return newSession.sessionId;
-    })();
 
-    let sessionId: string;
-    try { sessionId = await sessionIdPromise; }
-    catch (e) {
-      yield { type: 'error', message: `Hermes session/new 失败: ${e instanceof Error ? e.message : String(e)}` };
-      yield { type: 'done' };
-      return;
-    }
-    rtLog(`[hermes] session created: ${sessionId.slice(0, 8)}`);
+    // [2026-09-05 修复] 复用 app-server 会话：此前每次消息都新建 session 且不带 history，
+    // 导致 bot 完全没有跨消息记忆。现在按 sessionKey 复用会话，跟 openakita 同款——
+    // 只有 /new（freshSession=true）才开新会话，正常轮次靠 app-server 会话自带上下文。
+    const { sessionKey } = params;
+    let session = this.sessions.get(sessionKey);
 
-    // 首条消息注入人设
-    let fullPrompt = params.text;
-    if (params.systemPrompt) {
-      fullPrompt = `${params.systemPrompt}\n\n${params.text}`;
+    if (this.sessions.size >= HermesProvider.MAX_SESSIONS && !this.sessions.has(sessionKey)) {
+      let oldestKey: string | null = null, oldestAt = Infinity;
+      for (const [k, s] of this.sessions) if (s.lastUsed < oldestAt) { oldestAt = s.lastUsed; oldestKey = k; }
+      if (oldestKey) this.sessions.delete(oldestKey);
     }
+
+    if (!session || params.freshSession) {
+      try {
+        // 2026-08-30 修复：session/new 也挂起过（app-server 无响应）——120s 超时护栏
+        const newSession = await Promise.race([
+          client.call<{ sessionId: string }>('session/new', {
+            cwd: process.env.CTI_DEFAULT_WORKDIR || process.cwd(),
+            mcpServers: [], // 必传：hermes ACP 强制要求该字段（去掉会报 Invalid params）；与老项目 hermes-provider.ts:204 一致
+          }),
+          new Promise<never>((_, reject) => setTimeout(
+            () => reject(new Error('session/new 超时 120s（app-server 无响应）')),
+            120_000,
+          )),
+        ]);
+        session = { sessionId: newSession.sessionId, lastUsed: Date.now(), personaInjected: false };
+        this.sessions.set(sessionKey, session);
+      } catch (e) {
+        yield { type: 'error', message: `Hermes session/new 失败: ${e instanceof Error ? e.message : String(e)}` };
+        yield { type: 'done' };
+        return;
+      }
+    }
+
+    const sessionId = session.sessionId;
+    session.lastUsed = Date.now();
+    rtLog(`[hermes] session ${params.freshSession ? 'CREATED' : 'REUSED'} ${sessionId.slice(0, 8)} key=${sessionKey.slice(0, 8)}`);
+
+    // 人设：仅新会话首条消息注入；history（/compact 摘要）优先注入以保上下文。
+    const historyText = params.history && params.history.length > 0
+      ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
+      : '';
+    const promptParts: string[] = [];
+    if (params.systemPrompt && !session.personaInjected) promptParts.push(params.systemPrompt);
+    if (historyText) promptParts.push(historyText);
+    promptParts.push(params.text);
+    session.personaInjected = true;
+    const fullPrompt = promptParts.join('\n\n---\n\n');
 
     // 订阅 server notifications → push 事件
     unsubscribe = client.subscribe((message) => {
