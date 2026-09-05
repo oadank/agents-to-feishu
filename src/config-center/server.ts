@@ -32,6 +32,7 @@ import {
 } from './store.js';
 import { writeAgentArtifacts, readCredentialKey, readOldEnvKey } from './render.js';
 import { startAgent as pmStart, stopAgent as pmStop, restartAgent as pmRestart, statusAll as pmStatus } from './process-manager.js';
+import { syncDeepTutorModel } from './sync-deeptutor.js';
 import { buildAgentRuntimeState, type AgentRuntimeState } from './runtime.js';
 import { lookImage } from '../vision/look.js';
 import {
@@ -137,6 +138,18 @@ export function createConfigServer(opts: ConfigServerOptions) {
         }
       }
       const out = writeAgentArtifacts(store, agent, extra);
+      // DeepTutor 模型推送（路线 A）：模型/profile 由配置中心下发到 DeepTutor 自身 settings。
+      // 失败不阻塞 apply（bot 用 DeepTutor 上次保存的配置），原因记录在返回值与日志。
+      if ((agent.runtime || '') === 'deeptutor') {
+        try {
+          const r = await syncDeepTutorModel(store, agent);
+          if (r.pushed) log(`apply ${agentId}: DeepTutor 模型已推送并生效`);
+          else if (r.error) log(`apply ${agentId}: DeepTutor 推送失败（不阻塞）: ${r.error}`);
+          else if (r.skipped && r.skipped !== 'unchanged') log(`apply ${agentId}: DeepTutor 推送跳过: ${r.skipped}`);
+        } catch (e) {
+          log(`apply ${agentId}: DeepTutor 推送异常（不阻塞）: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
       if (restartOnApply) {
         await restartAgentProcess(agent.id);
         log(`apply ${agentId}: artifacts written + process restarted`);

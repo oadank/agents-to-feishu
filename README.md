@@ -63,6 +63,17 @@ config-store.json（唯一真相源：providers 池 / mcps 池 / agents 分配�
 - **会话**：sessionKey → zcode sessionId 映射落盘 `~/.agents-to-feishu/runtime/zcode-sessions.json`，桥接重启自动 `session/resume` 续上下文；`/new` 关闭重建；`/stop` 走 `session/stop`。
 - **冒烟**：`node node_modules/tsx/dist/cli.mjs scripts/zcode-smoke.mjs`（两轮对话验证流式 + 会话连续性 + 穿透）。
 
+## DeepTutor 模型控制（路线 A：单服务 + 配置中心推送）
+
+DeepTutor 是自带模型配置体系的完整 Web 应用，此前配置中心管不到它。现在 apply 时自动把
+config-store 选的 provider/model 推送为 DeepTutor 的专属 profile（`llm-profile-configcenter`）
+并切 active——网页切模型 → apply → DeepTutor 立即生效，与手动在 DeepTutor 界面建的 profile 互不干扰。
+
+- 实现：`src/config-center/sync-deeptutor.ts`（GET settings → 改 services.llm → PUT draft → POST apply）
+- 仅支持 openai 兼容 provider（anthropic-messages 需适配 DeepTutor 的 api_format 枚举后开放）
+- 服务地址默认 `http://127.0.0.1:8001`，`CTI_DEEPTUTOR_BASE` 可覆盖；多用户鉴权部署用
+  `CTI_DEEPTUTOR_TOKEN` 携带 Bearer；推送失败不阻塞 apply（日志与状态页可见）
+
 ## 配置中心 API
 
 | 方法 | 路径 | 说明 |
