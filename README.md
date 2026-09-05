@@ -56,6 +56,7 @@ config-store.json（唯一真相源：providers 池 / mcps 池 / agents 分配�
 - **依赖**：ZCode 桌面版（CLI 位于 `C:\Program Files\ZCode\resources\glm\zcode.cjs`），`CTI_ZCODE_CLI` 可覆盖路径。
 - **配置穿透（唯一模型来源）**：config-store 选的 provider/model/key 经配置中心渲染进 `config.<bot>.env`，provider 读 `CTI_BOT_<ID>_MODEL / _BASE_URL / _API_KEY / _CONTEXT_WINDOW / _THINKING_LEVEL` 组装协议的 `runtimeModel`（inline apiKey），在 `session/create|resume` 时下发——网页切模型 → apply → 下条消息生效，不依赖也不修改 `~/.zcode/cli/config.json`。
 - **MCP 穿透**：配置中心勾选的 MCP 池渲染成 `CTI_BOT_<ID>_MCP_SERVERS` JSON，provider 映射为协议 `mcpServers`（stdio → command/args/env；streamable-http → http url）随会话下发。会话级注入，不写客户端配置文件；`~/.zcode/cli/config.json` 的 `mcp.servers` 可作为桌面端/CLI 自己的补充层，两层同名会话内自动去重。
+  stdio 型 MCP 的安装路径支持自动重定位（`src/tools/mcp-path-resolve.ts`）：配置里不存在的绝对路径按已知安装锚点解析（如 win-desktop-helper 走 Inno Setup 注册表 InstallLocation / `%LOCALAPPDATA%\Programs` 标准位）——别人装了 exe 后无需手改路径。
 - **权限（无头必读）**：app-server 交互会话默认 build 模式 = 一切工具调用需审批（无头场景表现为 "Permission request failed" 全拦截）。provider 在 create/resume 显式传 `mode: 'yolo'` 解决；服务器→客户端的 `interaction/requestPermission` 兜底自动选 allow 选项。
 - **思考层与闪烁**：GLM-5.3 工具循环每轮都出新思考（单轮可达 1.9 万字），引擎💭块是尾部 400 字滑动窗口——高频转发会让整窗内容反复全换（视觉=正文从头重打）。provider 流式只转发思考前 400 字后冻结，`turn.completed` 补发真实尾部 1100 字（终卡 1500 尾窗保真）。终态全量推送仍有一次正常闪动（全 bot 共有的引擎收尾）。
 - **工具环境坑**：app-server 的 Bash 工具 PATH 是内部构建的精简清单，不含用户级 Python——已用 `~/bin/python|python3|py` shim 根治（Git Bash 会执行 ~/bin 下无扩展名脚本）。

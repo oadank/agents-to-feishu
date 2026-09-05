@@ -31,6 +31,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
 import { buildWindowsPath } from './win-spawn-env.js';
+import { resolveMcpArgPaths } from '../tools/mcp-path-resolve.js';
 
 function rtLog(msg: string): void {
   const file = process.env.CTI_RT_LOG || '';
@@ -90,7 +91,7 @@ function buildMcpServers(): Array<Record<string, unknown>> | null {
       out.push({
         name: d.displayName || d.id,
         command: d.command,
-        args: d.args || [],
+        args: resolveMcpArgPaths(d.id, d.args || []),
         env: Object.entries(d.env || {}).map(([name, value]) => ({ name, value })),
       });
     } else if (d.url) {

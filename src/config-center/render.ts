@@ -10,6 +10,7 @@
 
 import fs from 'node:fs';
 import os from 'node:os';
+import { resolveMcpArgPaths } from '../tools/mcp-path-resolve.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -158,7 +159,7 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
         transport: m.transport,
         url: m.url || '',
         command: m.command || '',
-        args: m.args || [],
+        args: resolveMcpArgPaths(m.id, m.args || []),
         env: m.env || {},
       }));
     lines.push(`CTI_BOT_${agent.id.toUpperCase()}_MCP_SERVERS=${JSON.stringify(mcpDefs)}`);
@@ -468,7 +469,7 @@ function renderMcpBlock(L: string[], m: McpDef): void {
     if (m.url) L.push(`    url: '${m.url}'`);
   } else {
     if (m.command) L.push(`    command: '${m.command}'`);
-    if (m.args?.length) L.push(`    args: ${JSON.stringify(m.args)}`);
+    if (m.args?.length) L.push(`    args: ${JSON.stringify(resolveMcpArgPaths(m.id, m.args))}`);
     if (m.env && Object.keys(m.env).length) {
       L.push('    env:');
       for (const [k, v] of Object.entries(m.env)) {
