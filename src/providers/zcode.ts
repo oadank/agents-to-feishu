@@ -27,6 +27,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
 import { buildWindowsPath } from './win-spawn-env.js';
@@ -57,7 +58,7 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
     clean[key] = value;
   }
   if (clean.USERPROFILE === undefined || clean.USERPROFILE.includes('systemprofile')) {
-    clean.USERPROFILE = process.env.CTI_USER_HOME || 'C:\\Users\\oadan';
+    clean.USERPROFILE = process.env.CTI_USER_HOME || os.homedir();
   }
   if (clean.HOME === undefined || clean.HOME.includes('systemprofile')) {
     clean.HOME = clean.USERPROFILE;
@@ -155,7 +156,7 @@ function buildRuntimeModel(): Record<string, unknown> | null {
 
 function sessionStoreFile(): string {
   const home = process.env.CTI_HOME
-    || path.join(process.env.CTI_USER_HOME || process.env.USERPROFILE || 'C:\\Users\\oadan', '.agents-to-feishu');
+    || path.join(process.env.CTI_USER_HOME || process.env.USERPROFILE || os.homedir(), '.agents-to-feishu');
   return path.join(home, 'runtime', 'zcode-sessions.json');
 }
 

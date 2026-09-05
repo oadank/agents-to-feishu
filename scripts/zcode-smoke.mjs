@@ -6,6 +6,7 @@ process.env.CTI_BOT_ZCODE_API_KEY = 'sk-200418';
 process.env.CTI_BOT_ZCODE_CONTEXT_WINDOW = '1000000';
 process.env.CTI_USER_HOME = process.env.USERPROFILE || 'C:\\Users\\oadan';
 
+import os from 'node:os';
 const { createZcodeProvider } = await import('../src/providers/zcode.js');
 
 const provider = createZcodeProvider();
