@@ -118,12 +118,13 @@
           const m = meta ? meta[k] : null;
           const noteEl = (m && m.note) ? h("span", { class: "dim", style: { fontSize: 11, marginLeft: 6 } }, m.note) : null;
           if (m && m.readonly) {
-            // 配置中心自动管理 / 跟随 Agent 上下文：不可编辑灰框（真实生效值展示）
+            // 配置中心自动管理 / 跟随 Agent 上下文：微微灰色、不可选（真实生效值展示）
             return h("div", { class: "row kv", key: k },
               h("span", { class: "k" }, label),
-              h("input", { type: "text", value: envValues[k] || "（自动）", readOnly: true, disabled: true,
-                style: { minWidth: 260, background: "#eef1f5", color: "#6b7280",
-                         border: "1px solid #d8dee6", cursor: "not-allowed" } }),
+              h("input", { type: "text", value: envValues[k] || "（自动）", readOnly: true, disabled: true, tabIndex: -1,
+                style: { minWidth: 260, background: "#f4f6f8", color: "#9aa2ad",
+                         border: "1px solid #f0f2f5", cursor: "default",
+                         userSelect: "none", WebkitUserSelect: "none", MozUserSelect: "none" } }),
               noteEl);
           }
           if (isFlag) {
