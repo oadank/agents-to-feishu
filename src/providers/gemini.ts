@@ -180,6 +180,34 @@ export class GeminiProvider implements RuntimeProvider {
       session.personaInjected = true;
     }
 
+    // [2026-09-05] 思考冻结防闪烁（同 zcode.ts）：只流式转发前 THINK_STREAM_HEAD 字后冻结💭，
+    // 避免引擎的💭尾部滑动窗口整窗轮转（视觉=正文反复从头打）导致闪烁。终态补发真实思考尾部。
+    const THINK_STREAM_HEAD = 400;
+    const THINK_MERGE_MS = 1200;
+    let thinkForwarded = 0;
+
+    let thinkFrozen = false;
+    let thinkBuf = '';
+    let thinkFull = '';
+    let thinkMergeTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushThink = (): void => {
+      thinkMergeTimer = null;
+      if (thinkFrozen || !thinkBuf) { thinkBuf = ''; return; }
+      const head = thinkBuf.slice(0, Math.max(0, THINK_STREAM_HEAD - thinkForwarded));
+      thinkBuf = '';
+      if (head) { queue.push({ type: 'thinking', text: head }); thinkForwarded += head.length; poke(); }
+      if (thinkForwarded >= THINK_STREAM_HEAD) thinkFrozen = true;
+    };
+    const pushThinking = (delta: string): void => {
+      thinkFull += delta;
+      if (thinkFrozen) return;
+      thinkBuf += delta;
+      if (thinkMergeTimer) return;
+      thinkMergeTimer = setTimeout(flushThink, THINK_MERGE_MS);
+    };
+    // 结束时若有未合并的思考增量，立即刷出（保持顺序：须在 queue 排空前调用）
+    const flushThinkingSync = (): void => { if (thinkMergeTimer) { clearTimeout(thinkMergeTimer); thinkMergeTimer = null; } flushThink(); };
+
     // 订阅 server notifications → push 事件
     unsubscribe = client.subscribe((message) => {
       if (extractSessionId(message) !== sessionId) return;
@@ -221,7 +249,7 @@ export class GeminiProvider implements RuntimeProvider {
               if (endIndex >= 0 && effectiveStart >= 0) {
                 const thinkingText = thinkingBuffer.slice(effectiveStart + tagStart.length, endIndex).trim();
                 const bodyText = (thinkingBuffer.slice(0, effectiveStart) + thinkingBuffer.slice(endIndex + tagEnd.length)).trim();
-                if (thinkingText) { queue.push({ type: 'thinking', text: thinkingText }); }
+                if (thinkingText) { pushThinking(thinkingText); }
                 thinkingBuffer = '';
                 if (bodyText) { queue.push({ type: 'text', text: bodyText }); gotText = true; }
                 poke();
@@ -242,7 +270,7 @@ export class GeminiProvider implements RuntimeProvider {
         }
         case 'agent_thought_chunk': {
           const text = content?.text;
-          if (typeof text === 'string') { queue.push({ type: 'thinking', text }); poke(); }
+          if (typeof text === 'string') { pushThinking(text); }
           break;
         }
         case 'tool_call':
@@ -311,6 +339,11 @@ export class GeminiProvider implements RuntimeProvider {
         settleErr = `Gemini prompt 失败: ${msg}`;
       }
     } finally {
+      // 先刷出未合并的思考增量，再补发真实思考尾部（冻结后隐含正文继续，终卡显示尾部保真不闪）
+      flushThinkingSync();
+      if (thinkFull.length > thinkForwarded + 120) {
+        queue.push({ type: 'thinking', text: `\n……\n${thinkFull.slice(-1100)}` });
+      }
       settled = true;
       settleResolve();
       try { await client.notify('session/compact', { sessionId }); } catch {}

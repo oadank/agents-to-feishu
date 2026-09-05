@@ -268,12 +268,10 @@ function toolsBlock(toolLines: string[], streaming: boolean): string {
 }
 
 /** 思考 blockquote：💭 标题 + 每行 ">" 前缀（左侧竖线、自动换行），按窗口截尾。
- * 流式用 head（fromStart=true）：取开头固定窗口，视图稳定不整窗滚动闪烁；
- * 最终态用 tail（fromStart=false）：取结尾，贴合最终思考内容。 */
-function thinkingBlock(thinking: string, maxChars: number, fromStart = false): string {
-  const windowed = fromStart
-    ? (thinking.length > maxChars ? thinking.slice(0, maxChars) + '\n…' : thinking)
-    : (thinking.length > maxChars ? thinking.slice(-maxChars) : thinking);
+ * 流式/终态都截尾（tail）：闪烁由 provider 侧"转发前 N 字后冻结"根治（见 zcode.ts），
+ * 引擎只负责把累积的思考尾部窗口渲染出来即可，无需在此额外处理。 */
+function thinkingBlock(thinking: string, maxChars: number): string {
+  const windowed = thinking.length > maxChars ? thinking.slice(-maxChars) : thinking;
   return '> 💭 **思考中…**\n' + windowed.split('\n').map((l) => '> ' + l).join('\n');
 }
 
@@ -287,8 +285,8 @@ export function buildStreamMarkdown(layers: TurnLayers): string {
   const bodyParts: string[] = [];
   if (layers.thinking.trim()) {
     // P2-4 修复：字数统计每帧都变（且 20000 截断后失真）、与 thinkingBlock 内部标题重复两行 💭——全删。
-    // 流式只显示开头 400 字固定窗口（fromStart=true 视图稳定不滚动闪烁），终卡 1500 尾（保真）。
-    bodyParts.push(thinkingBlock(layers.thinking, 400, true));
+    // 流式只显示尾部 400 字窗口（闪烁由 provider 侧冻结根治，这里仅渲染窗口）。
+    bodyParts.push(thinkingBlock(layers.thinking, 400));
   }
   if (layers.text.trim()) bodyParts.push(layers.text);
   if (bodyParts.length > 0) parts.push(bodyParts.join('\n\n'));
