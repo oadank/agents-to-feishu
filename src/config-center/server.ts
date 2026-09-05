@@ -729,7 +729,23 @@ export function createConfigServer(opts: ConfigServerOptions) {
             case 'dsh':
               pushMeta('CTI_DSH_HARNESS_PATH', resolvedPath.replace(/\\packages\\examples\\acp-demo\\src\\bin\.ts$/, ''), { note: 'DeepSeek Harness 根目录' });
               break;
-            case 'deeptutor':
+            case 'codex': {
+            // 三个值均由配置中心 syncModelToCli 自动写进 ~/.codex/config.toml（Agent 分配置切换即变）
+            // → readonly 灰框展示真实生效值，不提供手改（老大要求：自动管理的值不可编辑）
+            try {
+              const toml = fs.readFileSync(path.join(process.env.CTI_USER_HOME || process.env.USERPROFILE || os.homedir(), '.codex', 'config.toml'), 'utf-8');
+              const tomlVal = (key: string): string => {
+                const m0 = toml.match(new RegExp('^' + key + '\\s*=\\s*"?([^"\\r\\n]+)"?\\s*$', 'm'));
+                return m0 ? m0[1].trim() : '';
+              };
+              pushMeta('codex.model', tomlVal('model') || '（未生成）', { readonly: true, note: '当前模型 · 配置中心自动管理，在「Agent 分配置」切模型即变' });
+              pushMeta('codex.model_provider', tomlVal('model_provider') || '（未生成）', { readonly: true, note: '预置端点 volcark/gw/litellm，配置中心按所选 Provider 自动切换' });
+              pushMeta('codex.model_reasoning_effort', tomlVal('model_reasoning_effort') || '（未生成）', { readonly: true, note: '思考强度随 Agent「思考深度」设置（关闭=minimal）' });
+              pushMeta('codex.model_max_output_tokens', tomlVal('model_max_output_tokens') || '（未生成）', { readonly: true, note: '最大输出 tokens' });
+            } catch { pushMeta('codex.model', '（未安装 codex）', { readonly: true }); }
+            break;
+          }
+          case 'deeptutor':
               pushMeta('CTI_DEEPTUTOR_TOKEN', maskKey(process.env.CTI_DEEPTUTOR_TOKEN || ''), { secret: true, note: '本机免鉴权留空；多用户部署填 Bearer Token' });
               break;
           }

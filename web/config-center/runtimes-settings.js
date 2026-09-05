@@ -118,10 +118,13 @@
           const m = meta ? meta[k] : null;
           const noteEl = (m && m.note) ? h("span", { class: "dim", style: { fontSize: 11, marginLeft: 6 } }, m.note) : null;
           if (m && m.readonly) {
-            // 跟随 Agent 上下文自动注入：纯展示（当前真实值），不提供输入
+            // 配置中心自动管理 / 跟随 Agent 上下文：不可编辑灰框（真实生效值展示）
             return h("div", { class: "row kv", key: k },
               h("span", { class: "k" }, label),
-              h("span", { class: "v" }, h("b", null, envValues[k] || "（自动）"), noteEl));
+              h("input", { type: "text", value: envValues[k] || "（自动）", readOnly: true, disabled: true,
+                style: { minWidth: 260, background: "#eef1f5", color: "#6b7280",
+                         border: "1px solid #d8dee6", cursor: "not-allowed" } }),
+              noteEl);
           }
           if (isFlag) {
             return h("div", { class: "row kv", key: k },
