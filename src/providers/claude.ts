@@ -216,6 +216,26 @@ export class ClaudeProvider implements RuntimeProvider {
     };
     // 走到这里 authToken 必然有值（无值已在上面抛错），直接赋值即可。
     env.ANTHROPIC_AUTH_TOKEN = authToken;
+    // MCP 穿透（2026-09-10）：配置中心勾选的外接 MCP 池（渲染层 CTI_BOT_<ID>_MCP_SERVERS JSON，
+    // 与 zcode 穿透同源）映射进 SDK mcpServers——win-desktop-helper 等 stdio 外接由此真正到 claude。
+    let externalMcp: Record<string, unknown> = {};
+    try {
+      const raw = process.env[`CTI_BOT_${(process.env.CTI_BOT || 'claude').toUpperCase()}_MCP_SERVERS`] || '';
+      if (raw) {
+        for (const m of JSON.parse(raw) as Array<{ id: string; transport: string; url?: string; command?: string; args?: string[]; env?: Record<string, string> }>) {
+          if (m.transport === 'stdio' && m.command) {
+            externalMcp[m.id] = { type: 'stdio', command: m.command, args: m.args || [], ...(m.env && Object.keys(m.env).length ? { env: m.env } : {}) };
+          } else if (m.transport === 'streamable-http' && m.url) {
+            externalMcp[m.id] = { type: 'http', url: m.url };
+          } else if (m.transport === 'sse' && m.url) {
+            externalMcp[m.id] = { type: 'sse', url: m.url };
+          }
+        }
+        rtLog(`[claude] MCP 穿透: ${Object.keys(externalMcp).join(', ') || '（空）'}`);
+      }
+    } catch (e) {
+      rtLog('[claude] MCP 穿透解析失败（跳过外接 MCP）: ' + (e instanceof Error ? e.message : String(e)));
+    }
     try {
       const q = query({
         prompt: queue,
@@ -231,7 +251,8 @@ export class ClaudeProvider implements RuntimeProvider {
           // ANTHROPIC_BASE_URL 一起丢掉 ⇒ claude 退化为直连官方 API，而不是第三方网关。
           env,
           // Phase 1 内置工具注入：进程内 server（内存直调，无 HTTP）。attachBridgeTools 必须先于首条消息调用。
-          ...(this.sdkMcp ? { mcpServers: this.sdkMcp.spec } : {}),
+          // 2026-09-10 MCP 穿透：外接池与内置工具合并，同名时内置（spec）优先。
+          ...(Object.keys(externalMcp).length || this.sdkMcp ? { mcpServers: { ...externalMcp, ...(this.sdkMcp ? this.sdkMcp.spec : {}) } } : {}),
         },
       });
       this.q = q;
