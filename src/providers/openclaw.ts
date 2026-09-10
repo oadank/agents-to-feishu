@@ -18,6 +18,25 @@ import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
 import { buildWindowsPath } from './win-spawn-env.js';
 
+// MCP 穿透（2026-09-10）：配置中心勾选的 MCP 池（render.ts 下发 CTI_BOT_<ID>_MCP_SERVERS JSON）
+// 映射为 ACP session/new 的 mcpServers。stdio → name/command/args/env；http 类 → name/url。
+function readCtiMcpServers(botId: string): Array<Record<string, unknown>> {
+  try {
+    const raw = process.env[`CTI_BOT_${botId.toUpperCase()}_MCP_SERVERS`] || '';
+    if (!raw) return [];
+    const defs = JSON.parse(raw) as Array<{ id: string; transport: string; url?: string; command?: string; args?: string[]; env?: Record<string, string> }>;
+    return defs.map((m) => {
+      if (m.transport === 'stdio' && m.command) {
+        return { name: m.id, command: m.command, args: m.args || [], env: Object.entries(m.env || {}).map(([k, v]) => ({ name: k, value: v })) };
+      }
+      if (m.url) return { name: m.id, url: m.url };
+      return null;
+    }).filter((x): x is Record<string, unknown> => !!x);
+  } catch {
+    return [];
+  }
+}
+
 function rtLog(msg: string): void {
   const file = process.env.CTI_RT_LOG || '';
   if (!file) return;
@@ -272,7 +291,7 @@ export class OpenClawProvider implements RuntimeProvider {
     const sessionNewId = this.nextId++;
     child.stdin!.write(JSON.stringify({
       jsonrpc: '2.0', id: sessionNewId, method: 'session/new',
-      params: { cwd, mcpServers: [] },
+      params: { cwd, mcpServers: readCtiMcpServers('openclaw') },
     }) + '\n');
 
     const msg = await this.waitResponse(sessionNewId, 60_000);
