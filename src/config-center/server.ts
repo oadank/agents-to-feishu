@@ -48,6 +48,25 @@ const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 /** 内置测试样例图（可分发，随项目走） */
 const SAMPLE_VISION_IMAGE = path.join(PROJECT_ROOT, 'assets', 'sample-vision.jpg');
 
+/**
+ * 同步 DSH 本地语音配置（~/.dsh/voice-config.json）的 defaultEngine，
+ * 让「聊天内（DSH 设置页）」与「聊天外（飞书兜底）」的引擎选择保持一致。
+ * 只写 defaultEngine 这一个字段，其余（各引擎 samples/key）各管各的。
+ */
+function syncDshDefaultEngine(defaultEngine: string): void {
+  try {
+    const home = process.env.CTI_USER_HOME || os.homedir();
+    const p = path.join(home, '.dsh', 'voice-config.json');
+    let cfg: Record<string, unknown> = {};
+    try { cfg = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { /* 文件不存在 → 新建 */ }
+    if (typeof defaultEngine === 'string' && cfg.defaultEngine !== defaultEngine) {
+      cfg.defaultEngine = defaultEngine;
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, JSON.stringify(cfg, null, 2), 'utf8');
+    }
+  } catch { /* 同步 DSH 配置失败不影响主流程 */ }
+}
+
 export interface ConfigServerOptions {
   /** 监听地址；可传多个同时绑定（如 ['127.0.0.1', TailscaleIP]）。显式传 '0.0.0.0' = 全接口（调用方自己负责） */
   host?: string | string[];
@@ -1187,6 +1206,8 @@ export function createConfigServer(opts: ConfigServerOptions) {
           asr: { ...(base.asr ?? DEFAULT_SPEECH.asr), ...(body.asr ?? {}) },
         };
         save(store);
+        // [2026-09-11] 同步 DSH 本地语音 defaultEngine，保证聊天内/外引擎一致
+        syncDshDefaultEngine(tts.defaultEngine);
         return json(res, 200, { ok: true, speech: store.speech });
       }
       // POST /api/speech/tts-test：测试 TTS 合成（body: { text, engine?, voiceDesc? }），返回 {ok, format, dataUrl?}
