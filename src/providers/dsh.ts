@@ -59,7 +59,7 @@ function resolveDshCommand(): { command: string; args: string[]; cwd: string } {
   const config = process.env.CTI_DSH_ACP_CONFIG || path.join(os.homedir(), '.dsh', 'dsh-bot', 'cordis.yml');
   return {
     command: process.execPath,
-    args: ['--import', 'tsx/esm', 'packages/examples/acp-demo/src/bin.ts', '--config', config],
+    args: ['packages/examples/acp-demo/lib/bin.js', '--config', config],
     cwd: harness,
   };
 }
@@ -179,7 +179,7 @@ export class DshProvider implements RuntimeProvider {
     const { cwd } = resolveDshCommand();
     const config = process.env.CTI_DSH_ACP_CONFIG || path.join(os.homedir(), '.dsh', 'dsh-bot', 'cordis.yml');
     if (!fs.existsSync(config)) throw new Error(`DSH ACP config not found: ${config}`);
-    if (!fs.existsSync(path.join(cwd, 'packages', 'examples', 'acp-demo', 'src', 'bin.ts'))) {
+    if (!fs.existsSync(path.join(cwd, 'packages', 'examples', 'acp-demo', 'lib', 'bin.js'))) {
       throw new Error(`DSH harness not found at: ${cwd} (set CTI_DSH_HARNESS_PATH)`);
     }
     // ⚠️ 常驻模式（2026-08-25）：服务启动即预启动 ACP 进程并完成 initialize/MCP 初始化，
@@ -360,7 +360,7 @@ export class DshProvider implements RuntimeProvider {
 
       // initialize 握手（走统一 pending 机制）
       const initId = this.nextId++;
-      this.sendRequest(child, { id: initId, method: 'initialize', params: {
+      this.sendRequest(child, { jsonrpc: '2.0', id: initId, method: 'initialize', params: {
         protocolVersion: 1, capabilities: {},
         clientInfo: { name: 'agents-to-feishu', version: '0.1.0' },
       }});
@@ -568,10 +568,15 @@ export class DshProvider implements RuntimeProvider {
           const delta = update.content.text;
           const metaUsage = (update as { _meta?: { usage?: unknown } })._meta?.usage as UsageInfo | undefined;
           if (metaUsage) {
-            // 完整块（assistant/message 提交）：只收 usage，正文已由增量实时发出，不再重复发
+            // [2026-09-11 0.1.5] usage + text 同 chunk：0.1.5 的 agent_message_chunk 自带
+            // _meta.usage 且往往就是唯一正文（不再有先行增量），必须发出文本，否则空回复。
             recordUsage(metaUsage);
             queue.push({ type: 'usage', usage: metaUsage, sessionId: session.sessionId });
-            rtLog(`[dsh] commit chunk len=${delta?.length || 0} (usage only, text already streamed)`);
+            if (delta) {
+              queue.push({ type: 'text', text: delta });
+              poke();
+            }
+            rtLog(`[dsh] commit chunk len=${delta?.length || 0} (usage + text)`);
           } else if (delta) {
             // text-delta 增量：实时发出（流式）
             queue.push({ type: 'text', text: delta });

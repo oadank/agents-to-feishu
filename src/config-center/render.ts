@@ -363,9 +363,7 @@ export function renderCordisYml(store: ConfigStore, agent: AgentDef): string {
   L.push('- id: tool-subagent-list-agents');
   L.push("  name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'");
   L.push('');
-  L.push('- id: tool-subagent-report');
-  L.push("  name: '@deepseek-ai/dsh-tool-subagent-report'");
-  L.push('');
+  // [2026-09-10 0.1.5] tool-subagent-report 上游已废弃（包删除+API 断层），从编排摘除
   L.push('- id: tool-subagent');
   L.push("  name: '@deepseek-ai/dsh-tool-subagent'");
   L.push('  config:');
@@ -731,21 +729,101 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
         }
         break;
       case 'mimo': {
-        // ~/.config/mimocode/mimocode.json：model + provider.<pk>（mimo 用 api 字段做 base_url）
+        // ~/.config/mimocode/mimocode.json：从 config-store 穿透 providers + 当前 model + MCP。
+        // 2026-09-11 修复：
+        //  1) 只写 {env:KEY} ⇒ MiMo 进程没有那些 env ⇒ 全废；改为从凭证层注入真实 key
+        //  2) 整表覆盖 provider 只留一个模型 ⇒ 选中模型外全丢；改为按 store 全量 upsert 模型
+        //  3) 不写 MCP ⇒ 控制中心勾选穿不进 MiMo；改为 upsert agent.mcps
+        //  4) 文件不存在就 break ⇒ 新机器失效；改为自动创建
         const f = path.join(hunme, '.config', 'mimocode', 'mimocode.json');
-        if (!fs.existsSync(f)) break;
-        const j = JSON.parse(fs.readFileSync(f, 'utf-8'));
-        const pk = prov.id.replace(/-/g, '');
-        j.model = `${pk}/${cliModel}`;
+        fs.mkdirSync(path.dirname(f), { recursive: true });
+        const j: Record<string, any> = fs.existsSync(f)
+          ? JSON.parse(fs.readFileSync(f, 'utf-8'))
+          : {};
         j.provider = j.provider || {};
-        j.provider[pk] = {
-          name: prov.displayName || pk,
-          npm: '@ai-sdk/openai-compatible',
-          api: baseUrl,
-          options: { apiKey: `{env:${keyEnv}}` },
-          models: { [cliModel]: { name: cliModel } },
-        };
-        fs.writeFileSync(f, JSON.stringify(j, null, 2), 'utf-8');
+        j.mcp = j.mcp || {};
+
+        // litellm 在本机历史文件名是 mimo-litellm，保留旧 id 免打断 recents
+        const pkOf = (providerId: string): string =>
+          providerId === 'litellm' ? 'mimo-litellm' : providerId.replace(/-/g, '');
+
+        // 把 store 里 mimo 能用的 provider 全量穿透（openai 兼容 / anthropic）
+        for (const p of store.providers) {
+          const api = p.api || 'openai-completions';
+          if (api === 'openai-responses') continue; // mimo 无 responses 适配，跳过
+          const npm = api === 'anthropic-messages' ? '@ai-sdk/anthropic' : '@ai-sdk/openai-compatible';
+          const pk = pkOf(p.id);
+          const pKeyEnv = p.apiKeyEnv || keyEnv;
+          const realKey = readCredentialKey(pKeyEnv) || readOldEnvKey(pKeyEnv) || globalExtra[pKeyEnv] || '';
+          const prev = j.provider[pk] || {};
+          const models: Record<string, any> = { ...(prev.models || {}) };
+          for (const m of p.models || []) {
+            const mid = cliModelName(p.id, m.id);
+            const prevM = models[mid] || {};
+            // limit 必须同时有 context+output，否则 mimocode 配置校验失败
+            const prevLimit = (prevM.limit && typeof prevM.limit.context === 'number'
+              && typeof prevM.limit.output === 'number') ? prevM.limit : {};
+            models[mid] = {
+              ...prevM,
+              name: m.displayName || m.label || mid,
+              ...(m.contextWindow
+                ? {
+                  limit: {
+                    context: m.contextWindow,
+                    output: prevLimit.output || (m.contextWindow >= 500000 ? 8192 : 32768),
+                  },
+                }
+                : (prevLimit.context ? { limit: prevLimit } : {})),
+            };
+          }
+          if (npm === '@ai-sdk/anthropic') {
+            j.provider[pk] = {
+              ...prev,
+              name: p.displayName || pk,
+              npm,
+              only_configured_models: true,
+              options: {
+                ...(prev.options || {}),
+                baseURL: p.baseURL || prev.options?.baseURL || '',
+                apiKey: realKey || prev.options?.apiKey || '',
+              },
+              models,
+            };
+          } else {
+            j.provider[pk] = {
+              ...prev,
+              name: p.displayName || pk,
+              npm,
+              api: p.baseURL || prev.api || '',
+              options: {
+                ...(prev.options || {}),
+                apiKey: realKey || prev.options?.apiKey || '',
+              },
+              models,
+            };
+          }
+        }
+
+        // 当前 agent 选中的默认模型
+        const pk = pkOf(prov.id);
+        j.model = `${pk}/${cliModel}`;
+
+        // MCP：按 agent 勾选 upsert；stdio 走 local command 数组，http 走 remote url
+        for (const mcpId of agent.mcps || []) {
+          const m = store.mcps.find((x) => x.id === mcpId);
+          if (!m) continue;
+          if (m.transport === 'stdio') {
+            const args = resolveMcpArgPaths(m.id, m.args || []);
+            j.mcp[m.id] = {
+              type: 'local',
+              command: [m.command || '', ...args].filter(Boolean),
+            };
+          } else if (m.url) {
+            j.mcp[m.id] = { type: 'remote', url: m.url };
+          }
+        }
+
+        fs.writeFileSync(f, `${JSON.stringify(j, null, 2)}\n`, 'utf-8');
         break;
       }
       case 'reasonix': {

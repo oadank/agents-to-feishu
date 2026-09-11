@@ -76,7 +76,7 @@ export class FeishuClient {
   }
 
   /** 引用用户消息发送卡片实体（im/v1/messages reply，content={type:card, data:{card_id}}） */
-  async sendCardByIdReply(replyToMessageId: string, cardId: string): Promise<string | null> {
+  async sendCardByIdReply(replyToMessageId: string, cardId: string, retried = false): Promise<string | null> {
     const token = await this.getTenantToken();
     const resp = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(replyToMessageId)}/reply`, {
       method: 'POST',
@@ -87,6 +87,11 @@ export class FeishuClient {
       }),
     });
     const json = await resp.json() as { code?: number; msg?: string; data?: { message_id?: string } };
+    if (json.code === 99991663 && !retried) {
+      console.warn(`[feishu] sendCardByIdReply: token invalid (99991663), invalidate cache & retry once`);
+      this.invalidateToken();
+      return await this.sendCardByIdReply(replyToMessageId, cardId, true);
+    }
     if (json.code !== 0) {
       console.warn(`[feishu] sendCardByIdReply failed: code=${json.code} msg=${json.msg}`);
       return null;
@@ -174,8 +179,13 @@ export class FeishuClient {
     return json.tenant_access_token;
   }
 
+  /** token 被服务端拒绝(99991663)时清空缓存，下次调用重新获取 */
+  private invalidateToken(): void {
+    this.tokenCache = null;
+  }
+
   /** 发 interactive 卡片（HTTP 直调），返回 message_id */
-  async sendCardHttp(chatId: string, card: unknown): Promise<string | null> {
+  async sendCardHttp(chatId: string, card: unknown, retried = false): Promise<string | null> {
     const token = await this.getTenantToken();
     const resp = await fetch('https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id', {
       method: 'POST',
@@ -187,6 +197,11 @@ export class FeishuClient {
       }),
     });
     const json = await resp.json() as { code?: number; msg?: string; data?: { message_id?: string } };
+    if (json.code === 99991663 && !retried) {
+      console.warn(`[feishu] sendCardHttp: token invalid (99991663), invalidate cache & retry once`);
+      this.invalidateToken();
+      return await this.sendCardHttp(chatId, card, true);
+    }
     if (json.code !== 0) {
       console.warn(`[feishu] sendCardHttp failed: code=${json.code} msg=${json.msg}`);
       return null;
@@ -195,7 +210,7 @@ export class FeishuClient {
   }
 
   /** 发 CardKit 卡片实体引用（content={type:card, data:{card_id}}，不引用用户消息），返回 message_id */
-  async sendCardIdHttp(chatId: string, cardId: string): Promise<string | null> {
+  async sendCardIdHttp(chatId: string, cardId: string, retried = false): Promise<string | null> {
     const token = await this.getTenantToken();
     const resp = await fetch('https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id', {
       method: 'POST',
@@ -207,6 +222,11 @@ export class FeishuClient {
       }),
     });
     const json = await resp.json() as { code?: number; msg?: string; data?: { message_id?: string } };
+    if (json.code === 99991663 && !retried) {
+      console.warn(`[feishu] sendCardIdHttp: token invalid (99991663), invalidate cache & retry once`);
+      this.invalidateToken();
+      return await this.sendCardIdHttp(chatId, cardId, true);
+    }
     if (json.code !== 0) {
       console.warn(`[feishu] sendCardIdHttp failed: code=${json.code} msg=${json.msg}`);
       return null;
@@ -215,7 +235,7 @@ export class FeishuClient {
   }
 
   /** 发 interactive 卡片并引用用户消息（reply 接口），返回 message_id */
-  async replyCardHttp(replyToMessageId: string, card: unknown): Promise<string | null> {
+  async replyCardHttp(replyToMessageId: string, card: unknown, retried = false): Promise<string | null> {
     const token = await this.getTenantToken();
     const resp = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(replyToMessageId)}/reply`, {
       method: 'POST',
@@ -223,6 +243,11 @@ export class FeishuClient {
       body: JSON.stringify({ msg_type: 'interactive', content: JSON.stringify(card) }),
     });
     const json = await resp.json() as { code?: number; msg?: string; data?: { message_id?: string } };
+    if (json.code === 99991663 && !retried) {
+      console.warn(`[feishu] replyCardHttp: token invalid (99991663), invalidate cache & retry once`);
+      this.invalidateToken();
+      return await this.replyCardHttp(replyToMessageId, card, true);
+    }
     if (json.code !== 0) {
       console.warn(`[feishu] replyCardHttp failed: code=${json.code} msg=${json.msg}`);
       return null;
@@ -231,7 +256,7 @@ export class FeishuClient {
   }
 
   /** 发文本并引用用户消息（reply 接口） */
-  async replyTextHttp(replyToMessageId: string, text: string): Promise<string | null> {
+  async replyTextHttp(replyToMessageId: string, text: string, retried = false): Promise<string | null> {
     const token = await this.getTenantToken();
     const resp = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(replyToMessageId)}/reply`, {
       method: 'POST',
@@ -239,6 +264,11 @@ export class FeishuClient {
       body: JSON.stringify({ msg_type: 'text', content: JSON.stringify({ text }) }),
     });
     const json = await resp.json() as { code?: number; msg?: string; data?: { message_id?: string } };
+    if (json.code === 99991663 && !retried) {
+      console.warn(`[feishu] replyTextHttp: token invalid (99991663), invalidate cache & retry once`);
+      this.invalidateToken();
+      return await this.replyTextHttp(replyToMessageId, text, true);
+    }
     if (json.code !== 0) {
       console.warn(`[feishu] replyTextHttp failed: code=${json.code} msg=${json.msg}`);
       return null;
@@ -247,7 +277,7 @@ export class FeishuClient {
   }
 
   /** 更新已发出的卡片（HTTP 直调 PATCH） */
-  async updateCardHttp(messageId: string, card: unknown): Promise<boolean> {
+  async updateCardHttp(messageId: string, card: unknown, retried = false): Promise<boolean> {
     const token = await this.getTenantToken();
     const resp = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`, {
       method: 'PATCH',
@@ -256,6 +286,11 @@ export class FeishuClient {
     });
     const json = await resp.json() as { code?: number; msg?: string };
     console.log(`[feishu] updateCardHttp msgId=${messageId} resp=${JSON.stringify(json)}`);
+    if (json.code === 99991663 && !retried) {
+      console.warn(`[feishu] updateCardHttp: token invalid (99991663), invalidate cache & retry once`);
+      this.invalidateToken();
+      return await this.updateCardHttp(messageId, card, true);
+    }
     if (json.code !== 0) {
       console.warn(`[feishu] updateCardHttp failed: code=${json.code} msg=${json.msg}`);
       return false;

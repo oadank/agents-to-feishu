@@ -574,15 +574,23 @@ export class MessageEngine {
 
     // ── 节流 PATCH：800ms 窗口内合并多次事件为一次更新；串行化防乱序 ──
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
-    let flushing = false;
+    // [2026-09-06] 修复正文回跳：并发 updateCardElement 时 seq 可能被 Feishu 乱序应用，
+    // 导致旧内容覆盖新内容（200字→20字反复）。改为串行发送链，保证每次只发一个 PATCH、
+    // 且严格按 seq 递增顺序发送。请求期间到达的新更新合并到 pending 标志，链空闲后补发。
+    let flushChain: Promise<void> = Promise.resolve();
+    let pendingFlush = false;
     const doFlush = async (): Promise<void> => {
-      if (flushing) return;
-      flushing = true;
-      try {
-        await render(buildStreamMarkdown(layers));
-      } catch { /* 网络/临时错误：下轮事件会再刷 */ } finally {
-        flushing = false;
-      }
+      pendingFlush = true;
+      const run = flushChain.then(async () => {
+        pendingFlush = false;
+        const snapshot = buildStreamMarkdown(layers);
+        await render(snapshot);
+        if (pendingFlush) {
+          await render(buildStreamMarkdown(layers));
+        }
+      });
+      flushChain = run.catch(() => { /* 网络/临时错误：下轮事件会再刷 */ });
+      await run;
     };
     let lastThinkFlushAt = 0;
     let thinkFlushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -619,7 +627,8 @@ export class MessageEngine {
       if (textFlushTimer) { clearTimeout(textFlushTimer); textFlushTimer = null; }
       if (thinkFlushTimer) { clearTimeout(thinkFlushTimer); thinkFlushTimer = null; }
       if (toolFlushTimer) { clearTimeout(toolFlushTimer); toolFlushTimer = null; }
-      while (flushing) await new Promise((r) => setTimeout(r, 25));
+      // 等待串行发送链排空，确保所有在途 PATCH 完成，避免最终卡被过期视图覆盖
+      await flushChain.catch(() => {});
     };
 
     try {
@@ -808,7 +817,11 @@ export class MessageEngine {
           console.log(`[engine] 语音补写结果 len=${spoken.length}`);
           if (!spoken) spoken = '这条消息的语音回复没有生成好，麻烦看上面的文字回复。';
         }
-        if (spoken) await this.sendVoiceReply(chatId, spoken);
+        // [2026-09-11 双发修复] 模型若已用 send_voice 工具自己发了语音（pendingVoiceIds 非空），
+        // 桥接的 replyAudio 分支不再重复发送——同一轮两条语音 = 老大暴怒点。
+        if (spoken && pendingVoiceIds.length > 0) {
+          console.log(`[engine] 语音分支跳过：send_voice 已投递 ${pendingVoiceIds.length} 条，避免双发`);
+        } else if (spoken) await this.sendVoiceReply(chatId, spoken);
       }
       // [2026-09-01] send_voice 工具产物投递：模型已合成的语音（如 audio8 克隆）直接上传飞书，
       // 不再用桥接 TTS 重合成。失败只记日志不阻塞（工具卡里模型已报成功，这里补真实投递）。
