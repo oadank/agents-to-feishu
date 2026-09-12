@@ -6,7 +6,7 @@
  *
  * 迁移策略（用户确认 2026-08-25）：全迁 10 个，每个保留飞书凭证/显示名/端口，
  * runtime 统一收敛为 dsh（DSH ACP 架构）；默认模型 = 第一个 provider 的第一个模型；
- * 默认 MCP = agentmemory + wiki。
+ * 默认 MCP = openmem（2026-09-12 起 agentmemory / wiki 已下线）。
  */
 
 import fs from 'node:fs';
@@ -67,7 +67,7 @@ export function migrateAgents(opts: { oldEnvFile?: string; dry?: boolean } = {})
       appSecret: P('APP_SECRET', ''),
       providerId: defaultProvider,
       modelId: defaultModel,
-      mcps: ['agentmemory', 'wiki'],
+      mcps: ['openmem'],
       port: PORTS[id] ?? (13600 + store.agents.length),
       showToolCallCards: true,
       showAgentDivider: true,

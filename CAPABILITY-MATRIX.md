@@ -110,7 +110,7 @@
 
 | 项 | 状态 |
 |---|---|
-| **codex MCP 专项解决** 🎉 | ✅ **升级 codex 0.145.0→0.151.0**：app-server 模式（桥接）6 个 MCP 全部正常加载（agentmemory/wiki/cti-vision/cti-comfy/cti-builtin/node_repl），实测模型能列出并使用。根因=0.145.0 app-server bug |
+| **codex MCP 专项解决** 🎉 | ✅ **升级 codex 0.145.0→0.151.0**：app-server 模式（桥接）6 个 MCP 全部正常加载（agentmemory/wiki/cti-vision/cti-comfy/cti-builtin/node_repl），实测模型能列出并使用。根因=0.145.0 app-server bug。（⚠️ 上表为当时快照；**agentmemory/wiki 已于 2026-09-12 整体下线删除**，记忆统一由 openmem 承担，当前 MCP 池 = win-desktop-helper / visionqa / comfy / vision / openmem） |
 | codex 内置工具可用性 | ✅ look_image/generate_image/reverse_prompt/transcribe 对 codex 可用（MCP 工具） |
 | providers 余额显示 | ✅ ArkResp/GWResp 等协议变体无专属 agent 时，共享同 baseURL 网关的额度数据 |
 | 飞书内置工具（通讯录/发消息/聊天记录/文档等） | 📋 方案已定稿待开工：lark-tools.ts（tenant token + IM API）挂进 mcp-stdio + 设置页能力勾选区块 + agent 飞书凭证管理 |

@@ -8,7 +8,7 @@
 |---|---|
 | `feishu-bridge` | 飞书桥接运维：消息不通、卡片刷新、排队卡处理 |
 | `comfyui-ops` | 本机 ComfyUI 生图/生视频排障与 Lora 运维 |
-| `memory-ops` | AgentMemory / Wiki 知识库读写与沉淀姿势 |
+| `memory-ops` | openmem 统一记忆中枢读写与沉淀姿势 |
 | `service-ops` | nssm / PM2 服务运维铁律与重启姿势 |
 
 命令行安装：把对应 `SKILL.md` 复制到 `skills/<name>/SKILL.md`。
