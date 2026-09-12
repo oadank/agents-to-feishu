@@ -6,10 +6,25 @@
  *
  * 五原则：
  *  1. 键级合并：只写本次真正变更的键，其余原样保留；模板不认识的键（手工加的）一律 carry over
- *  2. 受保护键清单：apply 只补全、不覆盖、不删除（除非本次显式传入该键 = 用户明确改它）
+ *  2. 权属以「本次渲染结果」为准：rendered 里有的键 = 配置中心拥有（可覆盖），没有的 = 人工拥有（永不碰）
  *  3. cordis.yml 托管区：只替换 BEGIN/END managed 区内，区外（插件/人工条目）永不碰
  *  4. 变更审计 + 自动备份：apply 前备份带时间戳，diff 落 logs/config-apply-<日期>.log
  *  5. 渲染与写入分离：render* 只产出目标内容，本模块负责合并落盘
+ *
+ * ── 2026-09-11 根治（老大授权："要修"）──
+ * 旧第 2 条是「受保护键清单：只补全、不覆盖、不删除（显式传入才覆盖）」，实测有两个致命副作用：
+ *   a) 名单把配置中心**自己拥有的键**也保护了（`/^ANTHROPIC_/`、`(_KEY|_TOKEN|_SECRET)$`、`OPENAI_API_KEY`）
+ *      ⇒ 配置中心改成 gw，文件里旧的 ark 值纹丝不动、只在末尾再追加一行新值 ⇒ 「改了不生效」
+ *      （claude 卡「正在处理…」的根因之一）；加上 nssm 注册表/HKCU 的僵尸键，问题被掩盖得更深。
+ *   b) mergeEnvText 按行遍历、**不折叠同名键** ⇒ 每次 apply 只要值变过就多留一行，config.<bot>.env
+ *      长成整块重复（实测 config.gemini.env：2-43 行旧块 + 44-70 行新块，几乎所有键重复一遍），
+ *      越 apply 越脏；靠 parseEnvFile 的「末值胜」勉强跑对，但谁也说不清哪一行是真源。
+ *
+ * 新语义（三步，删繁就简）：
+ *  1. rendered 里出现的键 = 配置中心拥有 → 用渲染值覆盖（凭证键一视同仁，值本来就来自凭证库）
+ *  2. rendered 里没有的键 = 人工/其他工具拥有 → 原样保留（人工配置永不丢，旧第 1 条原则不变）
+ *  3. 同名重复键折叠为一行（保留首次出现的位置，值取渲染值）；渲染值为空串时不抹掉文件里已有的非空值
+ * 原 PROTECTED_PATTERNS 降级为 SENSITIVE_PATTERNS：只用于「日志脱敏」，不再拦截覆盖。
  */
 
 import fs from 'node:fs';
@@ -20,8 +35,8 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOGS_DIR = path.resolve(__dirname, '..', '..', 'logs');
 
-/** 受保护键：配置中心不拥有它们，apply 不得静默清除（显式传值除外） */
-const PROTECTED_PATTERNS: RegExp[] = [
+/** 敏感键模式：只决定「日志里打不打值」，不再决定「能不能覆盖」（覆盖权属见文件头新语义） */
+const SENSITIVE_PATTERNS: RegExp[] = [
   /^CTI_[A-Z0-9_]*_CLI_PATH$/, // 各 runtime 的 CLI 可执行路径（claude.exe / dsh harness 等）
   /^CTI_[A-Z0-9_]*_EXEC$/,
   /^CTI_DSH_HARNESS_PATH$/,
@@ -34,61 +49,100 @@ const PROTECTED_PATTERNS: RegExp[] = [
   /^OPENAI_API_KEY$/,
 ];
 
-export function isProtectedKey(key: string): boolean {
-  return PROTECTED_PATTERNS.some((re) => re.test(key));
+export function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_PATTERNS.some((re) => re.test(key));
 }
+
+/** 旧名兼容（语义已改为「敏感键」，仅供日志脱敏判定） */
+export const isProtectedKey = isSensitiveKey;
 
 export interface EnvChange {
   key: string;
   oldValue: string;
   newValue: string;
-  kind: 'add' | 'update' | 'keep-protected';
+  /** keep-empty = 渲染值为空，保留文件里已有的非空值（空值保护） */
+  kind: 'add' | 'update' | 'keep-empty';
 }
 
 interface ParsedLine { line: string; key?: string; value?: string }
 
+/**
+ * 按行解析 KEY=VALUE。
+ *
+ * 2026-09-11 修复（整块重复的真凶）：原实现直接对 split('\n') 的每行套 `/^KEY=(.*)$/`，
+ * 但 config.<bot>.env 是 **CRLF** 文件 ⇒ 行尾残留 `\r`，而 JS 正则里 `.` 不匹配 `\r`、
+ * 非 multiline 的 `$` 也不在 `\r` 前匹配 ⇒ **整行匹配失败**，所有真实配置行都被判成
+ * 「非 KEY=VALUE 行」原样保留，随后新渲染的整套键再追加一遍 ⇒ 每次 apply 文件多出一整块
+ * （实测 gemini/claude/mimo/reasonix：几乎所有键重复一遍，行数只增不减）。
+ * 修法：解析前剥掉行尾 `\r`（返回的 line 也统一为无 `\r`，落盘行尾归一到 LF）。
+ * 注意：bot 运行时读配置的 config.ts `parseEnvFile` 用的是 `split(/\r?\n/)` + trim，不受此坑影响。
+ */
 function parseEnvLines(text: string): ParsedLine[] {
-  return text.split('\n').map((line) => {
+  return text.split('\n').map((raw) => {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
     const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
     return m ? { line, key: m[1], value: m[2] } : { line };
   });
 }
 
 /**
- * 合并 env：以现有文件为底，只应用 rendered 里的目标值。
+ * 合并 env：以现有文件为底做「归一化重写」——权属按本次渲染结果判定。
+ *
+ * 规则：
+ *  - rendered 里的键 = 配置中心拥有 ⇒ 写渲染值（覆盖同名旧行的值）
+ *  - rendered 里没有的键 = 人工/其他工具拥有 ⇒ 原样保留
+ *  - 同名重复键折叠成一行（保留首次出现位置）；渲染值为空串时保留文件里已有的非空值
+ *
  * @param existingText 现有文件内容（空串 = 首次生成）
  * @param renderedText 渲染器产出的目标内容
- * @param explicitKeys 本次请求显式提供的键（用户明确要改它 ⇒ 覆盖受保护键）
+ * @param explicitKeys 需要「连空值也照写」的键（默认空；否则渲染值为空 → 保留旧值）
  */
 export function mergeEnvText(
   existingText: string,
   renderedText: string,
   explicitKeys: Set<string> = new Set(),
 ): { text: string; changes: EnvChange[] } {
+  // 本次渲染的目标值（同键后者胜，与 config.ts parseEnvFile 的「末值胜」一致）
   const rendered = new Map<string, string>();
   for (const p of parseEnvLines(renderedText)) {
     if (p.key !== undefined) rendered.set(p.key, p.value ?? '');
   }
 
   const changes: EnvChange[] = [];
-  const seen = new Set<string>();
+  const written = new Set<string>(); // 已落盘的键（用于折叠重复行）
   const out: string[] = [];
+  const parsed = parseEnvLines(existingText);
 
-  for (const p of parseEnvLines(existingText)) {
-    if (p.key === undefined) { out.push(p.line); continue; }
-    seen.add(p.key);
-    if (!rendered.has(p.key)) {
-      // 模板不认识的键 → 原样保留（人工配置不丢）
-      out.push(p.line);
+  // 人工键（渲染结果里没有的键）的「末值」：与 config.ts parseEnvFile 的末值胜保持一致，
+  // 折叠重复行时用末值，保证运行时读到的值不变。
+  const manualLast = new Map<string, string>();
+  for (const p of parsed) {
+    if (p.key !== undefined && !rendered.has(p.key)) manualLast.set(p.key, p.value ?? '');
+  }
+
+  for (const p of parsed) {
+    if (p.key === undefined) { out.push(p.line); continue; } // 注释/空行原样
+    const target = rendered.get(p.key);
+    if (target === undefined) {
+      // 模板不认识的键 → 保留（人工配置不丢）；同名重复行同样折叠为一行
+      if (written.has(p.key)) continue;
+      written.add(p.key);
+      const last = manualLast.get(p.key) ?? '';
+      const cur = p.value ?? '';
+      if (cur === last) { out.push(p.line); continue; }
+      changes.push({ key: p.key, oldValue: cur, newValue: last, kind: 'update' });
+      out.push(`${p.key}=${last}`);
       continue;
     }
-    const target = rendered.get(p.key)!;
+    if (written.has(p.key)) continue; // 同名重复行 → 丢弃（值由首次出现处统一给）
+    written.add(p.key);
     const current = p.value ?? '';
     if (current === target) { out.push(p.line); continue; }
-    if (isProtectedKey(p.key) && !explicitKeys.has(p.key)) {
-      // 受保护键：保留现有值（空值才用渲染值补齐）
-      changes.push({ key: p.key, oldValue: current, newValue: current, kind: 'keep-protected' });
-      out.push(current.trim() ? p.line : `${p.key}=${target}`);
+    if (!target.trim() && !explicitKeys.has(p.key)) {
+      // 空值保护：渲染值为空时不抹掉文件里已有的非空值
+      // （如 CTI_BOT_<id>_BASE_URL 在无上游时渲染为空串）
+      changes.push({ key: p.key, oldValue: current, newValue: current, kind: 'keep-empty' });
+      out.push(p.line);
       continue;
     }
     changes.push({ key: p.key, oldValue: current, newValue: target, kind: 'update' });
@@ -97,7 +151,7 @@ export function mergeEnvText(
 
   // 渲染器新增的键
   for (const [k, v] of rendered) {
-    if (seen.has(k)) continue;
+    if (written.has(k)) continue;
     changes.push({ key: k, oldValue: '', newValue: v, kind: 'add' });
     out.push(`${k}=${v}`);
   }
@@ -166,7 +220,7 @@ export function logApply(agentId: string, file: string, changes: EnvChange[], ba
     const ts = new Date().toISOString();
     const lines = [`[${ts}] agent=${agentId} file=${file} backup=${backup ?? '-'} changes=${changes.length}`];
     for (const c of changes) {
-      const shown = isProtectedKey(c.key) ? '(受保护/凭证，值不打日志)' : `${c.oldValue} -> ${c.newValue}`;
+      const shown = isSensitiveKey(c.key) ? '(敏感/凭证，值不打日志)' : `${c.oldValue} -> ${c.newValue}`;
       lines.push(`  - ${c.kind} ${c.key}: ${shown}`);
     }
     fs.appendFileSync(logFile, lines.join('\n') + '\n', 'utf-8');

@@ -289,13 +289,28 @@ export class OpenClawProvider implements RuntimeProvider {
   private async createSession(cwd: string): Promise<AcpSession> {
     const child = await this.ensureProcess();
     const sessionNewId = this.nextId++;
+    // [2026-09-12 修复] openclaw ACP bridge 模式【明确拒绝】per-session MCP：
+    //   initialize 声明 mcpCapabilities:{http:false,sse:false}，session/new 只要带非空 mcpServers
+    //   就回 -32603 "ACP bridge mode does not support per-session MCP servers.
+    //   Configure MCP on the OpenClaw gateway or agent instead." ⇒ 卡片报
+    //   "OpenClaw ACP 会话创建失败: OpenClaw ACP session/new failed"、收消息即卡死。
+    //   ⇒ 必须传空数组；openclaw 的 MCP 一律在 ~/.openclaw/openclaw.json 的 mcp.servers 配
+    //   （openmem 已配）。配置中心那排 MCP 勾选对 openclaw 无效，仅作提示。
+    const ignoredMcp = readCtiMcpServers('openclaw');
+    if (ignoredMcp.length > 0) {
+      rtLog(`[openclaw] 忽略 ${ignoredMcp.length} 个 per-session MCP（ACP bridge 不支持；请配到 ~/.openclaw/openclaw.json 的 mcp.servers）`);
+    }
     child.stdin!.write(JSON.stringify({
       jsonrpc: '2.0', id: sessionNewId, method: 'session/new',
-      params: { cwd, mcpServers: readCtiMcpServers('openclaw') },
+      params: { cwd, mcpServers: [] },
     }) + '\n');
 
     const msg = await this.waitResponse(sessionNewId, 60_000);
-    if (!msg.result) throw new Error('OpenClaw ACP session/new failed');
+    // 带上 ACP 原始错误详情，别再吞（本次排查就是被吞了一整晚）
+    if (!msg.result) {
+      const detail = msg.error?.data?.details || msg.error?.message || 'no result';
+      throw new Error(`OpenClaw ACP session/new failed: ${detail}`);
+    }
     const sessionId = (msg.result as Record<string, unknown>).sessionId as string | undefined;
     if (!sessionId) throw new Error('OpenClaw ACP session/new: missing sessionId');
 

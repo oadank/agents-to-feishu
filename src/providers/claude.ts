@@ -167,7 +167,13 @@ export class ClaudeProvider implements RuntimeProvider {
   constructor() {
     this.cliPath = process.env.CTI_CLAUDE_CLI_PATH
       || (fs.existsSync('C:\\WINDOWS\\system32\\claude.bat') ? 'C:\\WINDOWS\\system32\\claude.bat' : 'claude');
-    this.baseUrl = process.env.ANTHROPIC_BASE_URL || 'http://127.0.0.1:4000/';
+    // 2026-09-11 修复（配置中心穿透）：nssm 服务以 .\oadan 运行 ⇒ 继承 HKCU\Environment，
+    // 而那里被 cc-haha 写死了 ANTHROPIC_BASE_URL=http://localhost:4000/ ⇒ 进程 env 里天然已有该键，
+    // config.<bot>.env 的值被 index.ts 的「process.env[k]===undefined 才灌」规则挡在门外。
+    // 配置中心写的 CTI_BOT_<BOT>_BASE_URL 才是权威来源，必须压过继承值。
+    this.baseUrl = process.env[`CTI_BOT_${(process.env.CTI_BOT || 'claude').toUpperCase()}_BASE_URL`]
+      || process.env.ANTHROPIC_BASE_URL
+      || 'http://127.0.0.1:4000/';
     this.cwd = process.env.CTI_DEFAULT_WORKDIR || process.cwd();
   }
 
@@ -216,6 +222,10 @@ export class ClaudeProvider implements RuntimeProvider {
     };
     // 走到这里 authToken 必然有值（无值已在上面抛错），直接赋值即可。
     env.ANTHROPIC_AUTH_TOKEN = authToken;
+    // 2026-09-11 修复（配置中心穿透）：同理，模型名也要以配置中心为准 ——
+    // 否则会被 HKCU\Environment 里 cc-haha 留下的 ANTHROPIC_MODEL=claude-model 顶掉。
+    const cfgModel = process.env[`CTI_BOT_${(process.env.CTI_BOT || 'claude').toUpperCase()}_MODEL`];
+    if (cfgModel) env.ANTHROPIC_MODEL = cfgModel;
     // MCP 穿透（2026-09-10）：配置中心勾选的外接 MCP 池（渲染层 CTI_BOT_<ID>_MCP_SERVERS JSON，
     // 与 zcode 穿透同源）映射进 SDK mcpServers——win-desktop-helper 等 stdio 外接由此真正到 claude。
     let externalMcp: Record<string, unknown> = {};

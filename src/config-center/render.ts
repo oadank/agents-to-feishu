@@ -142,12 +142,13 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   // 真实模型 ID + 网关 base_url（provider 端读这两个跑真实值，而非只读展示标签 MODEL_GROUP）
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_MODEL=${model?.id || agent.modelId}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_BASE_URL=${acpGatewayBaseUrl(agent.id) || prov?.baseURL || ''}`);
-  if (agent.runtime === 'zcode') {
-    // zcode 穿透：真实 key 随 config.<bot>.env 下发，provider 组装 ZCode Protocol 的
-    // runtimeModel（inline apiKey）在 session/create|resume 时注入——网页切 provider/model
-    // → apply → 下条消息生效。key 来源与 claude 的 ANTHROPIC_AUTH_TOKEN 同源（凭证层）。
-    const zk = (prov?.apiKeyEnv ? (readCredentialKey(prov.apiKeyEnv) || readOldEnvKey(prov.apiKeyEnv)) : '') || '';
-    lines.push(`CTI_BOT_${agent.id.toUpperCase()}_API_KEY=${zk}`);
+  // 真实 key 穿透（2026-09-11 从 zcode 专属升为全 runtime 统一）：
+  // 按当前 provider 的 apiKeyEnv 从凭证层解析真实 key，写 CTI_BOT_<ID>_API_KEY。
+  // provider 端优先读它 ⇒ 配置中心换 provider/model，key 跟着穿透、apply 后即可生效；
+  // 否则进程继承的 HKCU 级固定值（如 OPENAI_API_KEY）会永远压住配置中心。
+  {
+    const realKey = (prov?.apiKeyEnv ? (readCredentialKey(prov.apiKeyEnv) || readOldEnvKey(prov.apiKeyEnv)) : '') || '';
+    lines.push(`CTI_BOT_${agent.id.toUpperCase()}_API_KEY=${realKey}`);
   }
   // MCP 穿透（2026-09-10 从 zcode 专属升为全 runtime 统一）：勾选的 MCP 池渲染成 JSON，
   // 各 provider 负责映射为各自 CLI 的 mcpServers/配置文件
@@ -196,6 +197,9 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   } else {
     // 非 dsh 引擎（claude/codex/mimo/...）：engine/readCacheStats 也靠 CTI_DSH_ACP_CONFIG
     // 定位该 agent 的 stats 目录（~/.dsh/<bot>/stats），缺失会 fallback 到 dsh-bot 读错文件。
+    // ⚠️ 这里只是「路径锚点」：消费方（stats.ts / bridge/engine.readCacheStats / providers/dsh.ts）
+    // 用正则从路径里抠出 <bot> 名，**从不读该文件内容** ⇒ non-dsh 引擎下这个 cordis.yml 不必存在。
+    // （2026-09-11 已清理 ~/.dsh/gemini-bot/ 下 8-26 遗留的过期 cordis.yml，此键保持不变。）
     lines.push(`CTI_DSH_ACP_CONFIG=${path.join(botHome, 'cordis.yml')}`);
     lines.push('');
   }
@@ -208,7 +212,7 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
     lines.push(...mcpGlobalKeys);
   }
   lines.push('');
-  // 注入其他全局键（如 OPENAI_API_KEY / ARK_API_KEY / GW_API_KEY 的具体值由凭证层写）
+  // 注入其他全局键（如 OPENAI_API_KEY / ARK_API_KEY / GATEWAY_API_KEY 的具体值由凭证层写）
   for (const [k, v] of Object.entries(globalExtra)) {
     if (k.startsWith('CTI_BOT_')) continue;
     lines.push(`${k}=${v}`);
@@ -712,7 +716,7 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
             let t = fs.readFileSync(f, 'utf-8');
             // 预置三个 responses 端点（幂等，缺失追加）
             t = ensureCodexProvider(t, 'volcark', 'https://ark.cn-beijing.volces.com/api/plan/v3', 'ARK_API_KEY');
-            t = ensureCodexProvider(t, 'gw', 'https://gateway.henry-gao.com/v1', 'GW_API_KEY');
+            t = ensureCodexProvider(t, 'gw', 'https://gateway.henry-gao.com/v1', 'GATEWAY_API_KEY');
             t = ensureCodexProvider(t, 'litellm', 'http://localhost:4000', 'LITELLM_API_KEY');
             // active 切换
             const isGw = prov.id === 'gw';
@@ -892,10 +896,45 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
         // claude 走 Claude Code SDK（claude.ts），模型由进程 env ANTHROPIC_BASE_URL +
         // ANTHROPIC_AUTH_TOKEN 指向 LiteLLM 网关路由，CLI 无独立 model 配置文件可联动。
         break;
-      case 'openclaw':
-        // openclaw 无单点 model 配置文件（~/.openclaw 无 config.yaml，模型路由由
-        // agent/插件体系决定），联动需人工确认接入点，暂不写入。
+      case 'openclaw': {
+        // ~/.openclaw/openclaw.json（2026-09-12 补齐此前空实现留下的缺口）
+        // 实际接入点：agents.defaults.model.primary = "<providerId>/<model>"，
+        // 但它同时受 modelPolicy.allow 白名单 + defaults.models 声明的双层约束
+        // —— 只改 primary 会被白名单拦住，故四处必须同步：
+        //   ① models.providers.litellm.models 增补模型声明
+        //   ② agents.defaults.model.primary（真正决定路由）
+        //   ③ agents.defaults.modelPolicy.allow（白名单）
+        //   ④ agents.defaults.models（声明清单）
+        // 策略：只增补、不删除既有可选项（保持幂等，且不破坏用户手选的备选模型）。
+        // 注：provider 段自身的 baseUrl/apiKey 由 openclaw.json 自主维护，此处不碰。
+        const f = path.join(hunme, '.openclaw', 'openclaw.json');
+        if (!fs.existsSync(f)) break;
+        const raw = fs.readFileSync(f, 'utf-8');
+        const eol = raw.includes('\r\n') ? '\r\n' : '\n'; // 保持原文件行尾（此文件是 CRLF）
+        const j = JSON.parse(raw);
+        const dp = j?.agents?.defaults;
+        const litellmProv = j?.models?.providers?.litellm;
+        if (!dp || !litellmProv) break;
+        const modelRef = `litellm/${cliModel}`;
+        if (!Array.isArray(litellmProv.models)) litellmProv.models = [];
+        if (!litellmProv.models.some((m: { id?: string }) => m?.id === cliModel)) {
+          litellmProv.models.push({
+            id: cliModel, name: cliModel, reasoning: false,
+            input: ['text'], contextWindow: 1048576, maxTokens: 8192,
+          });
+        }
+        const oldRef = dp.model?.primary;
+        dp.model = dp.model || {};
+        dp.model.primary = modelRef;
+        dp.modelPolicy = dp.modelPolicy || {};
+        if (!Array.isArray(dp.modelPolicy.allow)) dp.modelPolicy.allow = [];
+        if (!dp.modelPolicy.allow.includes(modelRef)) dp.modelPolicy.allow.unshift(modelRef);
+        dp.models = dp.models || {};
+        if (!dp.models[modelRef]) dp.models[modelRef] = {};
+        fs.writeFileSync(f, JSON.stringify(j, null, 2).split('\n').join(eol) + eol, 'utf-8');
+        console.log(`[render] openclaw 模型联动 ${agent.id}: ${oldRef || '(空)'} -> ${modelRef}`);
         break;
+      }
       default:
         // dsh（DSH harness，模型由 cordis.yml 的 acp-agent.provider/model 管理，
         // renderCordisYml 已写）及其他未知 runtime：无需 CLI 配置联动。

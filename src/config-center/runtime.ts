@@ -243,11 +243,11 @@ export async function readDeepSeekBalance(): Promise<BalanceView | null> {
   } catch { return deepseekBalanceCache?.value ?? null; }
 }
 
-/** GW (henry-gao) 直连余额（按量预付款）：GW_API_KEY → GET https://gateway.henry-gao.com/v1/balance。 */
+/** GW (henry-gao) 直连余额（按量预付款）：GATEWAY_API_KEY → GET https://gateway.henry-gao.com/v1/balance。 */
 export async function readGwBalance(): Promise<BalanceView | null> {
   const now = Date.now();
   if (gwBalanceCache && now - gwBalanceCache.at < SSO_CACHE_MS) return gwBalanceCache.value;
-  const apiKey = readCredential('GW_API_KEY');
+  const apiKey = readCredential('GATEWAY_API_KEY');
   if (!apiKey) { gwBalanceCache = { value: null, at: now }; return null; }
   try {
     const resp = await fetch('https://gateway.henry-gao.com/v1/balance', {

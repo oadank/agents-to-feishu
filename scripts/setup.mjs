@@ -8,7 +8,7 @@
  *   node scripts/setup.mjs --dry-run        全流程演练，不写文件不注册服务
  *   node scripts/setup.mjs --yes            非交互：已有的全用，缺的跳过并列清单
  *   node scripts/setup.mjs --apps a.json    批量导入飞书 app（{"claude":{"appId":"cli_..","appSecret":".."},...}）
- *   node scripts/setup.mjs --creds c.json   批量导入凭据（{"GW_API_KEY":"...","GITHUB_TOKEN":"..."}）
+ *   node scripts/setup.mjs --creds c.json   批量导入凭据（{"GATEWAY_API_KEY":"...","GITHUB_TOKEN":"..."}）
  *
  * 职责链：
  *   ① 前置检查（node/git/nssm/node_modules）
@@ -51,7 +51,7 @@ const ENGINES = [
 ];
 
 const CRED_KEYS = [
-  ['GW_API_KEY', 'LiteLLM/GW 网关 key（多数 bot 走它）', true],
+  ['GATEWAY_API_KEY', 'LiteLLM/GW 网关 key（多数 bot 走它）', true],
   ['LITELLM_API_KEY', 'LiteLLM 中转 key（:4000 用量补拉）', false],
   ['DEEPSEEK_API_KEY', 'DeepSeek 官方 key（dsh bot）', false],
   ['GITHUB_TOKEN', 'GitHub PAT（也可放 config.env / 环境变量）', false],

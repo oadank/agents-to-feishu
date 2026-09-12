@@ -8,7 +8,7 @@
  *
  * 三层结构：
  *   providers : 总配置 —— 可选模型/Provider 池（volc-ark / gw / litellm / deepseek-official …）
- *   mcps      : 总配置 —— 可选 MCP 服务池（agentmemory / wiki / zai-vision / visionqa / win-desktop-helper …）
+ *   mcps      : 总配置 —— 可选 MCP 服务池（openmem / visionqa / win-desktop-helper / comfy …）
  *   agents    : 分配置 —— 每个 agent 一页，从总配置池【选择】model/provider + 勾选 mcps
  *
  * 状态行字段对应（用户强调"数据必须真实"）：
@@ -32,7 +32,7 @@ export interface ProviderDef {
   /** api 类型：llm-pi-ai 支持 openai-completions / openai-responses / anthropic-messages；llm-deepseek 固定官方协议 */
   api?: 'openai-completions' | 'openai-responses' | 'anthropic-messages';
   baseURL?: string;
-  /** 用哪个环境变量名存 key（如 ARK_API_KEY / GW_API_KEY / OPENAI_API_KEY） */
+  /** 用哪个环境变量名存 key（如 ARK_API_KEY / GATEWAY_API_KEY / OPENAI_API_KEY） */
   apiKeyEnv: string;
   /** 可选模型列表 */
   models: ModelDef[];
@@ -50,7 +50,7 @@ export interface ModelDef {
 
 /** 一个 MCP 服务定义 —— 总配置池的一项 */
 export interface McpDef {
-  id: string; // 如 'agentmemory' / 'wiki' / 'zai-vision' / 'visionqa' / 'win-desktop-helper'
+  id: string; // 如 'openmem' / 'visionqa' / 'win-desktop-helper'
   displayName: string;
   transport: 'streamable-http' | 'stdio';
   serverName: string;
@@ -285,12 +285,8 @@ export const DEFAULT_SPEECH: SpeechConfig = {
  */
 export const DEFAULT_MCPS: McpDef[] = [
   {
-    id: 'agentmemory', displayName: 'AgentMemory 记忆', transport: 'streamable-http',
-    serverName: 'agentmemory', url: 'http://localhost:3114/mcp', failOnStartupError: false, external: true,
-  },
-  {
-    id: 'wiki', displayName: 'Wiki 团队文档', transport: 'streamable-http',
-    serverName: 'wiki', url: 'http://localhost:3456/mcp', failOnStartupError: false, external: true,
+    id: 'openmem', displayName: 'openmem 统一记忆中枢', transport: 'streamable-http',
+    serverName: 'openmem', url: 'http://127.0.0.1:3466/mcp', failOnStartupError: false, external: true,
   },
   {
     id: 'visionqa', displayName: 'VisionQA 质量看图（供 ComfyUI 后端）', transport: 'streamable-http',
@@ -331,7 +327,7 @@ export const DEFAULT_PROVIDERS: ProviderDef[] = [
     id: 'gw', displayName: 'GW (henry-gao) 直连',
     plugin: 'llm-pi-ai', api: 'openai-completions',
     baseURL: 'https://gateway.henry-gao.com/v1',
-    apiKeyEnv: 'GW_API_KEY',
+    apiKeyEnv: 'GATEWAY_API_KEY',
     models: [
       { id: 'deepseek-v4-flash', displayName: 'DeepSeek-V4-Flash (gw)', contextWindow: 524288, label: 'gwv4f' },
     ],

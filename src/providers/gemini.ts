@@ -34,7 +34,14 @@ function readCtiMcpServers(botId: string): Array<Record<string, unknown>> {
       if (m.transport === 'stdio' && m.command) {
         return { name: m.id, command: m.command, args: m.args || [], env: Object.entries(m.env || {}).map(([k, v]) => ({ name: k, value: v })) };
       }
-      if (m.url) return { name: m.id, url: m.url };
+      if (m.url) {
+        // gemini CLI 0.58+ 的 ACP session/new schema（zod union）要求 http/sse 型必须带
+        // type（字面量 "http"/"sse"）+ headers（数组，可空）。只给 {name,url} 会命中
+        // invalid_union ⇒ session/new 直接 -32603 失败 ⇒ 收消息即卡死。
+        // 2026-09-11 实测：补 type+headers 后，带全部 4 个 MCP 的 session/new + prompt 全通。
+        const isSse = m.transport === 'sse';
+        return { name: m.id, type: isSse ? 'sse' : 'http', url: m.url, headers: [] };
+      }
       return null;
     }).filter((x): x is Record<string, unknown> => !!x);
   } catch {
@@ -72,11 +79,14 @@ export class GeminiProvider implements RuntimeProvider {
     //   api_key：gemini 走 LiteLLM 网关(4000)，认证 key 必须是 LiteLLM 虚拟 key（sk- 开头）。
     //             config.env 里 OPENAI_API_KEY=sk-200418 即该虚拟 key（实测调 4000 通）；
     //             严禁 fallback 到 ARK_API_KEY(ark- 开头)——LiteLLM 会回 "LiteLLM Virtual Key expected" 401。
-    this.apiKey = process.env.OPENAI_API_KEY
+    // [2026-09-11] 配置中心下发的真实 key 提到最前：render 按当前 provider 的 apiKeyEnv
+    // 从凭证层解析后写 CTI_BOT_GEMINI_API_KEY ⇒ 配置中心换 provider，key 跟着穿透。
+    // 否则进程继承的 OPENAI_API_KEY（HKCU\Environment 里的固定值）会永远压住配置中心。
+    // 同时移除 ARK_API_KEY 回落（ark- 开头的 key 打 LiteLLM 必 401）。
+    this.apiKey = process.env.CTI_BOT_GEMINI_API_KEY
+      || process.env.OPENAI_API_KEY
       || process.env.LITELLM_API_KEY
-      || process.env.CTI_BOT_GEMINI_API_KEY
       || process.env.CTI_GEMINI_API_KEY
-      || process.env.ARK_API_KEY
       || 'sk-200418';
     this.baseUrl = process.env.CTI_BOT_GEMINI_BASE_URL
       || process.env.CTI_GEMINI_BASE_URL
