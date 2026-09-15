@@ -31,6 +31,9 @@ import {
   readStore, writeStore, findProvider, DEFAULT_SPEECH, DEFAULT_INJECTION, defaultStorePath,
 } from './store.js';
 import { writeAgentArtifacts, readCredentialKey, readOldEnvKey } from './render.js';
+// [根治 C 2026-09-15] 语法闸门。bot 服务由 tsx 直读 src，代码带语法错时「保存即 apply
+// 即重启」等于亲手打死一个还能跑的 bot —— 2026-09-15 早上就是这么全线瘫痪的。
+import { checkSrcSyntax, formatSyntaxErrors } from './syntax-check.js';
 import { startAgent as pmStart, stopAgent as pmStop, restartAgent as pmRestart, statusAll as pmStatus } from './process-manager.js';
 import { syncDeepTutorModel } from './sync-deeptutor.js';
 import { buildAgentRuntimeState, type AgentRuntimeState } from './runtime.js';
@@ -138,6 +141,11 @@ export function createConfigServer(opts: ConfigServerOptions) {
     const store = load();
     const agent = store.agents.find((a) => a.id === agentId);
     if (!agent) return { ok: false, error: `agent ${agentId} 不存在` };
+    // [根治 C 2026-09-15] 兜底：POST /api/agents/:id/apply 与 /api/agents-by-runtime/:runtime
+    // 不经过 PUT 就直达这里（后者还会 for 循环逐个重启，最多连崩 12 个 bot），所以闸门必须
+    // 也堵在 applyAgent 上，光堵 PUT 不够。
+    const applyGate = checkSrcSyntax();
+    if (!applyGate.ok) return { ok: false, error: formatSyntaxErrors(applyGate) };
     try {
       // 把该 agent runtime 在 config-open.json 里配置的自定义 CLI 路径注入 globalExtra，
       // 渲染进 config.env（provider 读 CTI_<RUNTIME>_CLI_PATH/EXEC 生效）
@@ -881,6 +889,14 @@ export function createConfigServer(opts: ConfigServerOptions) {
             // 2026-09-05 新增：runtime 透传（zcode 等新运行时经网页/API 建站时可选）
             runtime: body.runtime ?? a.runtime,
           };
+          // [根治 C 2026-09-15] 语法闸门：不过就整体拒绝 —— store 一字节不写、nssm 一次不碰。
+          // 为什么不采纳"写 store 但跳过重启"：那会形成静默漂移（store 已是新配置、线上还是
+          // 旧进程、界面却显示保存成功），等下一个不相干的人 apply 时坏代码才上线，崩在他头上，
+          // 排查地狱。拒绝保存让因果链闭合：谁把代码改坏谁先修，修好那一刻重启才安全。
+          const gate = checkSrcSyntax();
+          if (!gate.ok) {
+            return json(res, 422, { error: formatSyntaxErrors(gate), syntaxErrors: gate.errors, saved: false, restarted: false });
+          }
           save(store);
           // 2026-08-30 修复（老大：更改配置必须穿透）：此前只写 store 就返回 ⇒ CLI 配置文件
           // 纹丝不动、进程不重启 ⇒ "状态栏显示新模型、实际跑的还是旧模型"。

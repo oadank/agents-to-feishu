@@ -143,6 +143,8 @@ export class MessageEngine {
   private streamCards = new Map<string, string>();
   /** chatId → 串行任务链（同一聊天室的消息排队执行，防止 ACP 并发撞车） */
   private chatQueues = new Map<string, Promise<void>>();
+  /** [根治 A③] 每个 chat 当前 busy 周期的起点，用于「排队多久 / 卡住多久」留痕 */
+  private chatBusySince = new Map<string, number>();
 
   readonly modelGroup: string;
   readonly modelProvider: string;
@@ -178,14 +180,32 @@ export class MessageEngine {
    * 同一 chat 的消息排队：前一条 handleText 完成后才执行下一条，避免 ACP "already in flight"。
    */
   async enqueueChat(chatId: string, task: () => Promise<void>): Promise<void> {
+    const stuckWarnMs = parseInt(process.env.CTI_QUEUE_STUCK_WARN_MS || '120000', 10);
+    // [根治 A③ 2026-09-15] 排队留痕。现场出现过「消息只到 handleIncoming，之后 rt.log 再无任何
+    // 输出、也不报错」：那是本 chat 的串行队列被一个永不 settle 的任务堵住了，后续消息全排在死
+    // promise 后面 —— 用户端就是彻底石沉大海。以前既看不出在排队、也看不出卡了多久。
+    if (this.chatQueues.has(chatId)) {
+      const waited = Date.now() - (this.chatBusySince.get(chatId) ?? Date.now());
+      console.log(`[engine][queue] chat=${chatId.slice(-8)} 排队等待前一个任务（其已运行 ${Math.round(waited / 1000)}s）`);
+    }
+    if (!this.chatBusySince.has(chatId)) this.chatBusySince.set(chatId, Date.now());
     const previous = this.chatQueues.get(chatId) || Promise.resolve();
     const next = previous.catch(() => undefined).then(task);
     this.chatQueues.set(chatId, next);
+    // 看门狗：任务超过阈值仍未 settle 就在日志里点名（不强行释放队列 —— 那个任务还活着，
+    // 硬清会让下一条消息和它并发，反而制造 ACP "already in flight"）。
+    const stuckTimer = setTimeout(() => {
+      console.warn(`[engine][queue] chat=${chatId.slice(-8)} 任务已运行 ${Math.round(stuckWarnMs / 1000)}s 仍未结束`
+        + ` —— provider/ACP 极可能无响应，该 chat 后续消息会一直排队（排查看 providers/*.log 与 *-rt.log）`);
+    }, stuckWarnMs);
+    stuckTimer.unref?.();
     try {
       await next;
     } finally {
+      clearTimeout(stuckTimer);
       if (this.chatQueues.get(chatId) === next) {
         this.chatQueues.delete(chatId);
+        this.chatBusySince.delete(chatId);
         // busy 结束（该 chat 队列排空）：清插队卡标记 + 自动插队定时器。
         // 让 sendInterruptCard 的防重 guard 只覆盖「当前 busy 周期」：
         // 周期内同 chat 最多一张卡、点按钮后不再补发新卡（修"更新后自动还原"）；
@@ -726,7 +746,15 @@ export class MessageEngine {
             // 不覆盖已有内容：错误追加到 layers 末尾，走正常渲染保留已显示的正文/工具
             layers.error = ev.message;
             await quiesce();
-            await render(buildStreamMarkdown(layers));
+            const okErr = await render(buildStreamMarkdown(layers));
+            // [根治 A② 2026-09-15] 走到这里时卡片流式通道常常已经自己超时关掉了
+            // （实测 code=200850 "card streaming timeout" / 300309 "streaming mode is
+            // closed"）。render 失败如果不兜底，用户在飞书端看到的就是"永远停在第一帧、
+            // 连个错误都没有"—— 今早那次静默挂死之所以查两小时，就是因为它一声不吭。
+            if (!okErr) {
+              console.warn(`[engine] error render failed → 补发纯文本错误（不依赖卡片通道）`);
+              await this.sendError(chatId, `❌ 引擎报错：${ev.message}`);
+            }
             break;
           }
           case 'done':

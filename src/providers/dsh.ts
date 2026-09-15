@@ -53,15 +53,152 @@ function readDeepSeekApiKey(): string {
   return process.env.DEEPSEEK_API_KEY || '';
 }
 
-/** 解析 DSH ACP 服务器启动命令 */
+/**
+ * [根治 2026-09-15] 从配置中心渲染的 cordis.yml 派生一份 ACP patch。
+ *
+ * 背景（实测坐实）：官方已废弃「直接 spawn 包 bin + 手写整树 cordis」形态——
+ * docs/architecture.md#application-launch 原文 "Only `dsh` profiles launch
+ * supported Node apps; package bins, demos, and public SDK argv escapes are
+ * forbidden"（scripts/verify-application-entrypoints.ts 静态把关）。旧入口吃的
+ * 手写整树缺 dsh-base 的 host-plane 装配行，`session/new` 走到
+ * packages/acp/acp/src/session.ts 的 ctx.agents.create() 时会 await 一个永远
+ * 无人应答的装配：不抛异常、不进 fail-loud、不退出进程 —— 现象就是飞书卡片停在
+ * 第一帧、桥接再无输出，且【重启服务无效】（每条新会话都要走 session/new）。
+ * 触发点：早上切模型引发 13:07 重启，把还能干活的老 ACP 进程换掉，脱节当场暴露。
+ *
+ * 现唯一受支持入口是 `dsh --profile acp`（树由 bundle 完整装配），外部只能用
+ * `--patch` 覆盖/追加。这里刻意不碰 render.ts —— cordis.yml 仍是配置中心切模型
+ * 的单一产物，我们只从它派生 patch：
+ *   ① 用 acp-agent 段的 provider/model 覆盖宿主行 `id: acp`（切模型继续生效）
+ *   ② 原样追加 MCP clients / 桥接自带插件 cti-builtin-tools / 技能目录（能力不减）
+ * 幂等：内容未变不落盘。任何异常返回 null（退化为只带 --profile acp，仍比旧入口强）。
+ */
+/**
+ * [根治 A①] 轻量解析 settings.yaml 的 `llm-pi-ai.providers.<name>.models[].id|name`。
+ * 刻意不引 yaml 依赖：cordis 系文件带 `!!js` 自定义标签，通用解析器在这类文件上会炸，
+ * 而 settings.yaml 是本机手维护的固定缩进风格（providers 缩进 2 / provider 名缩进 4 /
+ * models 缩进 6 / 列表项缩进 8），逐行扫一次即可，零依赖零副作用。
+ */
+function parseSettingsProviders(text: string): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  let inProviders = false;
+  let cur = '';
+  let inModels = false;
+  for (const raw of text.split(/\r?\n/)) {
+    if (!raw.trim() || raw.trimStart().startsWith('#')) continue;
+    const ind = raw.match(/^\s*/)?.[0].length ?? 0;
+    const key = /^\s*("?[\w.\-]+"?)\s*:\s*(.*)$/.exec(raw);
+    const name = key?.[1]?.replace(/^"|"$/g, '') ?? '';
+    if (ind <= 0) { inProviders = false; cur = ''; inModels = false; continue; }
+    if (ind === 2 && key) { inProviders = name === 'providers'; cur = ''; inModels = false; continue; }
+    if (!inProviders) continue;
+    if (ind === 4 && key) { cur = name; out[cur] = out[cur] ?? []; inModels = false; continue; }
+    if (ind === 6 && key) { inModels = name === 'models'; continue; }
+    if (ind >= 8 && inModels && cur) {
+      const m = /(?:^|[\s,\[])-\s*(?:id|name)\s*:\s*([\w.\-]+)/.exec(raw);
+      if (m?.[1]) out[cur]?.push(m[1]);
+      const inline = /^\s*(?:id|name)\s*:\s*([\w.\-]+)/.exec(raw);
+      if (inline?.[1]) out[cur]?.push(inline[1]);
+    }
+  }
+  return out;
+}
+
+/**
+ * [根治 A①] 校验 provider/model 确实在 DSH 全局 settings.yaml 注册过。
+ * 为什么必须提前拦：`--profile acp` 的模型 catalog 来自 settings.yaml，选了没注册的
+ * 组合时，会话创建会掉进 harness 的悬空 await ——【既不报错也不响应】，就是今早那次
+ * "卡片停在第一帧、重启服务也没用"的放大器。宁可在这里响亮地拒绝。
+ */
+function checkAcpModelSelection(provider: string, model: string): string | null {
+  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+  const settingsPath = path.join(home, 'settings.yaml');
+  if (!fs.existsSync(settingsPath)) return null; // 文件不存在＝不是这套部署形态，不拦
+  let text = '';
+  try { text = fs.readFileSync(settingsPath, 'utf8'); } catch { return null; }
+  const provs = parseSettingsProviders(text);
+  const names = Object.keys(provs);
+  if (!names.length) return null; // 读不出结构就放行，避免误伤
+  if (!(provider in provs)) {
+    return `DSH 模型配置校验未通过：provider "${provider}" 不在 ${settingsPath} 的 llm-pi-ai.providers 里`
+      + `（本机已注册：${names.join(' / ')}）。这种组合会让会话创建静默挂死，已提前拦下——`
+      + `请到配置中心(:13600)改该 bot 的模型，或先在 settings.yaml 里补上该 provider。`;
+  }
+  const models = provs[provider] ?? [];
+  if (models.length && !models.includes(model)) {
+    return `DSH 模型配置校验未通过：模型 "${model}" 未挂在 provider "${provider}" 下`
+      + `（该 provider 可用：${models.join(' / ')}）。继续启动会掉进会话创建静默挂死，已提前拦下——`
+      + `请到配置中心(:13600)重选模型，或在 settings.yaml 的 ${provider}.models 里补上 "${model}"。`;
+  }
+  return null;
+}
+
+function ensureAcpPatch(cordisPath: string, log?: (m: string) => void): { patchPath: string; err: string | null } | null {
+  try {
+    if (!fs.existsSync(cordisPath)) return null;
+    const lines = fs.readFileSync(cordisPath, 'utf8').split(/\r?\n/);
+    // 按顶层 "- id:" 切段（段文本含其后直到下一个 "- id:" 的全部行）
+    const segs: Array<{ id: string; text: string }> = [];
+    let cur: { id: string; buf: string[] } | null = null;
+    for (const ln of lines) {
+      const m = /^- id:\s*(\S+)/.exec(ln);
+      if (m) {
+        if (cur) segs.push({ id: cur.id, text: cur.buf.join('\n') });
+        cur = { id: m[1] as string, buf: [ln] };
+        continue;
+      }
+      if (cur) cur.buf.push(ln);
+    }
+    if (cur) segs.push({ id: cur.id, text: cur.buf.join('\n') });
+
+    const segName = (s: { text: string }): string => {
+      const m = /name:\s*'?([^'\n]+)'?/.exec(s.text);
+      return m && m[1] ? m[1].trim() : '';
+    };
+    const agentSeg = segs.find((s) => s.id === 'acp-agent');
+    const provider = agentSeg ? /^\s+provider:\s*(\S+)/m.exec(agentSeg.text)?.[1] : undefined;
+    const model = agentSeg ? /^\s+model:\s*(\S+)/m.exec(agentSeg.text)?.[1] : undefined;
+
+    let out = '# Generated by agents-to-feishu DshProvider from cordis.yml — DO NOT EDIT BY HAND.\n';
+    out += '# 换模型请在配置中心(:13600)保存，本文件随之重新派生。\n';
+    out += '- id: acp\n  config:\n';
+    out += `    provider: ${provider ?? 'deepseek-official'}\n    model: ${model ?? 'deepseek-v4-flash'}\n`;
+
+    // base 里没有这些插件，patch 里追加即可（同名 id 会覆盖，幂等）
+    const keep = new Set(['@deepseek-ai/dsh-mcp-client', 'cti-builtin-tools', '@deepseek-ai/dsh-skill-filesystem']);
+    let kept = 0;
+    for (const s of segs) {
+      if (!keep.has(segName(s))) continue;
+      out += '\n' + s.text.replace(/\s+$/, '') + '\n';
+      kept++;
+    }
+
+    const patchPath = path.join(path.dirname(cordisPath), 'acp.patch.yml');
+    const prev = fs.existsSync(patchPath) ? fs.readFileSync(patchPath, 'utf8') : '';
+    if (prev !== out) fs.writeFileSync(patchPath, out, 'utf8');
+    log?.(`[dsh] ACP patch: provider=${provider ?? '-'} model=${model ?? '-'} keptPlugins=${kept}`);
+    // 派生完成后再判定"能不能拿去启动"：不合法就带着人话错误返回，
+    // 由 resolveDshCommand 响亮抛出（不在这里 throw，避免被下面的 catch 吞成 null）
+    const err = checkAcpModelSelection(provider ?? 'deepseek-official', model ?? 'deepseek-v4-flash');
+    return { patchPath, err };
+  } catch {
+    return null;
+  }
+}
+
+/** 解析 DSH ACP 服务器启动命令（官方唯一受支持形态：`dsh --profile acp` + `--patch`，详见 ensureAcpPatch） */
 function resolveDshCommand(): { command: string; args: string[]; cwd: string } {
   const harness = process.env.CTI_DSH_HARNESS_PATH || 'C:\\D\\opt\\deepseek-harness\\deepseek-harness';
   const config = process.env.CTI_DSH_ACP_CONFIG || path.join(os.homedir(), '.dsh', 'dsh-bot', 'cordis.yml');
-  return {
-    command: process.execPath,
-    args: ['packages/examples/acp-demo/lib/bin.js', '--config', config],
-    cwd: harness,
-  };
+  const args = fs.existsSync(path.join(harness, 'apps', 'cli', 'lib', 'bin.js'))
+    ? ['apps/cli/lib/bin.js', '--profile', 'acp']
+    : ['--import', 'tsx/esm', 'apps/cli/src/bin.ts', '--profile', 'acp'];
+  const res = ensureAcpPatch(config, rtLog);
+  // [根治 A①] 配置不合法就响亮抛错，绝不带着"必然挂死"的组合去 spawn。
+  // 以前是照常启动 → 会话创建静默僵死 → 你在飞书端什么也看不到。
+  if (res?.err) throw new Error(res.err);
+  if (res) args.push('--patch', res.patchPath);
+  return { command: process.execPath, args, cwd: harness };
 }
 
 /** 剥离 DSH_* 环境变量 + 补全 Windows 必需系统变量（NSSM 环境残缺） */
@@ -176,11 +313,26 @@ export class DshProvider implements RuntimeProvider {
   }
 
   async prepare(): Promise<void> {
-    const { cwd } = resolveDshCommand();
-    const config = process.env.CTI_DSH_ACP_CONFIG || path.join(os.homedir(), '.dsh', 'dsh-bot', 'cordis.yml');
-    if (!fs.existsSync(config)) throw new Error(`DSH ACP config not found: ${config}`);
-    if (!fs.existsSync(path.join(cwd, 'packages', 'examples', 'acp-demo', 'lib', 'bin.js'))) {
-      throw new Error(`DSH harness not found at: ${cwd} (set CTI_DSH_HARNESS_PATH)`);
+    // [根治 2026-09-15 · 修我自己引入的回归] 下面三处 throw（含新增的模型校验）原本
+    // 都不在任何 try 里：未捕获异常直接把 bot 进程带崩 → nssm 重启循环 → SERVICE_PAUSED。
+    // 假模型故障注入实测复现：注入后 status=SERVICE_PAUSED —— 比"静默挂死"还糟。
+    // 铁律：启动期的配置问题只能「记日志 + 放弃预启动 + 服务继续活着」，
+    // 可读错误留给消息路径回给用户（那条链上有 yield error → 飞书补发文本）。
+    try {
+      const { cwd } = resolveDshCommand();
+      const config = process.env.CTI_DSH_ACP_CONFIG || path.join(os.homedir(), '.dsh', 'dsh-bot', 'cordis.yml');
+      if (!fs.existsSync(config)) throw new Error(`DSH ACP config not found: ${config}`);
+      // [2026-09-15] 入口已从 packages/examples/acp-demo 的遗留 bin 换成官方 `--profile acp`，
+      // 存在性检查跟着改：apps/cli 的构建产物 bin.js 或源码 bin.ts 二者有其一即可。
+      const cliReady = ['apps/cli/lib/bin.js', 'apps/cli/src/bin.ts'].some((p) => fs.existsSync(path.join(cwd, p)));
+      if (!cliReady) {
+        throw new Error(`DSH harness not found at: ${cwd} (set CTI_DSH_HARNESS_PATH)`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      rtLog(`[dsh] prepare 放弃预启动（服务保持存活，消息到来时会重试并把错误回给用户）: ${msg}`);
+      console.warn(`[dsh] prepare aborted, service stays alive:`, msg);
+      return;
     }
     // ⚠️ 常驻模式（2026-08-25）：服务启动即预启动 ACP 进程并完成 initialize/MCP 初始化，
     // 而不是等第一条消息才惰性 spawn（那是"一次性调用"体验，首条消息要冷启动 4-5 秒）。
@@ -312,7 +464,22 @@ export class DshProvider implements RuntimeProvider {
     let rejectSpawn: (e: Error) => void = () => {};
     this.spawnPromise = new Promise<ChildProcess>((resolve, reject) => {
       rejectSpawn = reject;
-      const { command, args, cwd: harnessCwd } = resolveDshCommand();
+      // [根治 A③] resolveDshCommand 会做配置校验并可能抛错。这里必须兜住并【清掉
+      // spawnPromise】：否则 this.spawnPromise 永远停在这个已失败的 promise 上
+      // （第 450 行直接 return 它）⇒ 之后每条消息都秒失败、永不重试 = bot 永久失忆，
+      // 正是今早那次故障被放大成"完全不可用"的机制。
+      let plan: { command: string; args: string[]; cwd: string };
+      try {
+        plan = resolveDshCommand();
+      } catch (e) {
+        this.spawnPromise = null;
+        const msg = e instanceof Error ? e.message : String(e);
+        rtLog(`[dsh] spawn plan FAILED (已清除 spawnPromise，下条消息会重试): ${msg}`);
+        reject(e instanceof Error ? e : new Error(msg));
+        return;
+      }
+      const { command, args } = plan;
+      const harnessCwd = plan.cwd;
       const env = buildSpawnEnv({
         DEEPSEEK_API_KEY: readDeepSeekApiKey(),
         DSH_PERMISSION_MODE: 'danger-full-access',
@@ -426,7 +593,21 @@ export class DshProvider implements RuntimeProvider {
       params: { cwd, mcpServers: [] },
     });
 
-    const msg = await this.waitResponse(sessionNewId, 60_000);
+    let msg: any;
+    try {
+      msg = await this.waitResponse(sessionNewId, 60_000);
+    } catch (e) {
+      // [根治 A②③] 会话创建超时/失败 = 该进程已进入不可信状态：配置树装配缺行时
+      // harness 侧是永久悬空 await（既不报错也不退出），而旧代码只把错误 yield 出去，
+      // 下一条消息还在同一个僵尸进程上重试 → 再挂 60 秒，永远好不了（今早「重启也没用」
+      // 之后其实就是这个循环）。现在：留痕 + 销毁进程 + 清 spawnPromise，下条消息全新
+      // spawn；若配置仍不合法，会在 spawn 阶段被 A① 校验拦成一句人话错误。
+      const why = e instanceof Error ? e.message : String(e);
+      rtLog(`[dsh] session/new FAILED (${why}) → 销毁 ACP 进程并清空 spawnPromise，下条消息重建`);
+      this.killProcess();
+      this.spawnPromise = null;
+      throw new Error(`DSH 会话创建失败（${why}）：已销毁可疑进程，下一条消息会自动重建引擎。`);
+    }
     if (!msg.result) throw new Error('DSH ACP session/new failed');
 
     const sessionId = (msg.result as Record<string, unknown>).sessionId as string | undefined;
@@ -558,6 +739,15 @@ export class DshProvider implements RuntimeProvider {
     let wakeup: () => void = () => {};
     let wakeupP: Promise<void> = Promise.resolve();
     const poke = (): void => { wakeup(); };
+
+    // [2026-09-13] 工具名回退修复（同 gemini.ts）：ACP 失败型 `tool_call_update` 不带 title，
+    // 旧写法 `String(u.title || 'tool')` 会渲染成字面量 "tool"，卡片上只剩 `❌ tool`。
+    // 按 toolCallId 缓存首个 tool_call 的 title 补全，再兜底 ACP kind。
+    const toolTitles = new Map<string, string>();
+    const KIND_LABEL: Record<string, string> = {
+      read: '读文件', edit: '改文件', delete: '删文件', move: '移动文件',
+      search: '搜索', execute: '执行命令', think: '思考', fetch: '抓取', other: '工具',
+    };
     const promptHandler: ActivePrompt = {
       promptId,
       sessionId: session.sessionId,
@@ -589,9 +779,17 @@ export class DshProvider implements RuntimeProvider {
         } else if (update?.sessionUpdate === 'tool_call' || update?.sessionUpdate === 'tool_call_update') {
           const u = update as any;
           const status = String(u.status || (update?.sessionUpdate === 'tool_call' ? 'running' : 'done'));
+          // [2026-09-13] title 按 toolCallId 缓存补全（失败型 update 不带 title），详见上方注释
+          const toolCallId = typeof u.toolCallId === 'string' ? u.toolCallId : '';
+          const incomingTitle = typeof u.title === 'string' && u.title.trim() ? u.title.trim() : '';
+          if (toolCallId && incomingTitle) { toolTitles.set(toolCallId, incomingTitle); }
+          const toolName = incomingTitle
+            || (toolCallId ? toolTitles.get(toolCallId) ?? '' : '')
+            || KIND_LABEL[String(u.kind ?? '')]
+            || 'tool';
           queue.push({
             type: 'tool',
-            tool: String(u.title || 'tool'),
+            tool: toolName,
             status: status === 'failed' ? 'error' : status === 'completed' ? 'done' : 'running',
             input: typeof u.rawInput === 'string' ? u.rawInput.slice(0, 200) : JSON.stringify(u.rawInput ?? '').slice(0, 200),
             // [2026-09-01] 透传工具结果文本（harness ACP 已带 rawOutput ≤2000 字符）；
