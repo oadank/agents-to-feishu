@@ -237,6 +237,17 @@ export class GeminiProvider implements RuntimeProvider {
     // 结束时若有未合并的思考增量，立即刷出（保持顺序：须在 queue 排空前调用）
     const flushThinkingSync = (): void => { if (thinkMergeTimer) { clearTimeout(thinkMergeTimer); thinkMergeTimer = null; } flushThink(); };
 
+    // [2026-09-13] 工具名回退修复：ACP 的 `tool_call_update` 在**失败分支**不带 title
+    // （gemini-cli 源码：成功/进行中都给 title，catch 里只发 toolCallId+kind+content），
+    // 旧写法 `String(update?.title || 'tool')` 会把它渲染成字面量 "tool"，飞书上只看得到
+    // `❌ tool`、分不清是哪个工具。这里按 toolCallId 缓存首个 tool_call 的 title，失败时补全；
+    // 再兜底 ACP kind（read/edit/search/execute/...）。
+    const toolTitles = new Map<string, string>();
+    const KIND_LABEL: Record<string, string> = {
+      read: '读文件', edit: '改文件', delete: '删文件', move: '移动文件',
+      search: '搜索', execute: '执行命令', think: '思考', fetch: '抓取', other: '工具',
+    };
+
     // 订阅 server notifications → push 事件
     unsubscribe = client.subscribe((message) => {
       if (extractSessionId(message) !== sessionId) return;
@@ -305,11 +316,21 @@ export class GeminiProvider implements RuntimeProvider {
         case 'tool_call':
         case 'tool_call_update': {
           const status = String(update?.status || (updateType === 'tool_call' ? 'running' : 'done'));
+          // [2026-09-13] title 按 toolCallId 缓存补全（失败型 update 不带 title），详见上方注释
+          const toolCallId = typeof update?.toolCallId === 'string' ? update.toolCallId : '';
+          const incomingTitle = typeof update?.title === 'string' && update.title.trim() ? update.title.trim() : '';
+          if (toolCallId && incomingTitle) { toolTitles.set(toolCallId, incomingTitle); }
+          const toolName = incomingTitle
+            || (toolCallId ? toolTitles.get(toolCallId) ?? '' : '')
+            || KIND_LABEL[String(update?.kind ?? '')]
+            || 'tool';
+          // [2026-09-13] 修字段名笔误：ACP 事件里是 rawInput，旧写 update.input 永远取不到 → 工具参数一直空白
+          const rawInput = update?.rawInput;
           queue.push({
             type: 'tool',
-            tool: String(update?.title || 'tool'),
+            tool: toolName,
             status: status === 'failed' ? 'error' : status === 'completed' ? 'done' : 'running',
-            input: typeof update?.input === 'object' ? JSON.stringify(update.input).slice(0, 220) : String(update?.input ?? '').slice(0, 220),
+            input: typeof rawInput === 'object' ? JSON.stringify(rawInput).slice(0, 220) : String(rawInput ?? '').slice(0, 220),
           });
           poke();
           break;
