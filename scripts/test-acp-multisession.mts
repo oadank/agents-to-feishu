@@ -10,24 +10,23 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { dshAcpSpawnPlan, dshAcpEnv } from './dsh-acp-spawn.mjs';
 
-const harness = 'C:\\D\\opt\\deepseek-harness\\deepseek-harness';
 const config = 'C:\\Users\\oadan\\.dsh\\dsh-bot\\cordis.yml';
-const command = process.execPath;
-const args = ['--import', 'tsx/esm', 'packages/examples/acp-demo/src/bin.ts', '--config', config];
+const plan = dshAcpSpawnPlan({ config });
 
-// 剥离 DSH_* 环境变量（防宿主会话锁冲突）
-const clean: NodeJS.ProcessEnv = {};
-for (const [k, v] of Object.entries(process.env)) {
-  if (k.startsWith('DSH_')) continue;
-  clean[k] = v;
-}
-clean.DEEPSEEK_API_KEY = fs.existsSync(path.join(os.homedir(), '.dsh', '.credentials.yaml'))
-  ? (fs.readFileSync(path.join(os.homedir(), '.dsh', '.credentials.yaml'), 'utf8').match(/DEEPSEEK_API_KEY\s*:\s*(\S+)/)?.[1] ?? '')
-  : '';
-clean.DSH_PERMISSION_MODE = 'danger-full-access';
-
-const child = spawn(command, args, { cwd: harness, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: clean });
+// 启动入口/环境共用 scripts/dsh-acp-spawn.mjs（dshAcpEnv 剥 DSH_* 防宿主会话锁冲突、
+// 注 DSH_HOME/Windows 系统变量）；这里只再注入 API key 与权限模式。
+const credFile = path.join(os.homedir(), '.dsh', '.credentials.yaml');
+const child = spawn(plan.command, plan.args, {
+  cwd: plan.cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+  env: dshAcpEnv({
+    DEEPSEEK_API_KEY: fs.existsSync(credFile)
+      ? (fs.readFileSync(credFile, 'utf8').match(/DEEPSEEK_API_KEY\s*:\s*(\S+)/)?.[1] ?? '')
+      : '',
+    DSH_PERMISSION_MODE: 'danger-full-access',
+  }),
+});
 
 let lineBuf = '';
 let nextId = 100;

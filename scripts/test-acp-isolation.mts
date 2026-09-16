@@ -1,25 +1,28 @@
 /**
  * 验证 DSH ACP 多会话上下文隔离（改进版：捕获 session/update 文本输出）
+ *
+ * 启动入口/环境共用 scripts/dsh-acp-spawn.mjs（dshAcpSpawnPlan + dshAcpEnv：
+ * 剥 DSH_*、注 DSH_HOME/Windows 系统变量）；本脚本只再注入 API key 与权限模式。
+ * 运行：npx tsx scripts/test-acp-isolation.mts
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { dshAcpSpawnPlan, dshAcpEnv } from './dsh-acp-spawn.mjs';
 
-const harness = 'C:\\D\\opt\\deepseek-harness\\deepseek-harness';
 const config = 'C:\\Users\\oadan\\.dsh\\dsh-bot\\cordis.yml';
-const child = spawn(process.execPath, ['--import', 'tsx/esm', 'packages/examples/acp-demo/src/bin.ts', '--config', config], {
-  cwd: harness, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
-  env: (() => {
-    const clean: NodeJS.ProcessEnv = {};
-    for (const [k, v] of Object.entries(process.env)) { if (k.startsWith('DSH_')) continue; clean[k] = v; }
-    clean.DSH_PERMISSION_MODE = 'danger-full-access';
-    try {
-      const cred = path.join(os.homedir(), '.dsh', '.credentials.yaml');
-      clean.DEEPSEEK_API_KEY = fs.readFileSync(cred, 'utf8').match(/DEEPSEEK_API_KEY\s*:\s*(\S+)/)?.[1] ?? '';
-    } catch {}
-    return clean;
-  })(),
+const plan = dshAcpSpawnPlan({ config });
+const child = spawn(plan.command, plan.args, {
+  cwd: plan.cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+  env: dshAcpEnv({
+    DSH_PERMISSION_MODE: 'danger-full-access',
+    DEEPSEEK_API_KEY: (() => {
+      try {
+        return fs.readFileSync(path.join(os.homedir(), '.dsh', '.credentials.yaml'), 'utf8').match(/DEEPSEEK_API_KEY\s*:\s*(\S+)/)?.[1] ?? '';
+      } catch { return ''; }
+    })(),
+  }),
 });
 
 let lineBuf = '';

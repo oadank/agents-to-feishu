@@ -279,7 +279,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
     // 探测/显示以 ACP server 脚本为准（python 仅执行器，显示 python 会误导）
     { runtime: 'openakita', display: 'OpenAkita', files: ['C:\\D\\opt\\agents-to-feishu\\scripts\\openakita-acp-server.py'], envKey: 'CTI_OPENAKITA_SERVER', command: 'scripts/openakita-acp-server.py', install: '开源项目 OpenAkita：安装后自动探测/到本页填路径', },
     // dsh: provider 用 node 当执行器，真程序 = DSH harness 的 ACP demo 入口 bin.ts
-    { runtime: 'dsh', display: 'DSH', files: ['C:\\D\\opt\\deepseek-harness\\deepseek-harness\\packages\\examples\\acp-demo\\src\\bin.ts'], envKey: 'CTI_DSH_HARNESS_PATH', command: 'packages/examples/acp-demo/src/bin.ts', install: '开源项目 DeepSeek Harness：clone 安装后，到本页把 harness 路径填好', },
+    { runtime: 'dsh', display: 'DSH', files: ['C:\\D\\opt\\deepseek-harness\\deepseek-harness\\apps\\cli\\lib\\bin.js', 'C:\\D\\opt\\deepseek-harness\\deepseek-harness\\apps\\cli\\src\\bin.ts'], envKey: 'CTI_DSH_HARNESS_PATH', command: 'apps/cli/lib/bin.js --profile acp', install: '开源项目 DeepSeek Harness：clone 安装后，到本页把 harness 路径填好', },
     // zcode: provider 用 node 当执行器，真程序 = ZCode 桌面版内置 CLI（app-server --stdio）
     // deeptutor: 自包含 HTTP 服务（非 CLI），provider 直连其服务端口；无 CLI 可探测 → 恒可用
     { runtime: 'deeptutor', display: 'DeepTutor', envKey: 'CTI_DEEPTUTOR_BASE', command: 'deeptutor', install: '开源项目 DeepTutor：按其文档部署服务后使用', service: 'CTI_DEEPTUTOR_BASE', },

@@ -1,18 +1,22 @@
 // ACP 自测（注入 credentials 里的 ARK key）：断言 session/update 携带 _meta.usage
+// 启动入口/环境共用 scripts/dsh-acp-spawn.mjs（dshAcpSpawnPlan + dshAcpEnv：
+// 剥 DSH_*、注 DSH_HOME/Windows 系统变量），不再走已删除的 packages/examples/acp-demo 旧入口。
 import { readFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import os from 'node:os'
 import path from 'node:path'
+import { dshAcpSpawnPlan, dshAcpEnv } from './dsh-acp-spawn.mjs'
 
 const yaml = readFileSync(path.join(os.homedir(), '.dsh', '.credentials.yaml'), 'utf8')
 const m = yaml.match(/^  ARK_API_KEY:\s*"?([^\n"]+)/m) || yaml.match(/^ARK_API_KEY:\s*"?([^\n"]+)/m)
 if (!m) { console.log('no ARK key'); process.exit(1) }
-const env = { ...process.env, ARK_API_KEY: m[1].trim() }
+const env = dshAcpEnv({ ARK_API_KEY: m[1].trim() })
 
-const HARNESS = 'C:/D/opt/deepseek-harness/deepseek-harness'
+const HARNESS = 'C:/D/opt/deepseek-harness/deepseek-harness' // 仅用作 session/new 的工作目录
 const configArg = path.join(os.homedir(), '.dsh', 'dsh-bot', 'cordis.yml')
-const child = spawn(process.execPath, ['packages/examples/acp-demo/lib/bin.js', '--config', configArg], { cwd: HARNESS, stdio: ['pipe', 'pipe', 'pipe'], env })
+const plan = dshAcpSpawnPlan({ config: configArg })
+const child = spawn(plan.command, plan.args, { cwd: plan.cwd, stdio: ['pipe', 'pipe', 'pipe'], env })
 let nextId = 1
 const pending = new Map()
 const send = (method, params) => new Promise((resolve, reject) => {

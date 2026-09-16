@@ -3,24 +3,31 @@
  * ACP 探针：直接驱动任意 ACP agent（绕过桥接），验证模型可见工具与调用行为。
  * initialize → session/new → session/prompt → 打印全部往返。
  *
- * 默认驱动 dsh harness；可用环境变量换目标：
+ * 用法：node acp-probe.mjs [cordis配置路径] [prompt文本]
+ *   argv[2] 为可选 bot 配置（传给 dshAcpSpawnPlan({ config })，缺省由模块解析：
+ *   CTI_DSH_ACP_CONFIG 或 ~/.dsh/dsh-bot/cordis.yml）；argv[3] 为 prompt 文本。
+ *
+ * 默认驱动 dsh harness，启动计划共用 scripts/dsh-acp-spawn.mjs（与 dsh.ts resolveDshCommand
+ * 同形状：--profile acp + --patch/--config）；可用环境变量换目标：
  *   CTI_PROBE_CMD=完整命令  CTI_PROBE_ARGS="空格分隔参数"  CTI_PROBE_CWD=工作目录
  * 例（reasonix）：CTI_PROBE_CMD="C:\...\reasonix-cli.exe" CTI_PROBE_ARGS="acp"
  */
 import { spawn } from 'node:child_process';
+import { dshAcpSpawnPlan, dshAcpEnv } from './dsh-acp-spawn.mjs';
 
-const CONFIG = process.argv[2] || 'C:/Users/oadan/.dsh/dsh-bot/cordis.yml';
-const HARNESS = process.env.CTI_PROBE_CWD || 'C:/D/opt/deepseek-harness/deepseek-harness';
+const CONFIG = process.argv[2]; // 可选；不传则用模块默认（CTI_DSH_ACP_CONFIG / ~/.dsh/dsh-bot/cordis.yml）
 const PROMPT_TEXT = process.argv[3] || '[用户附了一张图片，本地路径: C:\\Users\\oadan\\AppData\\Local\\Temp\\agents-to-feishu\\1788009658346-img_v3_02151_be9d7fba-db4b-43cc-bfe8-cfabdb5da66g.png]\n这是啥';
 
-const CMD = process.env.CTI_PROBE_CMD || process.execPath;
+const plan = dshAcpSpawnPlan(CONFIG ? { config: CONFIG } : {});
+const CMD = process.env.CTI_PROBE_CMD || plan.command;
 const ARGS = process.env.CTI_PROBE_ARGS
   ? process.env.CTI_PROBE_ARGS.split(' ').filter(Boolean)
-  : ['--import', 'tsx/esm', 'packages/examples/acp-demo/src/bin.ts', '--config', CONFIG];
+  : plan.args;
 
 const child = spawn(CMD, ARGS, {
-  cwd: HARNESS,
+  cwd: process.env.CTI_PROBE_CWD || plan.cwd,
   stdio: ['pipe', 'pipe', 'pipe'],
+  env: dshAcpEnv(),
 });
 let buf = '';
 child.stdout.on('data', (d) => {

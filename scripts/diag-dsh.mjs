@@ -1,13 +1,16 @@
 /**
  * 诊断 dsh ACP initialize 超时（"ACP request 100 timeout"）。
- * 复用 dsh.ts 的 spawn 参数 + 环境，手动发 initialize 并计时，打印所收 stdout/stderr。
+ * 启动入口/环境共用 scripts/dsh-acp-spawn.mjs（dshAcpSpawnPlan + dshAcpEnv，
+ * 与 dsh.ts resolveDshCommand 同形状：剥 DSH_*、注 DSH_HOME/Windows 系统变量），
+ * 本脚本再额外注入 credentials 里的 API key 与 danger-full-access。
+ * 手动发 initialize 并计时，打印所收 stdout/stderr。
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { dshAcpSpawnPlan, dshAcpEnv } from './dsh-acp-spawn.mjs';
 
-const harness = 'C:\\D\\opt\\deepseek-harness\\deepseek-harness';
 const config = 'C:\\Users\\oadan\\.dsh\\dsh-bot\\cordis.yml';
 
 function readKey(k) {
@@ -19,24 +22,15 @@ function readKey(k) {
   } catch { return ''; }
 }
 
-// 复刻 dsh.ts buildSpawnEnv：剥离 DSH_* + 注 DEEPSEEK_API_KEY
-const clean = {};
-for (const [k, v] of Object.entries(process.env)) {
-  if (k.startsWith('DSH_')) continue;
-  clean[k] = v;
-}
-const env = {
-  ...clean,
+const plan = dshAcpSpawnPlan({ config });
+const env = dshAcpEnv({
   DEEPSEEK_API_KEY: readKey('DEEPSEEK_API_KEY'),
   ARK_API_KEY: readKey('ARK_API_KEY'),
   DSH_PERMISSION_MODE: 'danger-full-access',
-  DSH_HOME: path.join(os.homedir(), '.dsh'),
-  ComSpec: 'C:\\WINDOWS\\system32\\cmd.exe',
-  SystemRoot: 'C:\\WINDOWS',
-};
+});
 
-const child = spawn(process.execPath, ['--import', 'tsx/esm', 'packages/examples/acp-demo/src/bin.ts', '--config', config], {
-  cwd: harness, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env,
+const child = spawn(plan.command, plan.args, {
+  cwd: plan.cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env,
 });
 console.log('spawned pid', child.pid);
 
