@@ -414,12 +414,13 @@ function judgeDesktop(raw) {
   const noTool = /没有桌面|no desktop|没有 win-desktop/i.test(t);
   if (noTool) return { state: '❌', note: '无桌面' };
   const toolHit =
-    /active_window|list_apps|window_info|win_desktop|win-desktop-helper|窗口数|前台窗口/i.test(t) &&
+    /active_window|list_apps|window_info|win_desktop|win-desktop-helper|窗口数|前台窗口|可见窗口/i.test(t) &&
     /工具执行|调用成功|✅|tool|窗口/i.test(t);
-  const hasCount = /\d+\s*个窗口|窗口数\s*[:：]?\s*\d+|共\s*\d+\s*个|windows?\s*[:=]\s*\d+/i.test(t);
-  const hasName = /前台窗口|active|front|title\s*[:=]/i.test(t) && /[A-Za-z一-鿿]/.test(t);
-  if ((hasCount || hasName) && toolHit) return { state: '✅', note: 'native' };
-  if (hasCount || (hasName && /窗口/.test(t))) return { state: '✅', note: '有窗口结果' };
+  // 兼容表格「可见窗口数 | 3」「窗口数：3」「3 个窗口」
+  const hasCount = /窗口数\s*[|｜:：]?\s*\d+|可见窗口\s*[|｜:：]?\s*\d+|\d+\s*个窗口|windows?\s*[:=]\s*\d+/i.test(t);
+  const hasName = /前台窗口|active.?window|front\s*=|title\s*[:=]/i.test(t) && /[A-Za-z一-鿿]/.test(t);
+  if ((hasCount || hasName) && (toolHit || /前台窗口|可见窗口/.test(t))) return { state: '✅', note: 'native' };
+  if (hasCount || hasName) return { state: '✅', note: '有窗口结果' };
   if (toolHit) return { state: '⏳', note: 'tool-ok-result-pending' };
   if (/unsupported call/i.test(t)) return { state: '❌', note: 'unsupported call' };
   return { state: '❌', note: '未命中desktop判定' };
