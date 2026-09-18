@@ -9,7 +9,7 @@
 |---|---|---|---|---|---|---|---|---|---|
 | dsh | dsh | openmem, cti-builtin, win-desktop-helper, vision, comfy, visionqa | ✅ | 桥接穿透 | ✅ `om_x100b65e1ef13d8a4c2b9e5f9f734336`@23:34 | ✅ `om_x100b65e1d1258ca0c2f8114ad422134`@23:34 | TBD | TBD | TBD |
 | claude | claude | win-desktop-helper, visionqa, openmem | ❌ | 自解析（B组） | ✅ `om_x100b65e1d2bba8a8c10545e72b2e9ba`@23:33 | ✅ `om_x100b65e1d4a71ca0c2b065dc727b1d9`@23:32 | TBD | TBD | N/A |
-| zcode | zcode | cti-builtin, win-desktop-helper, visionqa, comfy, vision, openmem | ✅ | 勾选即生效 | ⚠️ bypass `om_x100b65e1e8148ca0dd438097a4f7f9d`@23:36 | ✅ `om_x100b65e1eba374a4c36c7d54fb5e910`@23:35 | TBD | TBD | TBD |
+| zcode | zcode | cti-builtin, win-desktop-helper, visionqa, comfy, vision, openmem | ✅ | 勾选即生效 | ✅ `om_x100b65e20aacf0a0c3e6f08479d37f8`@00:18 收编复测 | ✅ `om_x100b65e20c3134a0c28b3d1e1260b2f`@00:17 收编复测 | TBD | TBD | TBD |
 | gemini | gemini | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | session/new typedHttpAll | ✅ `om_x100b65e1e2dd58b4c16e6ec45db6094`@23:37 | ✅ `om_x100b65e1e73344a0c237b49d2722ea4`@23:37 | TBD | TBD | N/A |
 | codex | codex | win-desktop-helper, visionqa, openmem, cti-builtin | ✅ | config.toml 原生同步 | ✅ `om_x100b65e1fe3618a0c19e398146cc298`@23:38 | ✅ `om_x100b65e1e0008ca4c45b608854417fc`@23:38 | TBD | TBD | N/A |
 | mimo | mimo | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | session/new stdioOnly | ✅ `om_x100b65e190f5dca4dfaccdec238fb24`@23:50 | ✅ `om_x100b65e192f794a4c2fdc7adb79eabf`@23:50 复测 | TBD | TBD | N/A |
@@ -22,7 +22,8 @@
 
 ## 终表口径
 
-- lark/mh：11/11 通（2026-09-18 23:32–23:50 滚重启后复测，10 家 native；zcode lark 本轮 ⚠️ bypass 形态，工具经桥接代调成，能力在）；deeptutor=N/A。
+- lark/mh：11/11 通（2026-09-18 23:32–23:50 滚重启后复测 + zcode 09-19 00:17–00:18 收编复测，native）；deeptutor=N/A。
+- zcode bypass 已根治（续令五）：server 名 displayName→id 收编共享解析后，lark/mh 复测双 native，bypass 形态消失。
 - mimo/openclaw 首测瞬态（mimo mh 超时 / openclaw 刚重启未命中），各复测一次即双绿，已按复测戳记。
 - 桌面/视觉/生图：按池勾选真调回填（题图 `team-artifacts/probe-ocr.png` 文字须为 `CTI-PROBE-2026`）。
 - 体检器 commits：`0585a8c`/`cf74b5c`/`c392f5d`/`d813d20`/三域扩容见后续 hash。

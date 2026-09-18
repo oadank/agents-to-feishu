@@ -32,6 +32,7 @@ import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
 import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
 import { resolveMcpArgPaths } from '../tools/mcp-path-resolve.js';
+import { readCtiMcpDefs } from './shared/per-session-mcp.js';
 
 function rtLog(msg: string): void {
   const file = process.env.CTI_RT_LOG || '';
@@ -75,21 +76,25 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
 
 // ── 配置中心穿透：config.<bot>.env → env → runtimeModel / mcpServers ──
 
-/** 配置中心 MCP 池条目（render 写进 CTI_BOT_<ID>_MCP_SERVERS 的 JSON） */
-interface CtiMcpDef { id: string; displayName?: string; transport?: string; url?: string; command?: string; args?: string[]; env?: Record<string, string> }
-
-/** 读配置中心勾选的 MCP 池，映射为 ZCode Protocol 的 mcpServers（stdio / http 两种形态） */
+/**
+ * 读配置中心勾选的 MCP 池，映射为 ZCode Protocol 的 mcpServers（stdio / http 两种形态）。
+ * 解析走共享模块 readCtiMcpDefs（单一真相源，09-18 收编 0b40bd5 同模式）；形态映射本地。
+ *
+ * 🔴 name 必须用 id（2026-09-19 续令五根因修复）：曾用 displayName||id，把中文长描述
+ * 当 server 名下发（如 cti-builtin → "飞书桥接内置工具（lark_send_text / …）"），引擎
+ * 规范化工具前缀时中文字符被剥掉 → 畸形前缀（实锤工具卡：mcp__Windows___get_skill、
+ * mcp___lark_send_text_lark_send_image___look_image——displayName 里的工具示例字样混进
+ * server 名），模型认不出原生 lark_list_chats → 体检判 ⚠️ bypass。与全矩阵 10 家对齐用 id。
+ * 行为变更：server 名 displayName → id（单列于汇报）。
+ */
 function buildMcpServers(): Array<Record<string, unknown>> | null {
-  const botId = (process.env.CTI_BOT || 'zcode').toUpperCase();
-  const raw = process.env[`CTI_BOT_${botId}_MCP_SERVERS`] || '';
-  if (!raw.trim()) return null;
-  let defs: CtiMcpDef[];
-  try { defs = JSON.parse(raw); } catch { rtLog('[zcode] MCP_SERVERS JSON 解析失败，忽略'); return null; }
+  const botId = process.env.CTI_BOT || 'zcode';
+  const defs = readCtiMcpDefs(botId);
   const out: Array<Record<string, unknown>> = [];
   for (const d of defs) {
     if (d.transport === 'stdio' && d.command) {
       out.push({
-        name: d.displayName || d.id,
+        name: d.id,
         command: d.command,
         args: resolveMcpArgPaths(d.id, d.args || []),
         env: Object.entries(d.env || {}).map(([name, value]) => ({ name, value })),
@@ -97,7 +102,7 @@ function buildMcpServers(): Array<Record<string, unknown>> | null {
     } else if (d.url) {
       // streamable-http / sse → 协议的 http / sse
       out.push({
-        name: d.displayName || d.id,
+        name: d.id,
         type: d.transport === 'sse' ? 'sse' : 'http',
         url: d.url,
         headers: [] as Array<{ name: string; value: string }>,
