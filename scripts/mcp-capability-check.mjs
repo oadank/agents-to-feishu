@@ -279,12 +279,14 @@ async function waitBotReply(chatId, totalWaitMs, afterMs = 0) {
   let lastAll = '';
   let lastBot = '';
   let lastMeta = null;
+  // 飞书 list 的 create_time 常只到分钟；send 带秒 → 按分钟下取整再回退 60s 窗
+  const gateMs = afterMs > 0 ? Math.floor(afterMs / 60000) * 60000 - 60000 : 0;
   const pickFresh = async () => {
     const r = await larkRead(chatId, 8);
     const fresh = (r.msgs || []).filter((m) => {
-      if (afterMs <= 0) return true;
+      if (gateMs <= 0) return true;
       const ts = Date.parse(String(m.create_time || '').replace(' ', 'T'));
-      return Number.isFinite(ts) ? ts >= afterMs - 2000 : true;
+      return Number.isFinite(ts) ? ts >= gateMs : true;
     });
     return { r, fresh, bot: pickBotReply(fresh) };
   };
