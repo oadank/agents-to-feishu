@@ -9,6 +9,7 @@
  *   node scripts/mcp-capability-check.mjs --all --serial-slow
  *
  * --domain: mh,lark,desktop,vision,gen（默认 mh,lark）
+ * --tag: 探针前缀（默认 [MiMo]，兼容 mimo 自跑；WorkBuddy 侧跑带 --tag [WB]，用于区分谁发的体检）
  *
  * ⚠️ 2026-09-18：曾因 --all 叠打把 qwen3.8 并发打满。默认禁止裸 --all。
  * 只读验证：user 身份发飞书强制实调 → 限时读回复 → 打矩阵。
@@ -32,7 +33,18 @@ import { existsSync } from 'node:fs';
 const USAGE =
   'node scripts/mcp-capability-check.mjs --quick b1,b2   # mh+lark\n' +
   'node scripts/mcp-capability-check.mjs --quick b1 --domain desktop,vision\n' +
+  'node scripts/mcp-capability-check.mjs --quick b1 --domain vision --tag [WB]   # 换探针前缀\n' +
   'node scripts/mcp-capability-check.mjs --all --serial-slow   # 全量（必须限流，勿在高峰跑）';
+
+/** --tag：探针前缀参数化（默认 [MiMo]；WorkBuddy 侧跑带 --tag [WB]） */
+function readTagArg() {
+  const i = process.argv.indexOf('--tag');
+  if (i < 0 || i + 1 >= process.argv.length) return '[MiMo]';
+  const v = process.argv[i + 1];
+  return (v && !v.startsWith('--')) ? v : '[MiMo]';
+}
+const TAG = readTagArg();
+const TAG_RE = new RegExp('^\\s*\\[' + TAG.replace(/^\[|\]$/g, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\]');
 
 /** 团队 bot 花名册（config-center id）。chat_id 运行时从 lark chat-list 解析，不硬编码。 */
 const BOT_IDS = [
@@ -62,15 +74,15 @@ const BOT_NAME_ALIASES = {
 };
 
 const PROBE_MH =
-  '[MiMo] 体检：请调用 mh_tools_list 或 mcp__openmem__mh_tools_list（或 openmem_mh_tools_list），只回前3条成品答案名字。禁止 curl/shell；没有工具就说：没有 mh_*。';
+  `${TAG} 体检：请调用 mh_tools_list 或 mcp__openmem__mh_tools_list（或 openmem_mh_tools_list），只回前3条成品答案名字。禁止 curl/shell；没有工具就说：没有 mh_*。`;
 const PROBE_LARK =
-  '[MiMo] 体检：请调用 lark_list_chats（或 mcp__cti-builtin__lark_list_chats 等同名变体），只回你会话/群数量或前2个会话名。禁止 curl；没有工具就说：没有 lark_*。';
+  `${TAG} 体检：请调用 lark_list_chats（或 mcp__cti-builtin__lark_list_chats 等同名变体），只回你会话/群数量或前2个会话名。禁止 curl；没有工具就说：没有 lark_*。`;
 const PROBE_DESKTOP =
-  '[MiMo] 体检·桌面：请真调 win-desktop-helper 只读工具（active_window / list_apps / window_info 类），回「前台窗口名 + 窗口数」。禁止点击/按键/拖拽/截图写操作。没有工具就说：没有桌面。';
+  `${TAG} 体检·桌面：请真调 win-desktop-helper 只读工具（active_window / list_apps / window_info 类），回「前台窗口名 + 窗口数」。禁止点击/按键/拖拽/截图写操作。没有工具就说：没有桌面。`;
 const PROBE_VISION =
-  '[MiMo] 体检·视觉：请真调 visionqa/look_image OCR 或 describe，读 C:\\D\\opt\\agents-to-feishu\\team-artifacts\\probe-ocr.png，只复述图中文字（原样英文数字）。禁止 curl；没有工具就说：没有视觉。';
+  `${TAG} 体检·视觉：请真调 visionqa/look_image OCR 或 describe，读 C:\\D\\opt\\agents-to-feishu\\team-artifacts\\probe-ocr.png，只复述图中文字（原样英文数字）。禁止 curl；没有工具就说：没有视觉。`;
 const PROBE_GEN =
-  '[MiMo] 体检·生图：请真调 generate_image/comfy，512x512 简笔「简笔画：一只猫」，120秒内出图即算成功，回「已出图」+图片路径或 image_key。没有工具就说：没有生图。';
+  `${TAG} 体检·生图：请真调 generate_image/comfy，512x512 简笔「简笔画：一只猫」，120秒内出图即算成功，回「已出图」+图片路径或 image_key。没有工具就说：没有生图。`;
 
 const PROBES = {
   mh: PROBE_MH,
@@ -257,10 +269,10 @@ async function larkRead(chatId, pageSize = 5) {
 }
 
 function pickBotReply(msgs) {
-  // bot 卡片：sender_type=app / app_id；排除自己发的 [MiMo] 体检
+  // bot 卡片：sender_type=app / app_id；排除自己发的探针（前缀跟 --tag 走）
   const bots = (msgs || []).filter((m) => {
     const c = String(m.content || '');
-    if (/^\s*\[MiMo\]/.test(c)) return false;
+    if (TAG_RE.test(c)) return false;
     const st = m.sender?.sender_type || m.sender?.id_type || '';
     return st === 'app' || st === 'app_id' || !!m.sender?.app_id || !!m.sender?.name;
   });
