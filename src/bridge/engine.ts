@@ -1090,7 +1090,17 @@ export class MessageEngine {
       '- GitHub：环境变量 GITHUB_TOKEN / GH_TOKEN 已注入（gh CLI 自动识别 GH_TOKEN；REST API 用 header `Authorization: token $GITHUB_TOKEN`；git push 用 `https://$GITHUB_TOKEN@github.com/...` 形式）。不要说"token 无效/未认证"。',
       '- 网络搜索：优先用 anysearch MCP 工具（若工具列表有）；没有该工具时再考虑其他途径。内置 google_web_search 在中转模型下不可用，勿反复重试。',
     ].join('\n');
+    // 2026-09-18 防截断输出规范（源自 openmem 2699b8ab 终稿）：模型抽风期多行长正文
+    // 经 send_as_user 链路偶发只剩首行标题（共享链路三层已实测清白，系模型层间歇行为）。
+    // 服务级统一注入，让全 bot 天生按规范输出，不依赖各家人设教程。
+    const larkOutput = [
+      '【lark 工具输出规范（服务注入，防截断）】',
+      '- 重要回报先写 openmem（mh_write），飞书消息只当通知锚：标题行 + openmem 条目 id。多行长正文偶发只剩首行，锚定了就不丢。',
+      '- lark_send_text / lark_send_as_user 的 text 尽量单行紧凑；多段结构化内容改用 lark_send_post（富文本段落数组天然分行）。',
+      '- 若对方反馈只收到标题行：属模型层间歇行为，按上面两条规范重发即可，不要反复复测链路。',
+      '- 若工具列表没有 lark_* 但有 call_mcp_tool：用 call_mcp_tool(server="cti-builtin", tool_name="lark_xxx", arguments={...}) 间接调用（openakita 等原生 MCP 引擎的姿势）。',
+    ].join('\n');
     const inject = this.opts.systemPrompt?.trim();
-    return `${base}\n\n${protocol}\n\n${builtin}` + (inject ? `\n\n${inject}` : '');
+    return `${base}\n\n${protocol}\n\n${builtin}\n\n${larkOutput}` + (inject ? `\n\n${inject}` : '');
   }
 }
