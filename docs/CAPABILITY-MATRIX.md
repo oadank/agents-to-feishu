@@ -25,6 +25,7 @@
 - lark/mh：11/11 通（2026-09-18 23:32–23:50 滚重启后复测 + zcode 09-19 00:17–00:18 收编复测，native）；deeptutor=N/A。
 - zcode bypass 已根治（续令五）：server 名 displayName→id 收编共享解析后，lark/mh 复测双 native，bypass 形态消失。
 - mimo/openclaw 首测瞬态（mimo mh 超时 / openclaw 刚重启未命中），各复测一次即双绿，已按复测戳记。
+- 桌面/视觉（续令六 00:31–00:49 扫表）：9 家已打戳（桌面 8✅/1❌ codex；视觉 2✅/7❌）；**dsh/zcode 暂缺**——mimo 正在那两家调生图自动发，防撞读排除，待其后补（老大令：这两家重启与否听令）。
 - 桌面/视觉/生图：按池勾选真调回填（题图 `team-artifacts/probe-ocr.png` 文字须为 `CTI-PROBE-2026`）。
 - 体检器 commits：`0585a8c`/`cf74b5c`/`c392f5d`/`d813d20`/三域扩容见后续 hash。
 - litellm 未碰；codex 仅 modelId=codex-model（老大口径）。
