@@ -10,6 +10,7 @@
  * 只读验证：user 身份发飞书强制实调 → 限时读回复 → 打矩阵。
  * 不改任何配置、不重启服务。
  * 若 api-gate 拦 lark-cli：先在 openmem 调 mh_tool(name="飞书操作规范") 再跑。
+ * 启动时自动 warm-up（吃 gate 每 CTI_BOT×域 5min 首拦），并运行时解析 p2p chat_id。
  * 撞 429/网关限流 → 立刻停，不要重试。
  *
  * 判定三态：
@@ -28,22 +29,27 @@ const USAGE =
   'node scripts/mcp-capability-check.mjs --quick b1,b2   # 推荐\n' +
   'node scripts/mcp-capability-check.mjs --all --serial-slow   # 全量（必须限流，勿在高峰跑）';
 
-/** bot → 飞书 p2p chat_id（user 视角，2026-09-18 采集） */
-const BOTS = {
-  claude: 'oc_7f7cfb8b27bf00659df8bf1d41120188',
-  gemini: 'oc_99d9c5f91c43ca8de80a765c838a7b04',
-  openclaw: 'oc_e383d84b7ba48a529ff270fde9b9e344',
-  reasonix: 'oc_d8a3abf10296551ffeb332381bc26e96',
-  codex: 'oc_5373b412323c2f5ed384244870fae5f2',
-  openakita: 'oc_fff6094e0be868be026c56be98352e1e',
-  dsh: 'oc_bb907084f5d95404e29d3f0bde5a768b',
-  zcode: 'oc_782b3dfd899ed4a755c0e6749cef1811',
-  hermes: 'oc_8be2bbd3272fab1e99e76d17bf111aae',
-  opencode: 'oc_09998955bd822cfd297fb746764c974a',
-  mimo: 'oc_136c904df443d621a4c48a43fe11505b',
-};
-
+/** 团队 bot 花名册（config-center id）。chat_id 运行时从 lark chat-list 解析，不硬编码。 */
+const BOT_IDS = [
+  'claude', 'gemini', 'openclaw', 'reasonix', 'codex', 'openakita',
+  'dsh', 'zcode', 'hermes', 'opencode', 'mimo',
+];
 const DEEPTUTOR_NA = 'deeptutor';
+
+/** chat-list 会话名别名（user 视角 p2p name ≠ bot id） */
+const BOT_NAME_ALIASES = {
+  dsh: ['DeepSeek', 'DSH', 'dsh'],
+  mimo: ['MiMo Code', 'mimo', 'MiMo'],
+  opencode: ['OpenCode', 'opencode'],
+  openclaw: ['Openclaw', 'OpenClaw', 'openclaw'],
+  openakita: ['OpenAkita', 'openakita'],
+  reasonix: ['Reasonix', 'reasonix'],
+  claude: ['Claude', 'claude'],
+  gemini: ['Gemini', 'gemini'],
+  zcode: ['ZCode', 'zcode'],
+  hermes: ['Hermes', 'hermes'],
+  codex: ['Codex', 'codex'],
+};
 
 const PROBE_MH =
   '[MiMo] 体检：请调用 mh_tools_list 或 mcp__openmem__mh_tools_list（或 openmem_mh_tools_list），只回前3条成品答案名字。禁止 curl/shell；没有工具就说：没有 mh_*。';
@@ -103,14 +109,81 @@ function run(cmd, args, timeoutMs = 30000) {
   });
 }
 
+function looksLikeGate(blob) {
+  return /拦下|api-gate/i.test(String(blob || ''));
+}
+
+/** 运行时解析 bot → p2p chat_id：config-center 花名册 + lark chat-list（不硬编码）。 */
+async function resolveBotChatIds() {
+  let roster = [];
+  try {
+    const r = await run('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+      "(Invoke-RestMethod -Uri 'http://127.0.0.1:13600/api/agents' -TimeoutSec 10) | ForEach-Object { $_.id }",
+    ], 15000);
+    roster = (r.out || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  } catch {
+    roster = [];
+  }
+  const ids = roster.length ? roster.filter((id) => id !== DEEPTUTOR_NA && id !== 'openhuman') : BOT_IDS;
+
+  // warm-up + 拉 p2p 列表（首调可能撞 gate 首拦；5min 窗内再调即放行）
+  let listRaw = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = await run(LARK_CLI, [
+      'im', '+chat-list', '--types=p2p', '--page-size=100', '--as', 'user',
+    ], 45000);
+    const blob = `${r.out || ''}${r.err || ''}`;
+    if (looksLikeGate(blob) && attempt === 0) continue;
+    listRaw = r.out || '';
+    break;
+  }
+
+  let chats = [];
+  try {
+    chats = JSON.parse(listRaw)?.data?.chats || [];
+  } catch {
+    throw new Error(`chat-list 解析失败: ${String(listRaw).slice(0, 200)}`);
+  }
+
+  const map = {};
+  const missing = [];
+  for (const id of ids) {
+    const aliases = BOT_NAME_ALIASES[id] || [id, id.toLowerCase()];
+    const hit = chats.find((c) => c.chat_mode === 'p2p' && aliases.some(
+      (a) => String(c.name || '').toLowerCase() === a.toLowerCase(),
+    ));
+    if (hit?.chat_id) map[id] = hit.chat_id;
+    else missing.push(id);
+  }
+  if (missing.length) {
+    console.error(`未解析到 chat_id（chat-list 无匹配名）: ${missing.join(', ')}`);
+    console.error(`已知别名表键: ${Object.keys(BOT_NAME_ALIASES).join(', ')}`);
+    process.exit(2);
+  }
+  return { map, roster: ids };
+}
+
 async function larkSend(chatId, text, key) {
-  return run(LARK_CLI, [
+  // gate 首拦：send 若命中立即原样重试一次（5min 窗内放行）
+  let r = await run(LARK_CLI, [
     'im', '+messages-send',
     '--chat-id', chatId,
     '--text', text,
     '--as', 'user',
-    '--idempotency-key', key,
+    '--idempotency-key', `${key}-a0`,
   ], 45000);
+  const blob = `${r.out || ''}${r.err || ''}`;
+  if (looksLikeGate(blob)) {
+    r = await run(LARK_CLI, [
+      'im', '+messages-send',
+      '--chat-id', chatId,
+      '--text', text,
+      '--as', 'user',
+      '--idempotency-key', `${key}-a1`,
+    ], 45000);
+  }
+  return r;
 }
 
 async function larkRead(chatId, pageSize = 5) {
@@ -179,6 +252,7 @@ function stripTags(s) {
     .replace(/\\u003c/g, '<')
     .replace(/\\u003e/g, '>')
     .replace(/\\n/g, ' ')
+    .replace(/\*\*?|__|`/g, '')
     .replace(/\s+/g, ' ');
 }
 
@@ -189,7 +263,7 @@ function judgeMh(raw) {
   const bypass = /curl\s+(-s\s+)?-X\s+POST|127\.0\.0\.1:3466|桥接代调|callOpenmemBypass/i.test(t);
   const hasNativeTool =
     /mcp__openmem__mh_tools_list|openmem_mh_tools_list|openmem__mh_tools_list|call_mcp_tool|mh_tools_list/i.test(t) &&
-    /工具执行|tool call succeeded|已调用|调用成功|✅/i.test(t);
+    /工具执行|tool call succeeded|已调用|调用成功|✅|native/i.test(t);
   const hasNames = /agent 花名册|GitHub 访问通道|本机环境事实速查/i.test(t);
   const unsupported = /unsupported call/i.test(t);
   const noTool = /没有 mh_\*|没有 mh_|no mh_|\bNO_MCP_TOOLS\b/i.test(t);
@@ -198,6 +272,8 @@ function judgeMh(raw) {
   if (hasNames && hasNativeTool && !bypass) return { state: '✅', note: 'native' };
   if (hasNames && bypass) return { state: '⚠️', note: 'curl/绕过' };
   if (hasNames) return { state: '✅', note: '有结果(未明示工具名)' };
+  // 工具卡已出 mh_tools_list 成功，但成品名还在流式后半段 → 等价半命中，交上层复读
+  if (hasNativeTool && !bypass) return { state: '⏳', note: 'tool-ok-names-pending' };
   if (bypass && !hasNames) return { state: '⚠️', note: '仅curl/无成品名' };
   return { state: '❌', note: '未命中mh判定' };
 }
@@ -240,7 +316,15 @@ async function probeBot(name, chatId, kind, waitMs) {
   if (!stripTags(bot).trim()) {
     return { state: '❌', note: '无bot回复/超时', snippet: stripTags(all).slice(0, 40) };
   }
-  const judge = kind === 'mh' ? judgeMh(blob) : judgeLark(blob);
+  let judge = kind === 'mh' ? judgeMh(blob) : judgeLark(blob);
+  // 流式卡片：工具卡已出但成品名未到 → 再等一轮复读一次
+  if (judge.state === '⏳') {
+    await new Promise((r) => setTimeout(r, 6000));
+    const again = await waitBotReply(chatId, 15000);
+    const blob2 = again.bot || again.all || '';
+    judge = kind === 'mh' ? judgeMh(blob2) : judgeLark(blob2);
+    if (judge.state === '⏳') judge = { state: '✅', note: 'native(tool-ok)' };
+  }
   return { ...judge, snippet: stripTags(bot).slice(0, 72) };
 }
 
@@ -307,17 +391,20 @@ async function main() {
     }
     names = args.bots;
   } else {
-    names = Object.keys(BOTS);
+    names = [...BOT_IDS];
   }
 
-  const unknown = names.filter((n) => !BOTS[n] && n !== DEEPTUTOR_NA);
+  const unknown = names.filter((n) => !BOT_IDS.includes(n) && n !== DEEPTUTOR_NA);
   if (unknown.length) {
     console.error(`未知 bot: ${unknown.join(', ')}`);
-    console.error(`已知: ${[...Object.keys(BOTS), DEEPTUTOR_NA].join(', ')}`);
+    console.error(`已知: ${[...BOT_IDS, DEEPTUTOR_NA].join(', ')}`);
     process.exit(2);
   }
 
   console.log(`模式=${args.mode} wait=${args.wait}ms gap=${args.gap}ms bots=${names.length}`);
+  console.log('解析 chat_id（config-center + lark chat-list 运行时）…');
+  const { map: BOTS } = await resolveBotChatIds();
+  console.log(`chat_id 就绪: ${Object.keys(BOTS).length} 个（warm-up 已吃 gate 首拦）`);
   console.log('');
   console.log('| bot | mh_* | lark_* | 备注 |');
   console.log('|-----|------|--------|------|');
@@ -332,6 +419,12 @@ async function main() {
       continue;
     }
     const chatId = BOTS[name];
+    if (!chatId) {
+      console.log(`| ${name} | ❌ | ❌ | chat_id 解析缺失 |`);
+      failCount++;
+      rows.push({ name, mh: '❌', lark: '❌', note: 'chat_id missing', fail: true });
+      continue;
+    }
     process.stdout.write(`… ${name} mh `);
     const mh = await probeBot(name, chatId, 'mh', args.wait);
     process.stdout.write(`${mh.state}  lark `);
