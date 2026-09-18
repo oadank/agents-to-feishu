@@ -949,6 +949,16 @@ export class MessageEngine {
         }
       }
       // [2026-09-18 老大令·写死] generate_image 成品自动发飞书（不能只落盘）。
+      // 兜底：工具事件无 output 时，扫本轮正文/工具卡里的 Comfy 路径（zcode 等 provider 曾不透传 output）。
+      if (pendingGenFiles.length === 0) {
+        const blob = `${layers.text}\n${layers.toolLines.join('\n')}\n${layers.thinking}`;
+        for (const p of this.parseGeneratedImagePaths(blob)) {
+          if (/comfyui[\\/]runs|comfyui_temp/i.test(p) && !pendingGenFiles.includes(p)) {
+            pendingGenFiles.push(p);
+            console.log(`[engine] generate_image 兜底捕获(正文) ${p}`);
+          }
+        }
+      }
       for (const gp of pendingGenFiles) {
         try {
           if (!fs.existsSync(gp)) {

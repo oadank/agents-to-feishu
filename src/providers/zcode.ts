@@ -488,7 +488,15 @@ export class ZcodeProvider implements RuntimeProvider {
         if (payload.input !== undefined) {
           try { input = JSON.stringify(payload.input).slice(0, 200); } catch { input = String(payload.input).slice(0, 200); }
         }
-        sink.emit({ type: 'tool', tool: toolName, status: status as 'running' | 'done' | 'error', input });
+        // [2026-09-18] 透传工具结果：桥接 generate_image 自动发图靠 output 解析本地路径
+        let output: string | undefined;
+        const rawOut = payload.output ?? payload.result ?? payload.outputText ?? payload.text;
+        if (rawOut !== undefined && rawOut !== null) {
+          try {
+            output = typeof rawOut === 'string' ? rawOut : JSON.stringify(rawOut);
+          } catch { output = String(rawOut); }
+        }
+        sink.emit({ type: 'tool', tool: toolName, status: status as 'running' | 'done' | 'error', input, output });
         break;
       }
       case 'turn.completed': {
