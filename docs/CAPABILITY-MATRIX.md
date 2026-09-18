@@ -1,28 +1,29 @@
 # CAPABILITY-MATRIX —— 12 bot MCP 勾选基线台账
 
 > 生成方式：从 `config-store.json` 各 agent 的 `mcps` 勾选自动汇总（2026-09-18 快照）。
-> **lark/mh 已回填（2026-09-18 21:01–22:44）；桌面/视觉/生图三列待 24 次真调回填。**
+> **lark/mh 已回填（2026-09-18 23:32–23:50，23:1x 滚重启后全表复测戳，旧戳 21:01–22:44 全部作废）；桌面/视觉/生图三列待 24 次真调回填。**
 > 缺口A 终局矩阵见 openmem `0c0bc52a`；以聊天原文 message_id 为准。
 > 生图仅勾选 dsh/zcode（及 deeptutor N/A）；桌面/视觉 11 家。
 
 | bot | runtime | 勾选的 MCP | cti-builtin | lark 工具挂载方式 | lark_* | mh_* | 桌面 | 视觉 | 生图 |
 |---|---|---|---|---|---|---|---|---|---|
-| dsh | dsh | openmem, cti-builtin, win-desktop-helper, vision, comfy, visionqa | ✅ | 桥接穿透 | ✅ `om_x100b65e095ec38a0c4263dabaed9592`@22:41 | ✅ `om_x100b65e0998a08a4c2533473e1d82c9`@22:40 | TBD | TBD | TBD |
-| claude | claude | win-desktop-helper, visionqa, openmem | ❌ | 自解析（B组） | ✅ `om_x100b65e0f6e0e8a4c073f230e20db35`@22:32 | ✅ `om_x100b65e0fd3c54b0c151dd1b887a0c5`@22:31 | TBD | TBD | N/A |
-| zcode | zcode | cti-builtin, win-desktop-helper, visionqa, comfy, vision, openmem | ✅ | 勾选即生效 | ✅ `om_x100b65e088e12ca0c4b5b3dc692115b`@22:36 | ✅ `om_x100b65e08c85c8a4c27e91596985f05`@22:35 | TBD | TBD | TBD |
-| gemini | gemini | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | session/new typedHttpAll | ✅ `om_x100b65e0f32b98a0c3428208751156f`@22:34 | ✅ `om_x100b65e0f2e2fca0dd836284ab07a98`@22:33 | TBD | TBD | N/A |
-| codex | codex | win-desktop-helper, visionqa, openmem, cti-builtin | ✅ | config.toml 原生同步 | ✅ `om_x100b65e0feb0cca0c3ed09eb6d8d6f9`@22:30 | ✅ `om_x100b65e0e0571ca0ddc2e9ba2ab3638`@22:30 | TBD | TBD | N/A |
-| mimo | mimo | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | session/new stdioOnly | ✅ `om_x100b65e7208990a0c15a10fc7526520`@21:04 | ✅ `om_x100b65e7222bc0a0c2510edeb93044f`@21:04 | TBD | TBD | N/A |
-| hermes | hermes | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | session/new stdioOnly | ✅ `om_x100b65e72d6450acdd8a402ea50e8af`@21:01 | ✅ `om_x100b65e72f6d88a0ddcfad6040d9afd`@21:01 | TBD | TBD | N/A |
-| reasonix | reasonix | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | session/new stdioOnly | ✅ `om_x100b65e09dc1cca0c218ec85643aae5`@22:39 | ✅ `om_x100b65e09cd428a0c4259dc92e73c5e`@22:39 | TBD | TBD | N/A |
-| openclaw | openclaw | win-desktop-helper, visionqa, openmem, cti-builtin | ✅ | openclaw.json rejectAllMcp | ✅ `om_x100b65e0817e98a4c07620690e19b6f`@22:39 | ✅ `om_x100b65e0834458a0c382c79293cbc86`@22:38 | TBD | TBD | N/A |
-| openakita | openakita | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | workspace nativeFileOnly | ✅ `om_x100b65e0aa4fa4a4c3351311e736a87`@22:44 | ✅ `om_x100b65e0ae9328a4c37154debc07bed`@22:43 | TBD | TBD | N/A |
-| opencode | opencode | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | session/new stdioOnly | ✅ `om_x100b65e727d714a8c298a9d15382f7a`@21:03 终验 | ✅ `om_x100b65e7285ea0a8dda1cb97bc963ec`@21:02 | TBD | TBD | N/A |
+| dsh | dsh | openmem, cti-builtin, win-desktop-helper, vision, comfy, visionqa | ✅ | 桥接穿透 | ✅ `om_x100b65e1ef13d8a4c2b9e5f9f734336`@23:34 | ✅ `om_x100b65e1d1258ca0c2f8114ad422134`@23:34 | TBD | TBD | TBD |
+| claude | claude | win-desktop-helper, visionqa, openmem | ❌ | 自解析（B组） | ✅ `om_x100b65e1d2bba8a8c10545e72b2e9ba`@23:33 | ✅ `om_x100b65e1d4a71ca0c2b065dc727b1d9`@23:32 | TBD | TBD | N/A |
+| zcode | zcode | cti-builtin, win-desktop-helper, visionqa, comfy, vision, openmem | ✅ | 勾选即生效 | ⚠️ bypass `om_x100b65e1e8148ca0dd438097a4f7f9d`@23:36 | ✅ `om_x100b65e1eba374a4c36c7d54fb5e910`@23:35 | TBD | TBD | TBD |
+| gemini | gemini | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | session/new typedHttpAll | ✅ `om_x100b65e1e2dd58b4c16e6ec45db6094`@23:37 | ✅ `om_x100b65e1e73344a0c237b49d2722ea4`@23:37 | TBD | TBD | N/A |
+| codex | codex | win-desktop-helper, visionqa, openmem, cti-builtin | ✅ | config.toml 原生同步 | ✅ `om_x100b65e1fe3618a0c19e398146cc298`@23:38 | ✅ `om_x100b65e1e0008ca4c45b608854417fc`@23:38 | TBD | TBD | N/A |
+| mimo | mimo | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | session/new stdioOnly | ✅ `om_x100b65e190f5dca4dfaccdec238fb24`@23:50 | ✅ `om_x100b65e192f794a4c2fdc7adb79eabf`@23:50 复测 | TBD | TBD | N/A |
+| hermes | hermes | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | session/new stdioOnly | ✅ `om_x100b65e1f32f1ca0c2f862c3456d57d`@23:42 | ✅ `om_x100b65e1f53978a0dd4075094472e8a`@23:41 | TBD | TBD | N/A |
+| reasonix | reasonix | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | session/new stdioOnly | ✅ `om_x100b65e18f4ca4a0c2b1847f9c2bc98`@23:43 | ✅ `om_x100b65e18ed580a8dda0fddf13f3193`@23:42 | TBD | TBD | N/A |
+| openclaw | openclaw | win-desktop-helper, visionqa, openmem, cti-builtin | ✅ | openclaw.json rejectAllMcp | ✅ `om_x100b65e1997faca0c2b22c5c3c49b40`@23:49 复测 | ✅ `om_x100b65e19b1f08a0c237e3c5f13671a`@23:48 复测 | TBD | TBD | N/A |
+| openakita | openakita | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | workspace nativeFileOnly | ✅ `om_x100b65e180c3c8b0c3e2dc83885e140`@23:46 | ✅ `om_x100b65e1858c5ca4c3e8c5eef7fba17`@23:45 | TBD | TBD | N/A |
+| opencode | opencode | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | session/new stdioOnly | ✅ `om_x100b65e19dc3e4a8c29c1e6b1695148`@23:48 | ✅ `om_x100b65e19f7f04a0deec938ce46c6f4`@23:47 | TBD | TBD | N/A |
 | deeptutor | deeptutor | cti-builtin, visionqa, comfy, vision, win-desktop-helper, openmem | ✅（放弃） | 无 | N/A | N/A | N/A | N/A | N/A |
 
 ## 终表口径
 
-- lark/mh：11/11 ✅ native（2026-09-18 实测，见上）；deeptutor=N/A。
+- lark/mh：11/11 通（2026-09-18 23:32–23:50 滚重启后复测，10 家 native；zcode lark 本轮 ⚠️ bypass 形态，工具经桥接代调成，能力在）；deeptutor=N/A。
+- mimo/openclaw 首测瞬态（mimo mh 超时 / openclaw 刚重启未命中），各复测一次即双绿，已按复测戳记。
 - 桌面/视觉/生图：按池勾选真调回填（题图 `team-artifacts/probe-ocr.png` 文字须为 `CTI-PROBE-2026`）。
 - 体检器 commits：`0585a8c`/`cf74b5c`/`c392f5d`/`d813d20`/三域扩容见后续 hash。
 - litellm 未碰；codex 仅 modelId=codex-model（老大口径）。
@@ -33,3 +34,19 @@
 - **挂载方式列**：`per-session-mcp.ts` flag 矩阵 + `syncMcpToCli`（docs/MCP-TOOLS.md）。
 - **实测状态**：`✅/❌/N-A + message_id@hh:mm`；与脚本冲突以聊天原文为准。
 - 防冒名：下发产物 CTI_BOT 一律 bot 本名（99026de）。
+
+## 三域复测方法（桌面/视觉/生图 TBD 列回填口径 · 2026-09-18 续令四）
+
+探针句式 = `scripts/mcp-capability-check.mjs` 的 `PROBE_*` 常量，逐字如下；判定一律只读真调、撞 429/网关限流即停不复试、以聊天原文 message_id 为准。
+
+- **桌面**（11 家）：
+  `[MiMo] 体检·桌面：请真调 win-desktop-helper 只读工具（active_window / list_apps / window_info 类），回「前台窗口名 + 窗口数」。禁止点击/按键/拖拽/截图写操作。没有工具就说：没有桌面。`
+  判定：只读工具真调成功、回复含前台窗口名/窗口数即 ✅；写操作（点击/按键/拖拽）一律禁止触碰。
+- **视觉**（11 家）：
+  `[MiMo] 体检·视觉：请真调 visionqa/look_image OCR 或 describe，读 C:\D\opt\agents-to-feishu\team-artifacts\probe-ocr.png，只复述图中文字（原样英文数字）。禁止 curl；没有工具就说：没有视觉。`
+  判定：固定题图 `team-artifacts/probe-ocr.png` OCR 复述，原样回出 `CTI-PROBE-2026` 即 ✅；复述不符 = ❌。
+- **生图**（仅 dsh/zcode，其余 N/A）：
+  `[MiMo] 体检·生图：请真调 generate_image/comfy，512x512 简笔「简笔画：一只猫」，120秒内出图即算成功，回「已出图」+图片路径或 image_key。没有工具就说：没有生图。`
+  判定：512² 真出一张、120s 为限；回复带图片路径或 image_key 即 ✅。
+- deeptutor 三域 + lark/mh 全 N/A（能力已放弃，老大拍板）。
+- mimo 全域数据回来 → 按上口径直接落格，无需另定规则。
