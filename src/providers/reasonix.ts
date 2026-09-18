@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
+import { readSessionMcpServers } from './shared/per-session-mcp.js';
 import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
 
 function rtLog(msg: string): void {
@@ -23,6 +24,9 @@ function rtLog(msg: string): void {
   if (!file) return;
   try { fs.appendFileSync(file, `[${new Date().toISOString()}] ${msg}\n`, 'utf-8'); } catch {}
 }
+
+// MCP 穿透收编（2026-09-18）：已上收 src/providers/shared/per-session-mcp.ts，
+// reasonix 引擎行为 = 'stdioOnly'（http 条目被拒，报错原文 -32602，一轮实测）。
 
 /** 解析 reasonix ACP 启动命令 */
 function resolveReasonixCommand(): { command: string; args: string[]; cwd: string } {
@@ -273,7 +277,9 @@ export class ReasonixProvider implements RuntimeProvider {
     const sessionNewId = this.nextId++;
     child.stdin!.write(JSON.stringify({
       jsonrpc: '2.0', id: sessionNewId, method: 'session/new',
-      params: { cwd, mcpServers: [] },
+      // 2026-09-18：穿透走共享模块（flag='stdioOnly'）——引擎只认 stdio 形态，
+      // http/url 型报 -32602 "MCP server \"visionqa\" command is required"。
+      params: { cwd, mcpServers: readSessionMcpServers('reasonix', 'stdioOnly') },
     }) + '\n');
 
     const msg = await this.waitResponse(sessionNewId, 60_000);

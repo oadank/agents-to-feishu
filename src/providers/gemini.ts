@@ -15,6 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { GeminiAppServerClient } from './gemini/gemini-app-server-client.js';
 import type { GeminiServerMessage } from './gemini/gemini-app-server-client.js';
+import { readSessionMcpServers } from './shared/per-session-mcp.js';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
 
 function rtLog(msg: string): void {
@@ -23,31 +24,10 @@ function rtLog(msg: string): void {
   try { fs.appendFileSync(file, `[${new Date().toISOString()}] ${msg}\n`, 'utf-8'); } catch {}
 }
 
-// MCP 穿透（2026-09-10）：配置中心勾选的 MCP 池（render.ts 下发 CTI_BOT_<ID>_MCP_SERVERS JSON）
-// 映射为 ACP session/new 的 mcpServers。stdio → name/command/args/env；http 类 → name/url。
-function readCtiMcpServers(botId: string): Array<Record<string, unknown>> {
-  try {
-    const raw = process.env[`CTI_BOT_${botId.toUpperCase()}_MCP_SERVERS`] || '';
-    if (!raw) return [];
-    const defs = JSON.parse(raw) as Array<{ id: string; transport: string; url?: string; command?: string; args?: string[]; env?: Record<string, string> }>;
-    return defs.map((m) => {
-      if (m.transport === 'stdio' && m.command) {
-        return { name: m.id, command: m.command, args: m.args || [], env: Object.entries(m.env || {}).map(([k, v]) => ({ name: k, value: v })) };
-      }
-      if (m.url) {
-        // gemini CLI 0.58+ 的 ACP session/new schema（zod union）要求 http/sse 型必须带
-        // type（字面量 "http"/"sse"）+ headers（数组，可空）。只给 {name,url} 会命中
-        // invalid_union ⇒ session/new 直接 -32603 失败 ⇒ 收消息即卡死。
-        // 2026-09-11 实测：补 type+headers 后，带全部 4 个 MCP 的 session/new + prompt 全通。
-        const isSse = m.transport === 'sse';
-        return { name: m.id, type: isSse ? 'sse' : 'http', url: m.url, headers: [] };
-      }
-      return null;
-    }).filter((x): x is Record<string, unknown> => !!x);
-  } catch {
-    return [];
-  }
-}
+// MCP 穿透收编（2026-09-18）：已上收 src/providers/shared/per-session-mcp.ts。
+// gemini 引擎行为 = 'typedHttpAll'：全量穿透，http/sse 条目须带 type 字面量 + headers 数组
+// （CLI 0.58+ zod union schema，只给 {name,url} 命中 invalid_union ⇒ session/new -32603，
+// 2026-09-11 实测补齐后 4 个 MCP 全通；矩阵见共享模块注释）。
 
 type JsonRecord = Record<string, unknown>;
 
@@ -187,7 +167,7 @@ export class GeminiProvider implements RuntimeProvider {
         const newSession = await Promise.race([
           client.call<{ sessionId: string }>('session/new', {
             cwd: process.env.CTI_DEFAULT_WORKDIR || process.cwd(),
-            mcpServers: readCtiMcpServers('gemini'),
+            mcpServers: readSessionMcpServers('gemini', 'typedHttpAll'),
           }),
           new Promise<never>((_, reject) => setTimeout(
             () => reject(new Error('session/new 超时 120s（app-server 无响应）')),

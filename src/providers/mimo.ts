@@ -16,7 +16,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
+import { readSessionMcpServers } from './shared/per-session-mcp.js';
 import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
+
+// MCP 穿透收编（2026-09-18）：已上收 src/providers/shared/per-session-mcp.ts，
+// mimo 引擎行为 = 'stdioOnly'（首轮误判全拒实为 http 条目被拒，二轮 stdio 后真调 lark ✅，见模块注释矩阵）。
 
 function rtLog(msg: string): void {
   const file = process.env.CTI_RT_LOG || '';
@@ -266,7 +270,8 @@ export class MiMoProvider implements RuntimeProvider {
     const sessionNewId = this.nextId++;
     child.stdin!.write(JSON.stringify({
       jsonrpc: '2.0', id: sessionNewId, method: 'session/new',
-      params: { cwd, mcpServers: [] },
+      // 2026-09-18：穿透走共享模块（flag='stdioOnly'），二轮实测真调 lark_list_chats ✅。
+      params: { cwd, mcpServers: readSessionMcpServers('mimo', 'stdioOnly') },
     }) + '\n');
 
     const msg = await this.waitResponse(sessionNewId, 60_000);

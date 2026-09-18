@@ -16,26 +16,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
+import { readSessionMcpServers } from './shared/per-session-mcp.js';
 import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
 
-// MCP 穿透（2026-09-10）：配置中心勾选的 MCP 池（render.ts 下发 CTI_BOT_<ID>_MCP_SERVERS JSON）
-// 映射为 ACP session/new 的 mcpServers。stdio → name/command/args/env；http 类 → name/url。
-function readCtiMcpServers(botId: string): Array<Record<string, unknown>> {
-  try {
-    const raw = process.env[`CTI_BOT_${botId.toUpperCase()}_MCP_SERVERS`] || '';
-    if (!raw) return [];
-    const defs = JSON.parse(raw) as Array<{ id: string; transport: string; url?: string; command?: string; args?: string[]; env?: Record<string, string> }>;
-    return defs.map((m) => {
-      if (m.transport === 'stdio' && m.command) {
-        return { name: m.id, command: m.command, args: m.args || [], env: Object.entries(m.env || {}).map(([k, v]) => ({ name: k, value: v })) };
-      }
-      if (m.url) return { name: m.id, url: m.url };
-      return null;
-    }).filter((x): x is Record<string, unknown> => !!x);
-  } catch {
-    return [];
-  }
-}
+// MCP 穿透收编（2026-09-18）：已上收 src/providers/shared/per-session-mcp.ts。
+// openclaw 引擎行为 = 'rejectAllMcp'（ACP bridge 明确拒绝 per-session MCP，-32603）；
+// 真挂载走 ~/.openclaw/openclaw.json mcp.servers（由配置中心 syncMcpToCli 幂等维护）。
 
 function rtLog(msg: string): void {
   const file = process.env.CTI_RT_LOG || '';
@@ -294,15 +280,15 @@ export class OpenClawProvider implements RuntimeProvider {
     //   就回 -32603 "ACP bridge mode does not support per-session MCP servers.
     //   Configure MCP on the OpenClaw gateway or agent instead." ⇒ 卡片报
     //   "OpenClaw ACP 会话创建失败: OpenClaw ACP session/new failed"、收消息即卡死。
-    //   ⇒ 必须传空数组；openclaw 的 MCP 一律在 ~/.openclaw/openclaw.json 的 mcp.servers 配
-    //   （openmem 已配）。配置中心那排 MCP 勾选对 openclaw 无效，仅作提示。
-    const ignoredMcp = readCtiMcpServers('openclaw');
-    if (ignoredMcp.length > 0) {
-      rtLog(`[openclaw] 忽略 ${ignoredMcp.length} 个 per-session MCP（ACP bridge 不支持；请配到 ~/.openclaw/openclaw.json 的 mcp.servers）`);
+    //   ⇒ 必须传空数组（flag='rejectAllMcp'）；openclaw 的 MCP 一律在 ~/.openclaw/openclaw.json
+    //   的 mcp.servers 配（配置中心 apply 经 syncMcpToCli 幂等同步，手工删掉会自动长回）。
+    const poolCount = readSessionMcpServers('openclaw', 'nativeFileOnly').length;
+    if (poolCount > 0) {
+      rtLog(`[openclaw] 忽略 ${poolCount} 个 per-session MCP（ACP bridge 不支持；已由 syncMcpToCli 落 ~/.openclaw/openclaw.json mcp.servers）`);
     }
     child.stdin!.write(JSON.stringify({
       jsonrpc: '2.0', id: sessionNewId, method: 'session/new',
-      params: { cwd, mcpServers: [] },
+      params: { cwd, mcpServers: readSessionMcpServers('openclaw', 'rejectAllMcp') },
     }) + '\n');
 
     const msg = await this.waitResponse(sessionNewId, 60_000);

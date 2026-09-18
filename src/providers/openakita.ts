@@ -16,26 +16,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
+import { readSessionMcpServers } from './shared/per-session-mcp.js';
 import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
 
-// MCP 穿透（2026-09-10）：配置中心勾选的 MCP 池（render.ts 下发 CTI_BOT_<ID>_MCP_SERVERS JSON）
-// 映射为 ACP session/new 的 mcpServers。stdio → name/command/args/env；http 类 → name/url。
-function readCtiMcpServers(botId: string): Array<Record<string, unknown>> {
-  try {
-    const raw = process.env[`CTI_BOT_${botId.toUpperCase()}_MCP_SERVERS`] || '';
-    if (!raw) return [];
-    const defs = JSON.parse(raw) as Array<{ id: string; transport: string; url?: string; command?: string; args?: string[]; env?: Record<string, string> }>;
-    return defs.map((m) => {
-      if (m.transport === 'stdio' && m.command) {
-        return { name: m.id, command: m.command, args: m.args || [], env: Object.entries(m.env || {}).map(([k, v]) => ({ name: k, value: v })) };
-      }
-      if (m.url) return { name: m.id, url: m.url };
-      return null;
-    }).filter((x): x is Record<string, unknown> => !!x);
-  } catch {
-    return [];
-  }
-}
+// MCP 穿透收编（2026-09-18）：已上收 src/providers/shared/per-session-mcp.ts。
+// openakita 引擎行为 = 'nativeFileOnly'：session/new 的 mcpServers 引擎不消费（stdio 静默失败），
+// 真挂载走引擎原生配置（workspace data/mcp/servers/<id>/，由配置中心 syncMcpToCli 幂等维护）；
+// 此处仍回传全量条目，保持现网线上行为不变（09-18 实测矩阵见共享模块注释）。
 
 function rtLog(msg: string): void {
   const file = process.env.CTI_RT_LOG || '';
@@ -291,7 +278,7 @@ export class OpenAkitaProvider implements RuntimeProvider {
     const sessionNewId = this.nextId++;
     child.stdin!.write(JSON.stringify({
       jsonrpc: '2.0', id: sessionNewId, method: 'session/new',
-      params: { cwd, mcpServers: readCtiMcpServers('openakita') },
+      params: { cwd, mcpServers: readSessionMcpServers('openakita', 'nativeFileOnly') },
     }) + '\n');
 
     const msg = await this.waitResponse(sessionNewId, 60_000);

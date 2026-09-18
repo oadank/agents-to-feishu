@@ -17,7 +17,7 @@ import {
   type ConfigStore, type ProviderDef, type AgentDef, type McpDef,
   findProvider, findModel, resolveAgentWorkdir,
 } from './store.js';
-import { writeEnvMerged, writeCordisMerged } from './patch-apply.js';
+import { writeEnvMerged, writeCordisMerged, backupFile, logApply } from './patch-apply.js';
 
 /** 项目根（render.ts 位于 src/config-center/，上溯两级） */
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -529,6 +529,10 @@ export function writeAgentArtifacts(
   // （13600 网页切模型 → apply → 各 CLI 自动联动，无需手改 CLI 配置）
   syncModelToCli(_store, agent, globalExtra);
 
+  // MCP 原生配置同步（2026-09-18 固化现场）：openclaw/openakita/codex 的「勾选 stdio 型 MCP」
+  // 幂等落各自原生配置（手工删掉 apply 即长回）；其它 runtime 走 config.env 的 MCP_SERVERS 穿透
+  syncMcpToCli(_store, agent);
+
   const configEnv = renderConfigEnv(_store, agent, globalExtra);
   const isDsh = !agent.runtime || agent.runtime === 'dsh';
   let cordisYml = '';
@@ -669,14 +673,45 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
       case 'openakita': {
         // ~/.openakita/workspaces/default/data/llm_endpoints.json → endpoints[0]
         const f = path.join(hunme, '.openakita', 'workspaces', 'default', 'data', 'llm_endpoints.json');
-        if (!fs.existsSync(f)) break;
-        const j = JSON.parse(fs.readFileSync(f, 'utf-8'));
-        if (Array.isArray(j.endpoints) && j.endpoints.length > 0) {
-          j.endpoints[0].base_url = baseUrl || j.endpoints[0].base_url;
-          j.endpoints[0].model = cliModel;
-          j.endpoints[0].api_key_env = keyEnv;
-          j.endpoints[0].note = `同步自配置中心 provider=${prov.id} model=${modelId} (${new Date().toISOString().slice(0, 10)})`;
-          fs.writeFileSync(f, JSON.stringify(j, null, 2), 'utf-8');
+        if (fs.existsSync(f)) {
+          const j = JSON.parse(fs.readFileSync(f, 'utf-8'));
+          if (Array.isArray(j.endpoints) && j.endpoints.length > 0) {
+            j.endpoints[0].base_url = baseUrl || j.endpoints[0].base_url;
+            j.endpoints[0].model = cliModel;
+            j.endpoints[0].api_key_env = keyEnv;
+            j.endpoints[0].note = `同步自配置中心 provider=${prov.id} model=${modelId} (${new Date().toISOString().slice(0, 10)})`;
+            fs.writeFileSync(f, JSON.stringify(j, null, 2), 'utf-8');
+          }
+        }
+        // MCP：openakita ACP adapter 不消费 session/new mcpServers（scripts/openakita-acp-server.py
+        // 只造 sessionId），引擎 MCP 只认自家配置。参照 case mimo：勾选 upsert 进
+        // ~/.openakita/config/mcp_config.json + workspace data/mcp/servers/<id>/config.json。
+        // 2026-09-18：此前只写 wiki/memory（已下线）导致 bot 无 openmem/mh_*。
+        {
+          const httpMcps: Record<string, { url: string; transport: string }> = {};
+          for (const mcpId of agent.mcps || []) {
+            const m = store.mcps.find((x) => x.id === mcpId);
+            if (!m || m.transport === 'stdio' || !m.url) continue; // openakita catalog 当前只落 http 类
+            httpMcps[m.id] = { url: m.url, transport: 'streamable_http' };
+          }
+          const mcpCfgPath = path.join(hunme, '.openakita', 'config', 'mcp_config.json');
+          fs.mkdirSync(path.dirname(mcpCfgPath), { recursive: true });
+          const prevCfg = fs.existsSync(mcpCfgPath)
+            ? JSON.parse(fs.readFileSync(mcpCfgPath, 'utf-8'))
+            : { mcpServers: {} };
+          prevCfg.mcpServers = httpMcps; // 配置中心勾选为权威（整表替换，避免已下线服务残留）
+          fs.writeFileSync(mcpCfgPath, `${JSON.stringify(prevCfg, null, 2)}\n`, 'utf-8');
+          for (const roots of [
+            path.join(hunme, '.openakita', 'data', 'mcp', 'servers'),
+            path.join(hunme, '.openakita', 'workspaces', 'default', 'data', 'mcp', 'servers'),
+          ]) {
+            fs.mkdirSync(roots, { recursive: true });
+            for (const [id, def] of Object.entries(httpMcps)) {
+              const dir = path.join(roots, id);
+              fs.mkdirSync(dir, { recursive: true });
+              fs.writeFileSync(path.join(dir, 'config.json'), `${JSON.stringify({ name: id, ...def }, null, 2)}\n`, 'utf-8');
+            }
+          }
         }
         break;
       }
@@ -956,5 +991,193 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
   }
   if (errs.length) {
     console.error(`[render] syncModelToCli ${agent.id} 部分失败: ${errs.join('; ')}`);
+  }
+}
+
+// ── MCP 原生配置同步（2026-09-18 固化现场：openclaw/openakita/codex 的 stdio MCP 挂载不再靠手工）──
+//
+// 背景：缺口A 给 10 个 bot 挂 lark_* 时，三个"引擎只认自家配置文件"的 runtime 是手工现场改的：
+//   a) openclaw  ~/.openclaw/openclaw.json mcp.servers.<id>（env CTI_BOT=<botId>）
+//   b) openakita ~/.openakita/workspaces/default/data/mcp/servers/<id>/{config.json,SERVER_METADATA.json}
+//   c) codex     ~/.codex/config.toml [mcp_servers.<id>] + [mcp_servers.<id>.env]
+// 本函数随 apply（writeAgentArtifacts → syncMcpToCli）幂等重建这些条目：手工删掉/换机器，apply 即长回。
+//
+// 规则（2026-09-18 老大定调"禁止现场态"）：
+//   - 只写「勾选的 stdio 型 MCP」；http 型挂载（openakita catalog / codex url 段）由原逻辑/人工维护，不碰。
+//   - 合并不覆写：条目已存在时只确保 command/args/env 与勾选一致，其它键（connectionTimeoutMs、
+//     startup_timeout_sec、enabled 等）原样保留。
+//   - 内容未变 → 不写盘（幂等）；写前 backupFile 备份 + logApply 审计。
+//   - 文件被锁/JSON·TOML 解析失败 → 抛错进 errs 并 console.error，不许静默。
+//   - 取消勾选不删条目（保守；要下线某 MCP 在引擎配置里手工处理）。
+
+/** ensureCodexMcpSection：codex config.toml 里 upsert [mcp_servers.<id>] + env 子表（幂等合并） */
+function upsertCodexMcpSection(
+  toml: string,
+  id: string,
+  command: string,
+  args: string[],
+  env: Record<string, string>,
+): { text: string; changed: boolean } {
+  const q = (s: string): string => `'${s.replace(/'/g, "''")}'`; // TOML literal string
+  const section = `[mcp_servers.${id}]`;
+  const envSection = `[mcp_servers.${id}.env]`;
+  const lines = toml.split(/\r?\n/);
+  const idxOf = (head: string): number => lines.findIndex((l) => l.trim() === head);
+  let changed = false;
+  const secAt = idxOf(section);
+  if (secAt < 0) {
+    // 追加整段（main + env），与 2026-08-30 手工格式一致
+    lines.push('', section, 'enabled = true', `command = ${q(command)}`,
+      `args = [${args.map(q).join(', ')}]`, 'startup_timeout_sec = 120', '', envSection,
+      ...Object.entries(env).map(([k, v]) => `${k} = ${q(v)}`));
+    return { text: lines.join('\n'), changed: true };
+  }
+  // main 段已存在：确保 command/args 行与勾选一致（enabled/startup_timeout_sec 等其它键不动）
+  const ensureLine = (key: string, value: string, after: string[]): void => {
+    // 每次现算段边界（前一次 ensureLine 可能插入过行，旧索引会失效）
+    const envAt0 = lines.findIndex((l) => l.trim() === envSection);
+    const nextHead = lines.findIndex((l, i) => i > secAt && /^\s*\[/.test(l));
+    const secEnd = envAt0 > secAt ? Math.min(envAt0, nextHead < 0 ? lines.length : nextHead)
+      : (nextHead < 0 ? lines.length : nextHead);
+    const re = new RegExp(`^\\s*${key}\\s*=`);
+    const at = lines.findIndex((l, i) => i > secAt && i < secEnd && re.test(l));
+    if (at >= 0) {
+      if (lines[at].trim() !== `${key} = ${value}`) { lines[at] = `${key} = ${value}`; changed = true; }
+    } else {
+      lines.splice(secAt + 1, 0, ...after); changed = true;
+    }
+  };
+  ensureLine('command', q(command), [`command = ${q(command)}`]);
+  ensureLine('args', `[${args.map(q).join(', ')}]`, [`args = [${args.map(q).join(', ')}]`]);
+  // env 子表：已存在则在段内确保各键；不存在则整段追加到文件尾（TOML 绝对路径，合法）
+  const envAt = idxOf(envSection);  if (envAt < 0) {
+    lines.push('', envSection, ...Object.entries(env).map(([k, v]) => `${k} = ${q(v)}`));
+    changed = true;
+  } else {
+    const envNext = lines.findIndex((l, i) => i > envAt && /^\s*\[/.test(l));
+    const envEnd = envNext < 0 ? lines.length : envNext;
+    for (const [k, v] of Object.entries(env)) {
+      const re = new RegExp(`^\\s*${k}\\s*=`);
+      const at = lines.findIndex((l, i) => i > envAt && i < envEnd && re.test(l));
+      if (at >= 0) {
+        if (lines[at].trim() !== `${k} = ${q(v)}`) { lines[at] = `${k} = ${q(v)}`; changed = true; }
+      } else {
+        lines.splice(envEnd, 0, `${k} = ${q(v)}`); changed = true;
+      }
+    }
+  }
+  return { text: lines.join('\n'), changed };
+}
+
+/** 随 apply 把「勾选的 stdio 型 MCP」幂等同步进 openclaw/openakita/codex 的原生配置（详见上方块注释） */
+export function syncMcpToCli(store: ConfigStore, agent: AgentDef): void {
+  const rt = agent.runtime || '';
+  if (rt !== 'openclaw' && rt !== 'openakita' && rt !== 'codex') return;
+  const hunme = process.env.CTI_USER_HOME || os.homedir();
+  const errs: string[] = [];
+  const stdioMcps = (agent.mcps || [])
+    .map((id) => store.mcps.find((m) => m.id === id))
+    .filter((m): m is McpDef => !!m && m.transport === 'stdio' && !!m.command);
+  if (stdioMcps.length === 0) return;
+  const audit = (file: string, backup: string | null, ids: string[]): void => {
+    try {
+      logApply(agent.id, file, ids.map((id) => ({ key: `mcp:${id}`, oldValue: '(见备份)', newValue: 'upsert(stdio)', kind: 'update' as const })), backup);
+    } catch { /* 审计失败不阻断 */ }
+  };
+
+  try {
+    switch (rt) {
+      case 'openclaw': {
+        const f = path.join(hunme, '.openclaw', 'openclaw.json');
+        if (!fs.existsSync(f)) break;
+        const raw = fs.readFileSync(f, 'utf-8');
+        const eol = raw.includes('\r\n') ? '\r\n' : '\n';
+        const j = JSON.parse(raw); // 解析失败 → 抛错报上去，不静默
+        j.mcp = j.mcp || {};
+        j.mcp.servers = j.mcp.servers || {};
+        const touched: string[] = [];
+        for (const m of stdioMcps) {
+          const prev = j.mcp.servers[m.id] || {};
+          const next = {
+            ...prev,
+            command: m.command,
+            args: resolveMcpArgPaths(m.id, m.args || []),
+            env: { ...(prev.env || {}), ...(m.env || {}), CTI_BOT: agent.id },
+            transport: 'stdio',
+            ...(prev.connectionTimeoutMs !== undefined ? {} : { connectionTimeoutMs: 15000 }),
+          };
+          if (JSON.stringify(prev) !== JSON.stringify(next)) {
+            j.mcp.servers[m.id] = next;
+            touched.push(m.id);
+          }
+        }
+        if (touched.length) {
+          const backup = backupFile(f);
+          fs.writeFileSync(f, JSON.stringify(j, null, 2).split('\n').join(eol) + eol, 'utf-8');
+          audit(f, backup, touched);
+          console.log(`[render] openclaw MCP 同步 ${agent.id}: upsert ${touched.join(', ')}`);
+        }
+        break;
+      }
+      case 'openakita': {
+        // 引擎只认 workspace 原生目录（SERVER_METADATA.json + config.json）；全局根一并写，
+        // 与既有 http 同步的双根行为一致（引擎读 workspaces/default，另一份是兼容历史布局）
+        const roots = [
+          path.join(hunme, '.openakita', 'data', 'mcp', 'servers'),
+          path.join(hunme, '.openakita', 'workspaces', 'default', 'data', 'mcp', 'servers'),
+        ];
+        const touched: string[] = [];
+        for (const m of stdioMcps) {
+          const args = resolveMcpArgPaths(m.id, m.args || []);
+          const env = { ...(m.env || {}), CTI_BOT: agent.id };
+          const configJson = `${JSON.stringify({ name: m.id, command: m.command, args, env, transport: 'stdio' }, null, 2)}\n`;
+          const metaJson = `${JSON.stringify({
+            serverIdentifier: m.id,
+            serverName: m.displayName || m.serverName || `配置中心同步：${m.id}`,
+            command: m.command, args, env, transport: 'stdio', url: '', autoConnect: true,
+          }, null, 2)}\n`;
+          for (const root of roots) {
+            const dir = path.join(root, m.id);
+            fs.mkdirSync(dir, { recursive: true });
+            for (const [fname, content] of [['config.json', configJson], ['SERVER_METADATA.json', metaJson]] as const) {
+              const fp = path.join(dir, fname);
+              if (fs.existsSync(fp) && fs.readFileSync(fp, 'utf-8') === content) continue; // 幂等
+              const backup = backupFile(fp);
+              fs.writeFileSync(fp, content, 'utf-8');
+              audit(fp, backup, [m.id]);
+            }
+            touched.push(m.id);
+          }
+        }
+        if (touched.length) console.log(`[render] openakita MCP 同步 ${agent.id}: upsert ${[...new Set(touched)].join(', ')}`);
+        break;
+      }
+      case 'codex': {
+        const f = path.join(hunme, '.codex', 'config.toml');
+        if (!fs.existsSync(f)) break;
+        let t = fs.readFileSync(f, 'utf-8');
+        const touched: string[] = [];
+        for (const m of stdioMcps) {
+          const args = resolveMcpArgPaths(m.id, m.args || []);
+          const env = { ...(m.env || {}), CTI_BOT: agent.id };
+          const r = upsertCodexMcpSection(t, m.id, m.command!, args, env);
+          if (r.changed) { t = r.text; touched.push(m.id); }
+        }
+        if (touched.length) {
+          const backup = backupFile(f);
+          fs.writeFileSync(f, t, 'utf-8');
+          audit(f, backup, touched);
+          console.log(`[render] codex MCP 同步 ${agent.id}: upsert ${touched.join(', ')}`);
+        }
+        break;
+      }
+    }
+  } catch (e) {
+    errs.push(`${rt}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (errs.length) {
+    // 文件锁/格式冲突必须可见，禁止静默（apply 端日志 + 审计日志都留痕）
+    console.error(`[render] syncMcpToCli ${agent.id} 失败: ${errs.join('; ')}`);
+    try { logApply(agent.id, `(syncMcpToCli/${rt})`, [{ key: 'error', oldValue: '', newValue: errs.join('; '), kind: 'update' }], null); } catch { /* ignore */ }
   }
 }

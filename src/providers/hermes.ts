@@ -15,6 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { HermesAppServerClient } from './hermes/hermes-app-server-client.js';
 import type { HermesServerMessage } from './hermes/hermes-app-server-client.js';
+import { readSessionMcpServers } from './shared/per-session-mcp.js';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
 
 function rtLog(msg: string): void {
@@ -24,6 +25,9 @@ function rtLog(msg: string): void {
 }
 
 type JsonRecord = Record<string, unknown>;
+
+// MCP 穿透收编（2026-09-18）：readCtiMcpServers 已上收 src/providers/shared/per-session-mcp.ts，
+// hermes 引擎行为 = 'stdioOnly'（http 型条目被拒，报错原文 -32602，实测矩阵见该模块注释）。
 
 function extractSessionId(msg: HermesServerMessage): string {
   const params = typeof msg.params === 'object' && msg.params ? msg.params as JsonRecord : {};
@@ -132,7 +136,11 @@ export class HermesProvider implements RuntimeProvider {
         const newSession = await Promise.race([
           client.call<{ sessionId: string }>('session/new', {
             cwd: process.env.CTI_DEFAULT_WORKDIR || process.cwd(),
-            mcpServers: [], // 必传：hermes ACP 强制要求该字段（去掉会报 Invalid params）；与老项目 hermes-provider.ts:204 一致
+            // 2026-09-18 实测结论：hermes 引擎的 session/new【拒绝一切非空 mcpServers】
+            // （传配置中心勾选的任何 MCP 都回 Invalid params，与 cti-builtin 无关）。
+            // 字段本身必传（去掉会报 Invalid params）；要给 hermes 挂工具走本穿透（只传 stdio，
+            // 引擎行为 flag='stdioOnly'）。首轮"拒绝一切非空"系 http 条目被拒，实测记录见 openmem。
+            mcpServers: readSessionMcpServers('hermes', 'stdioOnly'),
           }),
           new Promise<never>((_, reject) => setTimeout(
             () => reject(new Error('session/new 超时 120s（app-server 无响应）')),
