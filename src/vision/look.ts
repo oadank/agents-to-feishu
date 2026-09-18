@@ -41,7 +41,8 @@ export interface LookResult {
 
 const LOOK_TASK_PROMPTS: Record<string, string> = {
   describe: '请用中文简要描述这张图片的内容（一到两句话，简洁明了），如有人物说明主要形象与姿态。',
-  text: '请逐字提取这张图片中的所有文字，按在画面中的位置分行输出，每行前缀标出行位置（如「顶部」「中部」「底部」）。仅输出提取到的文字内容，不要解释、不要翻译。',
+  // 2026-09-19 调优：agnes-3.0-flash 对结尾年份数字摇摆（2025/2026），尾数强调句实测 8/8 完整
+  text: 'Transcribe the text in the image exactly, character by character. Pay special attention to trailing digits: transcribe EVERY digit of the year, it is 4 digits long. Output only the transcription.',
 };
 
 /** 读取视觉配置：显式传入 > config-store.json 的 vision 段 > 默认 */
