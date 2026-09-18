@@ -163,7 +163,10 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
       url: m.url || '',
       command: m.command || '',
       args: resolveMcpArgPaths(m.id, m.args || []),
-      env: m.env || {},
+      // 防冒名（2026-09-18）：池条目 env 是共享的，历史上曾硬编码 CTI_BOT:"dsh" 导致
+      // 挂载 bot 全用 dsh 身份发消息。这里无条件覆写为该 bot 本名（与 syncMcpToCli
+      // 原生路径 1105/1132/1162 同口径），不信任池里存的任何 CTI_BOT 值。
+      env: { ...(m.env || {}), CTI_BOT: agent.id },
     }));
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_MCP_SERVERS=${JSON.stringify(mcpDefs)}`);
   if (agent.runtime === 'zcode') {
