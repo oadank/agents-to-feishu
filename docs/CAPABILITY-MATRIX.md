@@ -4,11 +4,12 @@
 > **lark/mh 已回填（2026-09-18 23:32–23:50，23:1x 滚重启后全表复测戳，旧戳 21:01–22:44 全部作废）；桌面/视觉/生图三列待 24 次真调回填。**
 > 缺口A 终局矩阵见 openmem `0c0bc52a`；以聊天原文 message_id 为准。
 > 🔴 终审口径定稿（2026-09-19 老大令）：**终审口径=单域一家一读戳；quick 连轰表作废仅过程存档。**
+> 🔴 判分规矩 v2（2026-09-19 老大令）：**✅/❌ 以物理痕迹为准**——先 grep 该家桥日志的工具事件/落盘/发图记录，有痕=✅（聊天文字仅作可见性确认），无痕才算 ❌ 并交日志原文。复测仅限：codex 桌面/视觉（判分器修后首次）、zcode 视觉（两✅=抖动收案）、dsh 五格（重启后）；判分器改动先拿 dsh（全绿已知答案）校一遍才许碰真 bot。
 > 生图 11 家（637cc03 起 generate_image 随 cti-builtin 通用下发；deeptutor N/A）；桌面/视觉 11 家。
 
 | bot | runtime | 勾选的 MCP | cti-builtin | lark 工具挂载方式 | lark_* | mh_* | 桌面 | 视觉 | 生图 |
 |---|---|---|---|---|---|---|---|---|---|
-| dsh | dsh | openmem, cti-builtin, win-desktop-helper, vision, comfy, visionqa | ✅ | 桥接穿透 | ✅ `om_x100b65e1ef13d8a4c2b9e5f9f734336`@23:34 | ✅ `om_x100b65e1d1258ca0c2f8114ad422134`@23:34 | ✅ `om_x100b65edcf078ca0c4b5b19995cd89f`@03:59 native | ❌ om_x100b65edcd2760a0c1914bd16d61b09@03:59 + om_x100b65edc445186cc3fb9958d213e3f@04:01 复述不符×2 | ✅ `om_x100b65edc89ba4a0c4aea0a8790ef64`@04:00 agnes·新引擎首秀(03:53 重启；旧 XDN 戳 om_…924d298@00:04 作废) |
+| dsh | dsh | openmem, cti-builtin, win-desktop-helper, vision, comfy, visionqa | ✅ | 桥接穿透 | ✅ `om_x100b65e1ef13d8a4c2b9e5f9f734336`@23:34 | ✅ `om_x100b65e1d1258ca0c2f8114ad422134`@23:34 | ✅ `om_x100b65edcf078ca0c4b5b19995cd89f`@03:59 native | ✅ v2有痕(判定器未匹配误杀)：引擎 FINAL tools=13 + 3959B 卡片回复成功 @03:59/04:01(探针 om…16d61b09/om…8d213e3f) | ✅ `om_x100b65edc89ba4a0c4aea0a8790ef64`@04:00 agnes·新引擎首秀(03:53 重启；旧 XDN 戳 om_…924d298@00:04 作废) |
 | claude | claude | win-desktop-helper, visionqa, openmem | ❌ | 自解析（B组） | ✅ `om_x100b65e1d2bba8a8c10545e72b2e9ba`@23:33 | ✅ `om_x100b65e1d4a71ca0c2b065dc727b1d9`@23:32 | ✅ `om_x100b65e2f7d890a0c1062316fcbd9a4`@00:49 | ✅ `om_x100b65e390c7b4a0c33d4c4e6dadf6e`@02:07 [WB] 复测复述正确 | ✅ `om_x100b65e34543a4a0c02786b202c6080`@01:11 agnes |
 | zcode | zcode | cti-builtin, win-desktop-helper, visionqa, comfy, vision, openmem | ✅ | 勾选即生效 | ✅ `om_x100b65e20aacf0a0c3e6f08479d37f8`@00:18 收编复测 | ✅ `om_x100b65e20c3134a0c28b3d1e1260b2f`@00:17 收编复测 | ✅ `om_x100b65ed0edee0a0c44efb9fbe9d36d`@03:41 native | ✅ `om_x100b65ed1d3fa0a0c44cbccabe690e2`@03:47 native·复述正确(首测未命中,复测过) | ✅ `om_x100b65e382b790a0c440669ccc31d92`@02:02 agnes |
 | gemini | gemini | cti-builtin, win-desktop-helper, visionqa, openmem | ✅ | session/new typedHttpAll | ✅ `om_x100b65e1e2dd58b4c16e6ec45db6094`@23:37 | ✅ `om_x100b65e1e73344a0c237b49d2722ea4`@23:37 | ✅ `om_x100b65e2396d8ca0dd821667ee000dd`@00:31 | ✅ `om_x100b65e39c2440a0c3e71e487b8f414`@02:04 [WB] 复测复述正确 | ✅ `om_x100b65e354a004a4c36b51db09ed051`@01:15 agnes |
@@ -33,6 +34,7 @@
 - 桌面/视觉/生图：按池勾选真调回填（题图 `team-artifacts/probe-ocr.png` 文字须为 `CTI-PROBE-2026`）。
 - 体检器 commits：`0585a8c`/`cf74b5c`/`c392f5d`/`d813d20`/三域扩容见后续 hash。
 - litellm 未碰；codex 仅 modelId=codex-model（老大口径）。
+- v2 复核（2026-09-19 04:1x）：dsh 视觉 ❌→✅（dsh-out.log 实锤 FINAL tools=13+卡片 3959B，判定器误杀）；codex 桌面/视觉、mimo 视觉桥日志无工具痕迹 ❌ 维持（原文仅 handleIncoming 接收行）。视觉终态 9✅2❌。
 
 ## 维护口径
 
