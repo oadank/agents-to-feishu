@@ -30,7 +30,14 @@ function rtLog(msg: string): void {
   try { fs.appendFileSync(file, `[${new Date().toISOString()}] ${msg}\n`, 'utf-8'); } catch {}
 }
 
-// ── 会话持久化（2026-08-31 重启保记忆）──
+// ── 外部操作闸门状态（2026-09-17）──
+// Claude Agent SDK 默认不读 ~/.claude/settings.json（settingSources 为空），文件级 hook 不生效，
+// 故在 query options 里程序化注入 PreToolUse 回调。规则与 @oadank/dsh-api-gate / api-gate/gate.mjs 同源。
+// 状态按 session_id 记；SDK 进程常驻 ⇒ 内存 Set 即可，无需落盘。
+const gatePassed = new Set<string>();
+const gateDenied = new Set<string>();
+
+// ─ 会话持久化（2026-08-31 重启保记忆）──
 // P2-3 修复：惰性求值——模块加载早于 main() 里 config.env 灌 CTI_USER_HOME，常量会在错误时点取值
 let _claudeSessionFile: string | null = null;
 function claudeSessionFile(): string {
@@ -254,6 +261,56 @@ export class ClaudeProvider implements RuntimeProvider {
           ...(this.cliPath ? { pathToClaudeCodeExecutable: this.cliPath } : {}),
           permissionMode: 'bypassPermissions' as const,
           allowDangerouslySkipPermissions: true,
+          // [2026-09-17 闸门接入] SDK 默认不读 ~/.claude/settings.json（settingSources 空）⇒ 文件级 hook 无效，
+          // 必须在 query options 程序化注入 PreToolUse 回调。命中 GitHub/飞书外部操作且本会话未查规范 → deny，
+          // 并指向 openmem 成品答案（GitHub 访问通道 / 飞书操作规范）。每会话每域只拦一次（gateDenied 安全阀）。
+          hooks: {
+            PreToolUse: [{
+              matcher: '',
+              hooks: [async (input: any) => {
+                try {
+                  const toolName = String(input?.tool_name ?? '');
+                  const raw = input?.tool_input;
+                  const cmd = typeof raw?.command === 'string' ? raw.command : (raw ? JSON.stringify(raw) : '');
+                  const sid = String(input?.session_id ?? 'nosession');
+                  // 解除：调过 openmem 记忆工具且内容谈到该域
+                  if (/openmem|mh_tool|mh_search|mh_ask/i.test(toolName)) {
+                    if (/github|git\b|token|凭据/i.test(cmd)) gatePassed.add(sid + ':github');
+                    if (/飞书|lark|feishu|消息|群|chat/i.test(cmd)) gatePassed.add(sid + ':lark');
+                    return {};
+                  }
+                  const GH_CMD = /(?:^|[;&|])\s*gh\s+(?:api|release|repo|pr|issue|run|auth)\b/i;
+                  const GIT_OUT = /(?:^|[;&|])\s*git\b[^\n;&|]*\b(?:push|clone|fetch|pull|ls-remote)\b/i;
+                  const NET_CMD = /(?:^|[;&|])\s*(?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b/i;
+                  const GH_HOST = /github\.com|api\.github|githubusercontent/i;
+                  const LARK = /(?:^|[;&|])\s*(?:(?:npx|pnpm|yarn|bunx)\s+)?(?:\S*[\\/])?lark-cli\b/i;
+                  const hits: Array<[string, string, string]> = [];
+                  if (GH_CMD.test(cmd) || GIT_OUT.test(cmd) || (NET_CMD.test(cmd) && GH_HOST.test(cmd))) {
+                    hits.push(['github', 'GitHub', 'GitHub 访问通道']);
+                  }
+                  if (LARK.test(cmd) || /^lark_(send|reply)/i.test(toolName)) {
+                    hits.push(['lark', '飞书', '飞书操作规范']);
+                  }
+                  for (const [id, label, preset] of hits) {
+                    const key = sid + ':' + id;
+                    if (gatePassed.has(key)) continue;
+                    if (gateDenied.has(key)) { gatePassed.add(key); continue; }
+                    gateDenied.add(key);
+                    return {
+                      hookSpecificOutput: {
+                        hookEventName: 'PreToolUse',
+                        permissionDecision: 'deny',
+                        permissionDecisionReason: `拦下：这是${label}操作，但本会话你还没查过对应的通道/规范就动手了。先调成品答案（秒回、内容准确）：mcp__openmem__mh_tool(name="${preset}")；拿到后再重试本次操作。（本会话该闸门只拦一次）`,
+                      },
+                    };
+                  }
+                  return {};
+                } catch {
+                  return {};
+                }
+              }],
+            }],
+          } as any,
           // 2026-08-31 重启保记忆：resume 上次会话（SDK jsonl 落盘于 ~/.claude/projects）
           ...(readSavedSessionId() ? { resume: readSavedSessionId() as string } : {}),
           // P2-9 修复（2026-08-29）：env 必须总是传。

@@ -41,17 +41,30 @@ export function ensureDshPluginInjected(log: (m: string) => void = () => {}): Ds
     const cordisFile = process.env.CTI_DSH_ACP_CONFIG?.trim() || path.join(botHome, 'cordis.yml');
 
     // 1) 插件部署（vendor 是唯一来源，跟 agents-to-feishu 仓库走）
-    const pluginInstalled = fs.existsSync(path.join(pluginTarget, 'lib', 'index.js'));
-    if (!pluginInstalled) {
-      const vendorSrc = process.env.CTI_DSH_PLUGIN_DIR?.trim()
-        || path.resolve(__dirname, '..', '..', 'vendor', 'cti-builtin-tools');
-      if (!fs.existsSync(path.join(vendorSrc, 'lib', 'index.js'))) {
-        log(`[dsh-inject] vendor 副本缺失（${vendorSrc}），跳过自动安装`);
-        return { ok: false, pluginInstalled: false, cordisRegistered: false, actions, error: 'vendor missing' };
+    // [2026-09-18 根治「插件改了永远不生效」] 旧逻辑是「文件在就跳过」——于是 vendor 里修完
+    // 插件，bot 里那份旧副本永远不动，改了等于没改（实测差 3 天：8-29 副本 vs 9-01 vendor）。
+    // 改为按内容比对：vendor 与目标不一致就覆盖，保证「仓库改了 → 重启 bot 即生效」。
+    const vendorSrc = process.env.CTI_DSH_PLUGIN_DIR?.trim()
+      || path.resolve(__dirname, '..', '..', 'vendor', 'cti-builtin-tools');
+    const vendorEntry = path.join(vendorSrc, 'lib', 'index.js');
+    const targetEntry = path.join(pluginTarget, 'lib', 'index.js');
+    if (!fs.existsSync(vendorEntry)) {
+      log(`[dsh-inject] vendor 副本缺失（${vendorSrc}），跳过自动安装`);
+      return { ok: false, pluginInstalled: false, cordisRegistered: false, actions, error: 'vendor missing' };
+    }
+    let needDeploy = true;
+    if (fs.existsSync(targetEntry)) {
+      try {
+        needDeploy = !fs.readFileSync(vendorEntry).equals(fs.readFileSync(targetEntry));
+      } catch {
+        needDeploy = true; // 读不了就当不一致，宁可重拷
       }
+    }
+    const pluginInstalled = fs.existsSync(targetEntry);
+    if (needDeploy) {
       fs.mkdirSync(path.dirname(pluginTarget), { recursive: true });
       fs.cpSync(vendorSrc, pluginTarget, { recursive: true });
-      actions.push(`deployed plugin -> ${pluginTarget}`);
+      actions.push(`${pluginInstalled ? 'updated' : 'deployed'} plugin -> ${pluginTarget}`);
     }
 
     // 2) cordis.yml 条目（render.ts 生成的已含；手工/旧文件则补）

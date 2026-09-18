@@ -30,7 +30,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
-import { buildWindowsPath } from './win-spawn-env.js';
+import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
 import { resolveMcpArgPaths } from '../tools/mcp-path-resolve.js';
 
 function rtLog(msg: string): void {
@@ -69,7 +69,7 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
     ...clean,
     ComSpec: clean.ComSpec || 'C:\\WINDOWS\\system32\\cmd.exe',
     SystemRoot: clean.SystemRoot || 'C:\\WINDOWS',
-    PATH: buildWindowsPath(clean.PATH),
+    PATH: buildWindowsPath(getEnvPath(clean)),
   };
 }
 

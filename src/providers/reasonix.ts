@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
-import { buildWindowsPath } from './win-spawn-env.js';
+import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
 
 function rtLog(msg: string): void {
   const file = process.env.CTI_RT_LOG || '';
@@ -47,12 +47,12 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
     clean[key] = value;
   }
   if (process.platform !== 'win32') return { ...clean };
-  const parentPath = (clean.PATH || '').split(';').filter(Boolean);
+  const parentPath = (getEnvPath(clean) || '').split(';').filter(Boolean);
   return {
     ...clean,
     ComSpec: clean.ComSpec || 'C:\\WINDOWS\\system32\\cmd.exe',
     SystemRoot: clean.SystemRoot || 'C:\\WINDOWS',
-    PATH: buildWindowsPath(clean.PATH),
+    PATH: buildWindowsPath(getEnvPath(clean)),
     // 2026-08-30 修复 LocalSystem 配置漂移：reasonix-cli 按 %APPDATA%\Roaming\reasonix\config.toml
     // 读模型/凭证——nssm LocalSystem 下 APPDATA/USERPROFILE 指向 systemprofile ⇒ 读到另一份
     // 残缺配置 ⇒ session/new 报 "session/new failed"（真实原因被桥接包装）。与 dsh 的 DSH_HOME
@@ -277,7 +277,11 @@ export class ReasonixProvider implements RuntimeProvider {
     }) + '\n');
 
     const msg = await this.waitResponse(sessionNewId, 60_000);
-    if (!msg.result) throw new Error('Reasonix ACP session/new failed');
+    if (!msg.result) {
+      const detail = msg.error ? JSON.stringify(msg.error) : 'no result/error';
+      rtLog(`[reasonix] session/new FAILED: ${detail}`);
+      throw new Error(`Reasonix ACP session/new failed: ${detail}`);
+    }
     const sessionId = (msg.result as Record<string, unknown>).sessionId as string | undefined;
     if (!sessionId) throw new Error('Reasonix ACP session/new: missing sessionId');
 
@@ -306,6 +310,11 @@ export class ReasonixProvider implements RuntimeProvider {
     }
 
     const sessionInterrupted = session ? this.interruptedSessionIds.has(session.sessionId) : false;
+    // [2026-09-17] 跨消息失忆修复：此前 history 仅在 sessionInterrupted 时注入，而 session
+    // 可能因空闲回收（30min）/进程重启/LRU 被清——这些路径新建会话却不带历史 ⇒ 每次都是
+    // 空白新对话。现统一为「本轮新建了会话 && bridge 有历史」就注入。/new（freshSession）
+    // 时 bridge 已清空 context，天然不会误注，空白语义不变。
+    const isNewSession = !session || params.freshSession || sessionInterrupted;
     if (!session || params.freshSession || sessionInterrupted) {
       if (session && sessionInterrupted) {
         this.interruptedSessionIds.delete(session.sessionId);
@@ -331,14 +340,12 @@ export class ReasonixProvider implements RuntimeProvider {
       fullPrompt = `${params.systemPrompt || ''}\n\n${params.text}`;
       session.personaInjected = true;
     }
-    // [2026-09-02 修复] 中断插队保留历史：仅 sessionInterrupted 注入 bridge 存的 session.context；
-    // /new（freshSession）清空白语义不注入；正常轮次靠 harness session 自带历史不注入。
-    const historyText = sessionInterrupted && params.history && params.history.length > 0
+    const historyText = isNewSession && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
       : '';
     if (historyText) {
       fullPrompt = `${historyText}\n\n---\n\n${fullPrompt}`;
-      rtLog(`[reasonix] interrupted: injected ${params.history?.length ?? 0} history turns into new session`);
+      rtLog(`[reasonix] new session: injected ${params.history?.length ?? 0} history turns`);
     }
 
     const child = this.child!;

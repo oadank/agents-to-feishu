@@ -83,6 +83,16 @@ function stripVoiceBlock(text: string): string {
   return text.replace(/【语音】[\s\S]*?(?=\n*【|$)/, '').trim();
 }
 
+/** [2026-09-17] 按文件魔数判断图片扩展名（send_image 对象池取出的原图字节没有后缀）。不支持返回 null */
+function sniffImageExt(buf: Buffer): string | null {
+  if (buf.length < 12) return null;
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return '.png';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg';
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return '.gif';
+  if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return '.webp';
+  return null;
+}
+
 /** 从 ~/.dsh/<bot>/stats/YYYY-MM-DD.jsonl 读缓存命中率与上下文用量。
  *  传入 sessionId 时只统计该对话的累计（按当前对话算），否则全量统计（按天）。 */
 function readCacheStats(contextLimitTokens: number, sessionId?: string): { lastRate: number; avgRate: number; contextPercent: number; contextUsed: number; contextLimit: number } | null {
@@ -550,6 +560,7 @@ export class MessageEngine {
     const layers: TurnLayers = { text: '', thinking: '', toolLines: [] };
     let voiceText = ''; // agent 专门写的【语音】口语块；空=本回复无语音
     const pendingVoiceIds: string[] = []; // [2026-09-01] send_voice 工具产物（voiceId=sha256），本轮结束后投递到飞书
+    const pendingImageIds: string[] = []; // [2026-09-17] send_image 工具产物（attachmentId=sha256），本轮结束后投递到飞书
     let deeptutorSpoken = ''; // [2026-09-03] deeptutor 语音口语稿（voice_reply 事件携带），结束走控制中心 TTS
     const pendingMedia: Array<{ url: string; mime_type: string; filename: string }> = []; // [2026-09-03] deeptutor 图片/视频/文件兜底投递
     let hadError = false;
@@ -673,7 +684,11 @@ export class MessageEngine {
         freshSession: fresh,
         systemPrompt: this.buildSystemPrompt(),
         workdir: session.workdir,
-        ...((fresh || interrupted) && session.context.length > 0 ? { history: [...session.context] } : {}),
+        // [2026-09-17] 恒传 history：provider 内存会话可能因空闲回收（默认 30min）/进程
+        // 重启丢失，新建会话时靠这份落盘 context 续上下文。provider 侧仅在「本轮新建
+        // 会话」时注入（正常轮次 harness 自带历史，注入会双份）；/new 时 context 已清空
+        // → 天然空白。此前仅 fresh||interrupted 时传，空闲回收路径漏传 = 跨消息失忆根因。
+        ...(session.context.length > 0 ? { history: [...session.context] } : {}),
       })) {
         switch (ev.type) {
           case 'text':
@@ -704,6 +719,18 @@ export class MessageEngine {
               if (vm) {
                 pendingVoiceIds.push(vm[1]);
                 console.log(`[engine] send_voice 捕获 voiceId=${vm[1].slice(0, 26)}… 待投递`);
+              }
+              // [2026-09-17] send_image 结果捕获（同 voiceId 机制）：工具结果文本形如
+              // 「图片已发送（attachmentId: sha256:<64hex>，1024×1024）」。此前只认 voiceId，
+              // dsh 等 ACP bot 用 send_image 发的图会被静默丢弃（用户端"图没发过来"的根因）。
+              // [2026-09-18 容错] 原来死抠「attachmentId: sha256:…」这一种写法，提示串格式一变
+              // （括号/空格/换行）就静默丢图。这里加兜底：只要这条工具是 send_image，
+              // 输出里出现 sha256 附件号就认（语音在前、图片在后，voiceId 已被上面先吃掉）。
+              const im = ev.output.match(/attachmentId:?\s*(sha256:[0-9a-f]{64})/)
+                ?? (/send_image/i.test(ev.tool) ? ev.output.match(/(sha256:[0-9a-f]{64})/) : null);
+              if (im) {
+                pendingImageIds.push(im[1]);
+                console.log(`[engine] send_image 捕获 attachmentId=${im[1].slice(0, 26)}… 待投递`);
               }
             }
             if (!this.opts.showToolCallCards) break;
@@ -860,6 +887,15 @@ export class MessageEngine {
           console.warn(`[engine] send_voice 投递失败 voiceId=${vid.slice(0, 26)}…: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
+      // [2026-09-17] send_image 工具产物投递：attachmentId(sha256:<64hex>) → 内容寻址对象
+      // （DSH_HOME/attachments/v1/objects/<前2位>/<hash>）→ 按魔数定扩展名 → 上传 → 飞书图片消息。
+      for (const iid of pendingImageIds) {
+        try {
+          await this.sendImageObjectById(chatId, iid);
+        } catch (e) {
+          console.warn(`[engine] send_image 投递失败 attachmentId=${iid.slice(0, 26)}…: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
       // [2026-09-03] deeptutor 语音投递：口语稿 → 控制中心 TTS（sendVoiceReply）→ opus → 飞书。
       // 音色随控制中心语音配置全局变；失败只记日志不阻塞（文字回复已发出）。
       if (deeptutorSpoken) {
@@ -995,6 +1031,43 @@ export class MessageEngine {
       const fileKey = await this.opts.feishu.uploadFile(tmpFile, 'opus');
       await this.opts.feishu.sendAudio(chatId, fileKey);
       console.log(`[engine] send_voice 语音已投递 chat=${chatId} voiceId=${hash.slice(0, 16)}… opus=${opus.length}B`);
+    } finally {
+      try { fs.unlinkSync(tmpFile); } catch { /* 忽略 */ }
+    }
+  }
+
+  /**
+   * [2026-09-17] send_image 工具产物投递：attachmentId(sha256:<64hex>) → 内容寻址对象
+   * （DSH_HOME/attachments/v1/objects/<前2位>/<hash>）→ 上传 → 飞书图片消息。
+   * 与 sendVoiceObjectById 对称；对象落盘时是原图字节，按魔数补扩展名即可直接上传。
+   */
+  async sendImageObjectById(chatId: string, attachmentId: string): Promise<void> {
+    const hash = attachmentId.replace(/^sha256:/, '');
+    if (!/^[0-9a-f]{64}$/.test(hash)) {
+      console.warn(`[engine] send_image 投递跳过: attachmentId 格式不对 "${attachmentId.slice(0, 26)}…"`);
+      return;
+    }
+    const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
+    const objFile = path.join(home, 'attachments', 'v1', 'objects', hash.slice(0, 2), hash);
+    let data: Buffer;
+    try {
+      data = fs.readFileSync(objFile);
+    } catch {
+      console.warn(`[engine] send_image 投递跳过: 图片对象不存在 ${objFile}`);
+      return;
+    }
+    const ext = sniffImageExt(data);
+    if (!ext) {
+      console.warn(`[engine] send_image 投递跳过: 无法识别的图片格式 hash=${hash.slice(0, 16)}…`);
+      return;
+    }
+    const tmpDir = path.join(os.tmpdir(), 'agents-to-feishu-img');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = path.join(tmpDir, `sendimg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
+    fs.writeFileSync(tmpFile, data);
+    try {
+      const ok = await this.sendImageFile(chatId, tmpFile);
+      console.log(`[engine] send_image 图片已投递 chat=${chatId} hash=${hash.slice(0, 16)}… bytes=${data.length} ok=${ok}`);
     } finally {
       try { fs.unlinkSync(tmpFile); } catch { /* 忽略 */ }
     }

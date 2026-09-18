@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
-import { buildWindowsPath } from './win-spawn-env.js';
+import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
 
 // MCP 穿透（2026-09-10）：配置中心勾选的 MCP 池（render.ts 下发 CTI_BOT_<ID>_MCP_SERVERS JSON）
 // 映射为 ACP session/new 的 mcpServers。stdio → name/command/args/env；http 类 → name/url。
@@ -46,7 +46,7 @@ function rtLog(msg: string): void {
 /** 解析 openakita ACP 启动命令 */
 function resolveOpenAkitaCommand(): { command: string; args: string[]; cwd: string } {
   const python = process.env.CTI_OPENAKITA_PYTHON
-    || 'C:\\D\\opt\\openakita\\venv\\Scripts\\python.exe';
+    || 'C:\\D\\opt\\openakita\\.venv\\Scripts\\python.exe';
   const server = process.env.CTI_OPENAKITA_SERVER
     || path.join(process.cwd(), 'scripts', 'openakita-acp-server.py');
   const workspace = process.env.CTI_OPENAKITA_WORKSPACE
@@ -65,14 +65,14 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
     clean[key] = value;
   }
   if (process.platform !== 'win32') return { ...clean };
-  const parentPath = (clean.PATH || '').split(';').filter(Boolean);
+  const parentPath = (getEnvPath(clean) || '').split(';').filter(Boolean);
   const workspace = process.env.CTI_OPENAKITA_WORKSPACE
     || path.join(os.homedir(), '.openakita', 'workspaces', 'default');
   return {
     ...clean,
     ComSpec: clean.ComSpec || 'C:\\WINDOWS\\system32\\cmd.exe',
     SystemRoot: clean.SystemRoot || 'C:\\WINDOWS',
-    PATH: buildWindowsPath(clean.PATH),
+    PATH: buildWindowsPath(getEnvPath(clean)),
     OPENAKITA_ACP_WORKSPACE: workspace,
     LLM_ENDPOINTS_CONFIG: path.join(workspace, 'data', 'llm_endpoints.json'),
     OPENAKITA_AUTO_CONFIRM: '1',
@@ -324,6 +324,10 @@ export class OpenAkitaProvider implements RuntimeProvider {
     }
 
     const sessionInterrupted = session ? this.interruptedSessionIds.has(session.sessionId) : false;
+    // [2026-09-17] 跨消息失忆修复（对齐 reasonix）：history 此前仅 sessionInterrupted 注入，
+    // 而 session 可能因空闲回收/进程重启/LRU 被清——这些路径新建会话却不带历史 ⇒ 失忆。
+    // 现统一为「本轮新建了会话 && bridge 有历史」就注入。/new 时 context 已清空天然空白。
+    const isNewSession = !session || params.freshSession || sessionInterrupted;
     if (!session || params.freshSession || sessionInterrupted) {
       if (session && sessionInterrupted) {
         this.interruptedSessionIds.delete(session.sessionId);
@@ -349,14 +353,13 @@ export class OpenAkitaProvider implements RuntimeProvider {
       fullPrompt = `${params.systemPrompt || ''}\n\n${params.text}`;
       session.personaInjected = true;
     }
-    // [2026-09-02 修复] 中断插队保留历史：仅 sessionInterrupted 注入 bridge 存的 session.context；
-    // /new（freshSession）清空白语义不注入；正常轮次靠 harness session 自带历史不注入。
-    const historyText = sessionInterrupted && params.history && params.history.length > 0
+    // [2026-09-17] history 注入条件改为 isNewSession（见上方注释）。
+    const historyText = isNewSession && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
       : '';
     if (historyText) {
       fullPrompt = `${historyText}\n\n---\n\n${fullPrompt}`;
-      rtLog(`[openakita] interrupted: injected ${params.history?.length ?? 0} history turns into new session`);
+      rtLog(`[openakita] new session: injected ${params.history?.length ?? 0} history turns`);
     }
 
     const child = this.child!;

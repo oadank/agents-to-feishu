@@ -122,6 +122,10 @@ export class HermesProvider implements RuntimeProvider {
       if (oldestKey) this.sessions.delete(oldestKey);
     }
 
+    // [2026-09-17] 仅本轮新建会话时才注入 history——engine 现恒传 history，
+    // 若无此门控，正常轮次会把 bridge context 重复拼进已有会话（app-server 自带历史）。
+    // 须在建会话前取值：建完 session 后 !session 恒 false，门控会失效。
+    const injectHistory = !session || params.freshSession;
     if (!session || params.freshSession) {
       try {
         // 2026-08-30 修复：session/new 也挂起过（app-server 无响应）——120s 超时护栏
@@ -148,8 +152,8 @@ export class HermesProvider implements RuntimeProvider {
     session.lastUsed = Date.now();
     rtLog(`[hermes] session ${params.freshSession ? 'CREATED' : 'REUSED'} ${sessionId.slice(0, 8)} key=${sessionKey.slice(0, 8)}`);
 
-    // 人设：仅新会话首条消息注入；history（/compact 摘要）优先注入以保上下文。
-    const historyText = params.history && params.history.length > 0
+    // 人设：仅新会话首条消息注入；[2026-09-17] history 仅新建会话时注入（engine 恒传，靠 injectHistory 门控）。
+    const historyText = injectHistory && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
       : '';
     const promptParts: string[] = [];

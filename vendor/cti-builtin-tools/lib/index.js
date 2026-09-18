@@ -1805,11 +1805,15 @@ async function apply(ctx) {
             width: { type: 'number' },
             height: { type: 'number' },
             error: { type: 'string' },
+            warning: { type: 'string' },
           },
         },
         render(_args, value) {
           if (value.ok) {
-            return [{ type: 'text', text: `图片已发送（attachmentId: ${value.attachmentId}，${value.width}×${value.height}）` }]
+            // [2026-09-18] 提示串必须始终带 attachmentId：桥接层靠它把图片投递到飞书，
+            // 少一个字段 = 图静默丢失。warning 只作附加说明，不改变主语义。
+            const warn = value.warning ? `（注意：${value.warning}）` : ''
+            return [{ type: 'text', text: `图片已发送（attachmentId: ${value.attachmentId}，${value.width}×${value.height}）${warn}` }]
           }
           return [{ type: 'text', text: `图片发送失败：${value.error ?? '未知错误'}` }]
         },
@@ -1832,28 +1836,36 @@ async function apply(ctx) {
               .filter((event) => event.type === 'turn/start')
               .at(-1)?.data.turn ?? 0
           } catch { /* rc.7 结构差异：忽略 */ }
+          // [2026-09-18 根治「图存了但发不出去」]
+          // 原来 append('image/reply') 一失败就 return ok:false —— 但桥接层（agents-to-feishu
+          // engine.ts）投递图片【只看工具返回文本里的 attachmentId】，跟这个事件无关。
+          // 于是 append 抛错 = 桥接拿不到编号 = 图已落盘却永远到不了用户手里，
+          // 现象就是"它说发了、用户什么都没收到"。改为：append 只当渲染提示，
+          // 失败降级成 warning，attachmentId 照常返回，投递链路不再被它掐断。
+          let appendWarning = ''
           try {
             if (typeof session.append !== 'function') {
-              return { ok: false, error: 'host 不支持 session.append（需 rc.8+）' }
+              appendWarning = 'host 不支持 session.append，图片仍已发送'
+            } else {
+              session.append('image/reply', {
+                turn,
+                attachmentId: attachment.attachmentId,
+                mediaType: attachment.mediaType,
+                bytes: attachment.bytes,
+                width: attachment.width,
+                height: attachment.height,
+                ...(alt === undefined || alt === '' ? {} : { alt }),
+              })
             }
-            session.append('image/reply', {
-              turn,
-              attachmentId: attachment.attachmentId,
-              mediaType: attachment.mediaType,
-              bytes: attachment.bytes,
-              width: attachment.width,
-              height: attachment.height,
-              ...(alt === undefined || alt === '' ? {} : { alt }),
-            })
           } catch (err) {
-            // 不再静默吞掉：append 失败必须如实上报，否则工具假成功会掩盖真实错误
-            return { ok: false, error: `append image/reply 失败: ${err instanceof Error ? err.message : String(err)}` }
+            appendWarning = `会话事件登记失败（不影响发送）: ${err instanceof Error ? err.message : String(err)}`
           }
           return {
             ok: true,
             attachmentId: attachment.attachmentId,
             width: attachment.width,
             height: attachment.height,
+            ...(appendWarning === '' ? {} : { warning: appendWarning }),
           }
         } catch (error) {
           return { ok: false, error: error instanceof Error ? error.message : 'unknown error' }

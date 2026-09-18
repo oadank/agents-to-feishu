@@ -312,6 +312,12 @@ export class CodexAppServerClient {
       '-c', 'require_confirmation=false',
       '-c', 'approval_policy=never',
       '-c', 'sandbox_mode=danger-full-access',
+      // [2026-09-17 闸门接入] app-server 模式**不读** hooks.json 里的 PreToolUse
+      // （实测：同一份 hooks.json 下 `codex exec` 能触发、`codex app-server` 不能，
+      //  即便 --dangerously-bypass-hook-trust 已带；但 SessionStart 在两种模式下都能跑）。
+      // 解法：用 -c 内联把 hooks 配置传给 app-server —— 实测可触发 PreToolUse。
+      // 闸门脚本：C:\D\opt\api-gate\gate.mjs（命中 GitHub/飞书外部操作且本会话未查规范 → exit 2 deny）。
+      '-c', String.raw`hooks.PreToolUse=[{hooks=[{type="command",command="node C:\\D\\opt\\api-gate\\gate.mjs"}]}]`,
       ...providerArgs,
     ], {
       stdio: ['pipe', 'pipe', 'pipe'],

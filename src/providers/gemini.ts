@@ -177,6 +177,10 @@ export class GeminiProvider implements RuntimeProvider {
       if (oldestKey) this.sessions.delete(oldestKey);
     }
 
+    // [2026-09-17] 仅本轮新建会话时才注入 history——engine 现恒传 history，
+    // 若无此门控，正常轮次会把 bridge context 重复拼进已有会话（app-server 自带历史）。
+    // 须在建会话前取值：建完 session 后 !session 恒 false，门控会失效。
+    const injectHistory = !session || params.freshSession;
     if (!session || params.freshSession) {
       try {
         // 2026-08-30：session/new 加 120s 超时护栏（与 hermes 同款，防 app-server 挂起卡队列）
@@ -341,9 +345,8 @@ export class GeminiProvider implements RuntimeProvider {
     });
 
     // 人设 + 上下文拼接：[2026-09-05] 新会话首条注入 systemPrompt；
-    // 中断（sessionKey 首次出现时为 null，无法区分）仅靠 app-server 会话，故正常轮次不注入 history；
-    // 但若 bridge 显式传了 history（/compact 摘要或中断保留），优先注入以保上下文。
-    const historyText = params.history && params.history.length > 0
+    // [2026-09-17] history 仅新建会话时注入（engine 恒传，靠 injectHistory 门控防重复拼接）。
+    const historyText = injectHistory && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
       : '';
     const promptParts: string[] = [];

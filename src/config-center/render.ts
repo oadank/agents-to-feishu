@@ -637,15 +637,18 @@ function setYamlValue(yaml: string, dotted: string, newValue: string): string {
  */
 function ensureCodexProvider(toml: string, provName: string, baseUrl: string, keyEnv: string): string {
   const section = `model_providers.${provName}`;
+  // codex 0.154+ 硬移除 wire_api=chat（仅剩 responses）。QW3.8F 经 LiteLLM 的
+  // responses 透传会 400（developer role content type）——codex 不能用 QW3.8F，
+  // 必须挂 responses 兼容模型（codex-model / GwV4F 等）。
+  const wire = 'responses';
   const secRe = new RegExp(`^\\s*\\[${section.replace(/[.]/g, '\\.')}\\]\\s*$`, 'm');
   if (!secRe.test(toml)) {
-    // 追加新段：name / base_url / env_key / wire_api=responses
     return toml.replace(/\s*$/, '\n')
-      + `\n[${section}]\nname = "${provName}"\nbase_url = "${baseUrl}"\nenv_key = "${keyEnv}"\nwire_api = "responses"\n`;
+      + `\n[${section}]\nname = "${provName}"\nbase_url = "${baseUrl}"\nenv_key = "${keyEnv}"\nwire_api = "${wire}"\n`;
   }
   let t = setTomlValue(toml, 'base_url', baseUrl, section);
   t = setTomlValue(t, 'env_key', keyEnv, section);
-  t = setTomlValue(t, 'wire_api', 'responses', section);
+  t = setTomlValue(t, 'wire_api', wire, section);
   return t;
 }
 
@@ -848,6 +851,14 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
           : modelId === 'deepseek-v4-flash' ? (prov.id === 'gw' ? 'litellm/GwV4F' : 'litellm/ArkV4F')
           : `litellm/${modelId}`;
         t = setTomlValue(t, 'default_model', reasonixModel);
+        // litellm 段 models 列表必须含当前模型，否则 session/new 报 unknown model
+        // （2026-09-16：QW3.8F 切换后 reasonix 因未注册模型全挂）
+        const bare = reasonixModel.replace(/^litellm\//, '');
+        const modelsRe = /(name\s*=\s*"litellm"[\s\S]*?models\s*=\s*\[)([^\]]+)(\])/;
+        const mm = t.match(modelsRe);
+        if (mm && !mm[2].includes(bare)) {
+          t = t.replace(modelsRe, `$1${mm[2]}, "${bare}"$3`);
+        }
         fs.writeFileSync(f, t, 'utf-8');
         break;
       }

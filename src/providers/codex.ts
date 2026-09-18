@@ -150,6 +150,29 @@ export class CodexProvider implements RuntimeProvider {
           }
           break;
         }
+        // [2026-09-17 修复 codex 0.154 协议适配] 工具调用改走 item/started + item/completed：
+        // item.type=commandExecution（键含 command/cwd/status/aggregatedOutput）。
+        // 旧代码只认 item/toolCall/outputDelta（4 个变体），0.154 已不再发 → 工具块从卡片消失。
+        // 注意：item/commandExecution/outputDelta 是「输出增量」且不带 item，不能当工具事件用（会刷屏）。
+        case 'item/started':
+        case 'item/completed': {
+          const item = itemParams.item as JsonRecord | undefined;
+          if (!item) break;
+          const itype = String(item.type ?? '');
+          if (!/commandExecution|mcpToolCall|toolCall|exec/i.test(itype)) break;
+          const statusStr = String(item.status ?? '');
+          const failed = /failed|error/i.test(statusStr);
+          const done = message.method === 'item/completed' || /completed|success/i.test(statusStr);
+          const cmd = String(item.command ?? '');
+          queue.push({
+            type: 'tool',
+            tool: cmd ? cmd.slice(0, 60) : (String(item.name ?? itype) || 'tool'),
+            status: failed ? 'error' : done ? 'done' : 'running',
+            input: (cmd || JSON.stringify(item.arguments ?? '')).slice(0, 220),
+          });
+          poke();
+          break;
+        }
         case 'item/toolCall/outputDelta':
         case 'item/tool_call/output_delta':
         case 'item/toolCall/output_delta':

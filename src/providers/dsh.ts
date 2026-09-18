@@ -15,7 +15,9 @@
  * 协议要点（本地踩坑沉淀，重写保留）：
  * - spawn `node --import tsx/esm packages/examples/acp-demo/src/bin.ts --config <cordis.yml>`
  * - 必须剥离宿主 DSH_* 环境变量（否则 ACP 会挂到宿主会话存储，SQLite 锁冲突无声卡死）
- * - session/new 必填 mcpServers: []（不接受非空）
+ * - session/new 的 mcpServers 支持 stdio/http 两种形态（packages/acp/acp/src/mcp.ts），
+ *   配置中心勾的 MCP 由此下发；旧注释「必填 mcpServers: []、不接受非空」是旧 acp-demo
+ *   入口时代的结论，2026-09-17 已作废
  * - danger-full-access 下 approval=never，不触发 request_permission
  * - DSH 只推提交式输出（agent_message_chunk），无思考流
  * - usage 从 _meta.usage 透传，换算成 prompt/cache_hit/cache_miss 口径落盘
@@ -27,7 +29,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
 import { ensureDshPluginInjected } from '../tools/dsh-inject.js';
-import { buildWindowsPath } from './win-spawn-env.js';
+import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
 
 // ── 工具函数 ──
 
@@ -133,6 +135,26 @@ function checkAcpModelSelection(provider: string, model: string): string | null 
   return null;
 }
 
+/**
+ * 桥接自有插件在磁盘上的绝对入口（<DSH_HOME>/<bot>-bot/node_modules/<pkg>/lib/index.js）。
+ * 为什么不能写裸包名：`--profile acp` 的 ESM 解析锚点是 profile 目录，而插件是部署到
+ * `<bot>-bot/node_modules` 的（dsh-inject.ts 的部署约定），两者不互为祖先目录。
+ * @param pkg - 包名，如 'cti-builtin-tools'。
+ * @returns 绝对入口路径；文件不存在时返回 null（调用方保持原样，交由 Loader 报错）。
+ */
+function localPluginEntry(pkg: string): string | null {
+  try {
+    const acpConfig = process.env.CTI_DSH_ACP_CONFIG || '';
+    const m = acpConfig.match(/\\(\w+)-bot\\cordis\.yml$/i) || acpConfig.match(/\/(\w+)-bot\/cordis\.yml$/i);
+    const botDir = m?.[1] ? `${m[1]}-bot` : 'dsh-bot';
+    const home = process.env.DSH_HOME || path.join(process.env.CTI_USER_HOME || os.homedir(), '.dsh');
+    const entry = path.join(home, botDir, 'node_modules', pkg, 'lib', 'index.js');
+    return fs.existsSync(entry) ? entry : null;
+  } catch {
+    return null;
+  }
+}
+
 function ensureAcpPatch(cordisPath: string, log?: (m: string) => void): { patchPath: string; err: string | null } | null {
   try {
     if (!fs.existsSync(cordisPath)) return null;
@@ -164,13 +186,40 @@ function ensureAcpPatch(cordisPath: string, log?: (m: string) => void): { patchP
     out += '- id: acp\n  config:\n';
     out += `    provider: ${provider ?? 'deepseek-official'}\n    model: ${model ?? 'deepseek-v4-flash'}\n`;
 
-    // base 里没有这些插件，patch 里追加即可（同名 id 会覆盖，幂等）
-    const keep = new Set(['@deepseek-ai/dsh-mcp-client', 'cti-builtin-tools', '@deepseek-ai/dsh-skill-filesystem']);
+    // [根治 2026-09-17 · dsh bot 手上没有 openmem / 桥接内置工具]
+    // patch 语义（packages/boot/app-boot/src/index.ts 的 parsePatchList + cordis include）：
+    //   顶层条目 = 【改一个已存在的行】（id 定向覆盖）；目标 id 不存在时只留一条 Loader
+    //   警告然后【静默丢弃】。要【新增】行必须放进 `- insert:` 列表。
+    // 旧代码把 cti-builtin-tools / mcp-* 平铺在顶层，而这两个 id 在引擎树里都不存在
+    // （acp profile = dsh-base + dsh-acp-app），于是被整批丢掉：dsh bot 因此既没有
+    // openmem 工具，也没有桥接自带的 look_image / send_voice / send_image。
+    // 引擎树里已存在的 id（只能当覆盖用）：acp（dsh-acp-app）、skill-filesystem（dsh-base）。
+    // MCP client 实例【不再由 patch 承载】—— 改走 ACP session/new 的 mcpServers
+    // （createSession），否则同一 serverName 会在全局与 Agent 两处各挂一次、工具重名。
+    const overridable = new Set(['skill-filesystem']);
+    const inserts: string[] = [];
     let kept = 0;
     for (const s of segs) {
-      if (!keep.has(segName(s))) continue;
-      out += '\n' + s.text.replace(/\s+$/, '') + '\n';
+      const plugin = segName(s);
+      if (plugin === '@deepseek-ai/dsh-mcp-client') continue; // 由 session/new 承载
+      if (plugin !== 'cti-builtin-tools' && plugin !== '@deepseek-ai/dsh-skill-filesystem') continue;
       kept++;
+      const text = s.text.replace(/\s+$/, '');
+      if (overridable.has(s.id)) out += '\n' + text + '\n';
+      else inserts.push(text);
+    }
+    if (inserts.length) {
+      // 桥接自有插件必须写绝对入口：`--profile acp` 的 ESM 解析锚点是 profile 目录
+      // （~/.dsh/profiles/acp），不是 dsh-bot/node_modules，裸名 'cti-builtin-tools' 解析不到。
+      // 绝对路径会被 Loader 的 anchorInsertedPluginNames 转成 file URL。
+      const entry = localPluginEntry('cti-builtin-tools');
+      out += '\n- insert:\n';
+      for (const text of inserts) {
+        const fixed = entry
+          ? text.replace(/^(\s*name:\s*)'?cti-builtin-tools'?\s*$/m, (_m, p1: string) => `${p1}'${entry}'`)
+          : text;
+        out += fixed.split('\n').map((l) => '    ' + l).join('\n') + '\n';
+      }
     }
 
     const patchPath = path.join(path.dirname(cordisPath), 'acp.patch.yml');
@@ -209,13 +258,13 @@ function buildSpawnEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     clean[key] = value;
   }
   if (process.platform !== 'win32') return { ...clean, ...extra };
-  const parentPath = (clean.PATH || '').split(';').filter(Boolean);
+  const parentPath = (getEnvPath(clean) || '').split(';').filter(Boolean);
   return {
     ...clean,
     ...extra,
     ComSpec: clean.ComSpec || 'C:\\WINDOWS\\system32\\cmd.exe',
     SystemRoot: clean.SystemRoot || 'C:\\WINDOWS',
-    PATH: buildWindowsPath(clean.PATH),
+    PATH: buildWindowsPath(getEnvPath(clean)),
   };
 }
 
@@ -583,30 +632,94 @@ export class DshProvider implements RuntimeProvider {
     });
   }
 
+  /**
+   * 配置中心勾选的 MCP 池 → ACP `session/new` 的 mcpServers（形态见引擎
+   * packages/acp/acp/src/mcp.ts：stdio = {name,command,args,env[{name,value}]}，
+   * http = {name,type:'http',url,headers[]}）。
+   *
+   * name 用配置 id（openmem / win-desktop-helper）而不是 displayName：ACP 会把不合规的
+   * 名字 slug 化加哈希尾巴，工具名就不再是 `mcp__openmem__mh_tool` 了。
+   * @returns ACP 形态的 MCP 声明；没勾选/JSON 坏了返回空数组（照常建会话）。
+   */
+  private acpMcpServers(): Array<Record<string, unknown>> {
+    const botId = (process.env.CTI_BOT || 'dsh').toUpperCase();
+    const raw = process.env[`CTI_BOT_${botId}_MCP_SERVERS`] || '';
+    if (!raw.trim()) return [];
+    let defs: Array<{ id: string; transport?: string; url?: string; command?: string; args?: string[]; env?: Record<string, string> }>;
+    try {
+      defs = JSON.parse(raw);
+    } catch {
+      rtLog('[dsh] CTI_BOT_*_MCP_SERVERS JSON 解析失败，本次会话不挂 MCP');
+      return [];
+    }
+    const out: Array<Record<string, unknown>> = [];
+    for (const d of defs) {
+      if (!d?.id) continue;
+      if (d.transport === 'stdio' && d.command) {
+        out.push({
+          name: d.id,
+          command: d.command,
+          args: d.args || [],
+          env: Object.entries(d.env || {}).map(([name, value]) => ({ name, value })),
+        });
+      } else if (d.url) {
+        out.push({ name: d.id, type: 'http', url: d.url, headers: [] });
+      }
+    }
+    rtLog(`[dsh] session/new 将挂 MCP ${out.length} 个: ${out.map((m) => String(m.name)).join(', ') || '(无)'}`);
+    return out;
+  }
+
   /** 在现有进程里开一个新 ACP session */
   private async createSession(cwd: string): Promise<AcpSession> {
     const child = await this.ensureProcess();
-    const sessionNewId = this.nextId++;
-
-    this.sendRequest(child, {
-      jsonrpc: '2.0', id: sessionNewId, method: 'session/new',
-      params: { cwd, mcpServers: [] },
-    });
+    // [根治 2026-09-17] MCP 由 session/new 下发（旧代码写死 []，且 patch 那条路是坏的 ⇒
+    // bot 手上没有 openmem / 桌面助手 / 桥接内置工具）。ACP 侧强制 failOnStartupError=true，
+    // 所以某个 MCP 起不来会让建会话失败 —— 这里退回「不挂 MCP」重试一次，宁可本次会话少工具，
+    // 也不能让 bot 连会话都建不出来（并在 rt 日志里留响亮的证据）。
+    const mcpServers = this.acpMcpServers();
 
     let msg: any;
-    try {
-      msg = await this.waitResponse(sessionNewId, 60_000);
-    } catch (e) {
+    // [2026-09-18 根治「一个 MCP 起不来，全批陪葬」] 旧逻辑是失败即退回「一个 MCP 都不挂」，
+    // 于是某个无关 MCP 起不来 ⇒ openmem / 飞书工具整批消失（只留一行日志），
+    // 现象就是 bot「不会用记忆、不会发图」。改为从尾部逐个剔除可疑项重试：
+    // 配置里越靠后的越先被扔（把 openmem 这类命根子排前面），最后才退到「一个都不挂」。
+    let activeMcp = mcpServers.slice();
+    for (let attempt = 0; ; attempt++) {
+      const sessionNewId = this.nextId++;
+      this.sendRequest(child, {
+        jsonrpc: '2.0', id: sessionNewId, method: 'session/new',
+        params: { cwd, mcpServers: activeMcp },
+      });
+
+      let failure: string | null = null;
+      try {
+        msg = await this.waitResponse(sessionNewId, 60_000);
+        if (!msg?.result) failure = msg?.error?.message ? String(msg.error.message) : 'no result';
+      } catch (e) {
+        failure = e instanceof Error ? e.message : String(e);
+      }
+      if (!failure) {
+        if (attempt > 0) {
+          rtLog(`[dsh] session/new 最终以 ${activeMcp.length}/${mcpServers.length} 个 MCP 建成功（剔除了起不来的，见上方日志）`);
+        }
+        break;
+      }
+      if (activeMcp.length > 0) {
+        const dropped = activeMcp[activeMcp.length - 1] as Record<string, unknown>;
+        activeMcp = activeMcp.slice(0, -1);
+        rtLog(`[dsh] session/new 失败（${failure}）→ 剔除 MCP "${String(dropped.name)}" 重试，剩余 ${activeMcp.length} 个`);
+        continue;
+      }
       // [根治 A②③] 会话创建超时/失败 = 该进程已进入不可信状态：配置树装配缺行时
       // harness 侧是永久悬空 await（既不报错也不退出），而旧代码只把错误 yield 出去，
       // 下一条消息还在同一个僵尸进程上重试 → 再挂 60 秒，永远好不了（今早「重启也没用」
       // 之后其实就是这个循环）。现在：留痕 + 销毁进程 + 清 spawnPromise，下条消息全新
       // spawn；若配置仍不合法，会在 spawn 阶段被 A① 校验拦成一句人话错误。
-      const why = e instanceof Error ? e.message : String(e);
-      rtLog(`[dsh] session/new FAILED (${why}) → 销毁 ACP 进程并清空 spawnPromise，下条消息重建`);
+      rtLog(`[dsh] session/new FAILED (${failure}) → 销毁 ACP 进程并清空 spawnPromise，下条消息重建`);
       this.killProcess();
       this.spawnPromise = null;
-      throw new Error(`DSH 会话创建失败（${why}）：已销毁可疑进程，下一条消息会自动重建引擎。`);
+      throw new Error(`DSH 会话创建失败（${failure}）：已销毁可疑进程，下一条消息会自动重建引擎。`);
     }
     if (!msg.result) throw new Error('DSH ACP session/new failed');
 
@@ -680,6 +793,10 @@ export class DshProvider implements RuntimeProvider {
     // /new 或首次，或该 session 刚被 interrupt 取消：开新 ACP session（复用进程，不杀）
     // （interrupt 后旧 turn 未释放，复用同一 sessionId 会 turn/start 冲突，必须新建）
     const sessionInterrupted = session ? this.interruptedSessionIds.has(session.sessionId) : false;
+    // [2026-09-17] 跨消息失忆修复（对齐 reasonix）：history 此前仅 sessionInterrupted 注入，
+    // 而 session 可能因空闲回收/进程重启/LRU 被清——这些路径新建会话却不带历史 ⇒ 失忆。
+    // 现统一为「本轮新建了会话 && bridge 有历史」就注入。/new 时 context 已清空天然空白。
+    const isNewSession = !session || params.freshSession || sessionInterrupted;
     if (!session || params.freshSession || sessionInterrupted) {
       if (session && sessionInterrupted) {
         this.interruptedSessionIds.delete(session.sessionId);
@@ -706,15 +823,13 @@ export class DshProvider implements RuntimeProvider {
       fullPrompt = `${params.systemPrompt || ''}\n\n${params.text}`;
       session.personaInjected = true;
     }
-    // [2026-09-02 修复] 中断插队保留历史：cancel 后旧 turn 未释放必须重建 ACP session，
-    // 但把 bridge 存的 session.context 拼进首条 prompt。仅 sessionInterrupted 注入；
-    // /new（freshSession）清空白语义不注入；正常轮次靠 harness session 自带历史不注入。
-    const historyText = sessionInterrupted && params.history && params.history.length > 0
+    // [2026-09-17] history 注入条件改为 isNewSession（见上方注释）。
+    const historyText = isNewSession && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
       : '';
     if (historyText) {
       fullPrompt = `${historyText}\n\n---\n\n${fullPrompt}`;
-      rtLog(`[dsh] interrupted: injected ${params.history?.length ?? 0} history turns into new session`);
+      rtLog(`[dsh] new session: injected ${params.history?.length ?? 0} history turns`);
     }
 
     const child = this.child!;
