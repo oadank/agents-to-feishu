@@ -601,6 +601,8 @@ export class MessageEngine {
     const pendingVoiceIds: string[] = []; // [2026-09-01] send_voice 工具产物（voiceId=sha256），本轮结束后投递到飞书
     const pendingImageIds: string[] = []; // [2026-09-17] send_image 工具产物（attachmentId=sha256），本轮结束后投递到飞书
     const pendingGenFiles: string[] = []; // [2026-09-18 老大令] generate_image 本地成品——成功即必须自动发飞书
+    const genTurnStartMs = Date.now(); // 本轮开始时间，用于生图文件 mtime 兜底
+    let sawGenTool = false; // 本轮是否出现过 generate_image 工具
     let deeptutorSpoken = ''; // [2026-09-03] deeptutor 语音口语稿（voice_reply 事件携带），结束走控制中心 TTS
     const pendingMedia: Array<{ url: string; mime_type: string; filename: string }> = []; // [2026-09-03] deeptutor 图片/视频/文件兜底投递
     let hadError = false;
@@ -776,6 +778,7 @@ export class MessageEngine {
               // 不能只落盘给自己看：工具返回里凡出现 ComfyUI runs 下的图片路径/文件名，本轮结束强制投递。
               const isGen = /generate_image|__generate_image|comfy__generate/i.test(ev.tool)
                 && !/send_image/i.test(ev.tool);
+              if (isGen) sawGenTool = true;
               if (isGen && !/生图失败|工具执行失败|error/i.test(ev.output.slice(0, 200))) {
                 for (const p of this.parseGeneratedImagePaths(ev.output)) {
                   if (!pendingGenFiles.includes(p)) {
@@ -949,7 +952,7 @@ export class MessageEngine {
         }
       }
       // [2026-09-18 老大令·写死] generate_image 成品自动发飞书（不能只落盘）。
-      // 兜底：工具事件无 output 时，扫本轮正文/工具卡里的 Comfy 路径（zcode 等 provider 曾不透传 output）。
+      // 兜底链：①工具 output 路径 ②本轮正文/工具卡路径 ③本轮 mtime 新鲜的 runs 目录成品
       if (pendingGenFiles.length === 0) {
         const blob = `${layers.text}\n${layers.toolLines.join('\n')}\n${layers.thinking}`;
         for (const p of this.parseGeneratedImagePaths(blob)) {
@@ -957,6 +960,29 @@ export class MessageEngine {
             pendingGenFiles.push(p);
             console.log(`[engine] generate_image 兜底捕获(正文) ${p}`);
           }
+        }
+      }
+      if (sawGenTool && pendingGenFiles.length === 0) {
+        try {
+          const dir = COMFY_RUNS_IMG;
+          if (fs.existsSync(dir)) {
+            const fresh = fs.readdirSync(dir)
+              .filter((f) => /\.(png|jpe?g|webp|gif)$/i.test(f))
+              .map((f) => path.join(dir, f))
+              .filter((p) => {
+                try { return fs.statSync(p).mtimeMs >= genTurnStartMs - 3000; } catch { return false; }
+              })
+              .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
+              .slice(0, 3);
+            for (const p of fresh) {
+              if (!pendingGenFiles.includes(p)) {
+                pendingGenFiles.push(p);
+                console.log(`[engine] generate_image 兜底捕获(mtime) ${p}`);
+              }
+            }
+          }
+        } catch (e) {
+          console.warn(`[engine] generate_image mtime 兜底失败:`, e);
         }
       }
       for (const gp of pendingGenFiles) {
