@@ -118,6 +118,26 @@ function resolveCodexHome(): string {
 }
 
 /**
+ * codex 可执行文件解析（2026-09-18 缺口B）：
+ * PATH 上的 npm\codex.exe 曾长期停在 0.145.0 —— CAPABILITY-MATRIX 实锤该版本
+ * app-server 模式不加载 config.toml 的 mcp_servers（openmem/cti-builtin 等），
+ * 表现为飞书 bot 自报「没有 mh_* / lark_*」。npm 包与 vendor bin 可能已是新版本，
+ * 但外层 shim 未更新。优先：env 覆盖 > vendor 0.155+ 绝对路径 > PATH `codex`。
+ */
+function resolveCodexExecutable(): string {
+  const fromEnv = (process.env.CTI_CODEX_CLI_PATH || process.env.CTI_CODEX_EXECUTABLE || '').trim();
+  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+  const vendor = path.join(
+    os.homedir(),
+    'AppData', 'Roaming', 'npm', 'node_modules', '@openai', 'codex',
+    'node_modules', '@openai', 'codex-win32-x64', 'vendor',
+    'x86_64-pc-windows-msvc', 'bin', 'codex.exe',
+  );
+  if (fs.existsSync(vendor)) return vendor;
+  return 'codex';
+}
+
+/**
  * PID 文件路径，用于检测 Codex 进程是否重启
  * 保存在 CTI_HOME 目录下的 runtime 子目录
  */
@@ -187,7 +207,7 @@ export class CodexAppServerClient {
     collaborationModes: new Set<string>(),
   };
 
-  constructor(private readonly executable = 'codex') {}
+  constructor(private readonly executable: string = resolveCodexExecutable()) {}
 
   subscribe(listener: (message: CodexServerMessage) => void): () => void {
     this.listeners.add(listener);
@@ -305,6 +325,7 @@ export class CodexAppServerClient {
     const providerId = (process.env.CTI_BOT_CODEX_PROVIDER_ID || process.env.CTI_CODEX_PROVIDER_ID || '').trim();
     const providerArgs = providerId ? ['-c', `model_provider=${providerId}`] : [];
     if (providerId) console.log(`[codex] 钉死 model_provider=${providerId}（覆盖共享 config.toml）`);
+    console.log(`[codex] executable=${this.executable}`);
     const proc = spawn(this.executable, [
       '--dangerously-bypass-hook-trust',
       'app-server',
@@ -318,6 +339,11 @@ export class CodexAppServerClient {
       // 解法：用 -c 内联把 hooks 配置传给 app-server —— 实测可触发 PreToolUse。
       // 闸门脚本：C:\D\opt\api-gate\gate.mjs（命中 GitHub/飞书外部操作且本会话未查规范 → exit 2 deny）。
       '-c', String.raw`hooks.PreToolUse=[{hooks=[{type="command",command="node C:\\D\\opt\\api-gate\\gate.mjs"}]}]`,
+      // [2026-09-18 缺口B] 0.155 app-server 默认不把 config.toml mcp_servers 注入 tools 列表
+      // （飞书实测 list_mcp_resources 空、无 mcp__*/mh_*）。显式打开相关 feature。
+      '-c', 'features.mcp_2026_07_28=true',
+      '-c', 'features.non_prefixed_mcp_tool_names=true',
+      '-c', 'features.enable_mcp_apps=true',
       ...providerArgs,
     ], {
       stdio: ['pipe', 'pipe', 'pipe'],

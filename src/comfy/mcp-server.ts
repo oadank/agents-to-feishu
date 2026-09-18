@@ -73,10 +73,10 @@ export function createComfyMcpServer(): McpServer {
     'generate_image',
     {
       description:
-        '生成图片（文生图/图生图）或生视频。template 为模板名（可用 list_templates 查，默认 Z-IMAGE文生图.json），' +
+        '生成图片（文生图/图生图）或生视频。template 为模板名（可用 list_templates 查，默认 Krea2 Turbo-文生图.json），' +
         'prompt 为提示词，image 为可选 base64 图（图生图），image_name 为可选历史图名，width/height/seed/steps/cfg/denoise 可调。',
       inputSchema: {
-        template: z.string().optional().describe('模板名，如 "Z-IMAGE文生图.json"'),
+        template: z.string().optional().describe('模板名，如 "Krea2 Turbo-文生图.json"'),
         prompt: z.string().describe('正向提示词'),
         width: z.number().optional().describe('宽度'),
         height: z.number().optional().describe('高度'),

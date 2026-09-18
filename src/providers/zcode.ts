@@ -580,7 +580,12 @@ export class ZcodeProvider implements RuntimeProvider {
       this.sessions.delete(sessionKey);
     }
 
+    // [2026-09-18] zcode 客户端 0.16.5 → 3.12.x 后 schema 变严格：session/create|resume
+    // 不再接受 runtimeModel（报 Unrecognized key: "runtimeModel"，会话整个建不起来）。
+    // 故本次改为一律不下发，模型由 CLI/客户端侧决定；变量保留仅作留痕，
+    // 要恢复"配置中心穿透"需改走新版 provider runtime / requestRuntimePreferences 那套下发口。
     const runtimeModel = buildRuntimeModel();
+    rtLog(`[zcode] runtimeModel ${runtimeModel ? 'ready（本次不下发：3.12.x schema 不收）' : 'absent'}`);
     const mcpServers = buildMcpServers();
     const workspace = { workspaceKey: cwd, workspacePath: cwd };
     let sessionId = '';
@@ -593,7 +598,6 @@ export class ZcodeProvider implements RuntimeProvider {
           sessionId: savedId,
           workspace,
           mode: 'yolo',
-          ...(runtimeModel ? { runtimeModel } : {}),
           ...(mcpServers ? { mcpServers } : {}),
         }, 30000);
         sessionId = String(r?.session?.sessionId || r?.sessionId || savedId);
@@ -607,7 +611,6 @@ export class ZcodeProvider implements RuntimeProvider {
       const r = await this.request('session/create', {
         workspace,
         mode: 'yolo', // 交互会话默认 build=全审批；无头 bot 必须显式 yolo，否则一切工具调用被 "Permission request failed" 拦截
-        ...(runtimeModel ? { runtimeModel } : {}),
         ...(mcpServers ? { mcpServers } : {}),
         titleGenerationEnabled: false, // bot 会话无需自动标题，省一次 LLM 调用
       }, 60000);

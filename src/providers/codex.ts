@@ -17,6 +17,56 @@ function rtLog(msg: string): void {
 
 type JsonRecord = Record<string, unknown>;
 
+/**
+ * [绕过·非修复] 桥接直调 openmem MCP（streamable-http :3466）。
+ * codex 模型侧 mcp__openmem__* 路由 unsupported call 未修通前的兜底。
+ */
+async function callOpenmemBypass(userText: string): Promise<string> {
+  const url = process.env.CTI_OPENMEM_MCP_URL || 'http://127.0.0.1:3466/mcp';
+  const q = (userText.replace(/\s+/g, ' ').trim()).slice(0, 200) || 'openmem 接入';
+  const preferTool = /mh_tool|成品答案|偏好|服务与端口|花名册/i.test(userText) ? 'mh_tool'
+    : /mh_tools_list/i.test(userText) ? 'mh_tools_list'
+    : /mh_status/i.test(userText) ? 'mh_status'
+    : 'mh_search';
+  const args: JsonRecord = preferTool === 'mh_search'
+    ? { query: q, top_k: 3 }
+    : preferTool === 'mh_tool'
+      ? { name: /GitHub|github/i.test(userText) ? 'GitHub 访问通道' : /端口|服务/i.test(userText) ? '老大的服务与端口' : 'agent 花名册' }
+      : {};
+  const body = JSON.stringify({
+    jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: preferTool, arguments: args },
+  });
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body,
+      signal: AbortSignal.timeout(8000),
+    });
+    const text = await res.text();
+    // streamable-http 可能是 SSE：取 data: 行
+    let payload = text;
+    if (text.includes('data:')) {
+      payload = text.split(/\r?\n/).filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim()).join('\n');
+    }
+    try {
+      const j = JSON.parse(payload) as JsonRecord;
+      const result = j.result as JsonRecord | undefined;
+      const content = (result?.content as Array<{ text?: string }> | undefined) || [];
+      const joined = content.map((c) => c.text || '').join('\n').trim();
+      return (joined || payload).slice(0, 4000);
+    } catch {
+      return payload.slice(0, 4000);
+    }
+  } catch (e) {
+    return `openmem 桥接代调失败: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
 export class CodexProvider implements RuntimeProvider {
   readonly name = 'codex';
 
@@ -215,9 +265,32 @@ export class CodexProvider implements RuntimeProvider {
     const historyText = params.freshSession && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
       : '';
+    // [绕过·非修复 2026-09-18 缺口B] codex→LiteLLM→qwen 展平后模型可见 mcp__openmem__*，
+    // 但 codex router 仍报 unsupported call（回程 namespace/name 未对齐）。在修通前：
+    // 桥接代调 openmem，把结果注入本轮 prompt；人设/闸门同时写明 curl 兜底。
+    let bridgeOpenmem = '';
+    if (/mh_(search|tool|tools_list|ask|status|get|write)|openmem|统一记忆|查记忆/i.test(params.text || '')) {
+      bridgeOpenmem = await callOpenmemBypass(params.text || '');
+    }
     const promptParts: string[] = [];
-    if (params.systemPrompt) promptParts.push(params.systemPrompt);
+    if (params.systemPrompt) {
+      promptParts.push(
+        params.systemPrompt +
+        '\n\n【openmem 使用 · 这是绕过不是修复】\n' +
+        '本会话模型侧 MCP 工具可能报 unsupported call。记忆一律优先用下方桥接代调结果；' +
+        '若下方为空且你需要查 openmem，用 shell 调：' +
+        'POST http://127.0.0.1:3466/mcp body={"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mh_search","arguments":{"query":"..."}}}（Accept: application/json, text/event-stream）。\n' +
+        '协议层也可用 app-server mcpServer/tool/call(server=openmem, tool=mh_search)。'
+      );
+    }
     if (historyText) promptParts.push(historyText);
+    if (bridgeOpenmem) {
+      promptParts.push(
+        '【桥接代调 openmem · 这是绕过不是修复】\n' +
+        '下列内容由桥接直接调用 openmem MCP 得到，可直接引用，不要再假装调用 mh_*：\n' +
+        bridgeOpenmem
+      );
+    }
     promptParts.push(params.text);
     const fullPrompt = promptParts.join('\n\n---\n\n');
     try {

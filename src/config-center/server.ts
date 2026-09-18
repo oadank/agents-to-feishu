@@ -35,7 +35,7 @@ import { writeAgentArtifacts, readCredentialKey, readOldEnvKey } from './render.
 // 即重启」等于亲手打死一个还能跑的 bot —— 2026-09-15 早上就是这么全线瘫痪的。
 import { checkSrcSyntax, formatSyntaxErrors } from './syntax-check.js';
 import { startAgent as pmStart, stopAgent as pmStop, restartAgent as pmRestart, statusAll as pmStatus } from './process-manager.js';
-import { syncDeepTutorModel } from './sync-deeptutor.js';
+import { syncDeepTutorModel, syncDeepTutorMcp } from './sync-deeptutor.js';
 import { buildAgentRuntimeState, type AgentRuntimeState } from './runtime.js';
 import { lookImage } from '../vision/look.js';
 import {
@@ -175,6 +175,13 @@ export function createConfigServer(opts: ConfigServerOptions) {
           else if (r.skipped && r.skipped !== 'unchanged') log(`apply ${agentId}: DeepTutor 推送跳过: ${r.skipped}`);
         } catch (e) {
           log(`apply ${agentId}: DeepTutor 推送异常（不阻塞）: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        try {
+          const rm = await syncDeepTutorMcp(store, agent, extra);
+          if (rm.pushed) log(`apply ${agentId}: DeepTutor MCP 已推送`);
+          else if (rm.error) log(`apply ${agentId}: DeepTutor MCP 推送失败（不阻塞）: ${rm.error}`);
+        } catch (e) {
+          log(`apply ${agentId}: DeepTutor MCP 推送异常（不阻塞）: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
       if (restartOnApply) {

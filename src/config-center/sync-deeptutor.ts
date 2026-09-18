@@ -134,3 +134,82 @@ export async function syncDeepTutorModel(store: ConfigStore, agent: AgentDef, en
   rtLog(`DeepTutor 模型已推送: provider=${prov.id} model=${modelId} → active`);
   return { pushed: true };
 }
+
+/**
+ * 把 agent.mcps 同步到 DeepTutor 部署级 MCP 注册表（/api/settings/mcp）。
+ * 2026-09-18：deeptutor provider 走 WS start_turn，协议无 MCP 注入点；
+ * 勾选只有落到 DeepTutor 自己的 MCP API 才会出现在 bot 工具面。
+ * API（实测 deeptutor/api/routers/mcp_settings.py）：
+ *   GET  /api/settings/mcp
+ *   PUT  /api/settings/mcp/servers/{name}
+ * 管理员通道允许 localhost（network.py deployment strict=False）。
+ */
+export async function syncDeepTutorMcp(
+  store: ConfigStore,
+  agent: AgentDef,
+  envOverride?: Record<string, string>,
+): Promise<{ pushed: boolean; skipped?: string; error?: string }> {
+  if ((agent.runtime || '') !== 'deeptutor') return { pushed: false, skipped: 'not-deeptutor' };
+  _envOverride = envOverride;
+
+  const desired: Array<{ id: string; url: string; command: string; args: string[]; transport: string }> = [];
+  for (const mcpId of agent.mcps || []) {
+    const m = store.mcps.find((x) => x.id === mcpId);
+    if (!m) continue;
+    if (m.transport === 'stdio' && m.command) {
+      desired.push({
+        id: m.id,
+        url: '',
+        command: m.command,
+        args: m.args || [],
+        transport: 'stdio',
+      });
+    } else if (m.url) {
+      desired.push({
+        id: m.id,
+        url: m.url,
+        command: '',
+        args: [],
+        transport: 'streamableHttp',
+      });
+    }
+  }
+
+  let current: Record<string, any> = {};
+  try {
+    const r = await dtFetch('/api/settings/mcp');
+    if (r.ok) current = ((await r.json()) as { servers?: Record<string, any> }).servers || {};
+  } catch (e) {
+    return { pushed: false, error: `DeepTutor MCP 不可达: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  let pushed = 0;
+  for (const d of desired) {
+    const prev = current[d.id];
+    const body =
+      d.transport === 'stdio'
+        ? { command: d.command, args: d.args, enabled: true }
+        : { url: d.url, type: 'streamableHttp', enabled: true };
+    const same =
+      prev &&
+      ((d.transport === 'stdio' && prev.command === d.command && JSON.stringify(prev.args || []) === JSON.stringify(d.args)) ||
+        (d.transport === 'streamableHttp' && prev.url === d.url && (prev.type || 'streamableHttp') === 'streamableHttp'));
+    if (same) continue;
+    try {
+      const u = await dtFetch(`/api/settings/mcp/servers/${encodeURIComponent(d.id)}`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      });
+      if (!u.ok) {
+        const detail = await u.text();
+        return { pushed: pushed > 0, error: `PUT mcp/${d.id} HTTP ${u.status}: ${detail.slice(0, 200)}` };
+      }
+      pushed += 1;
+    } catch (e) {
+      return { pushed: pushed > 0, error: `PUT mcp/${d.id}: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+  if (!pushed) return { pushed: false, skipped: 'unchanged' };
+  rtLog(`DeepTutor MCP 已推送 ${pushed} 个: ${desired.map((x) => x.id).join(', ')}`);
+  return { pushed: true };
+}
