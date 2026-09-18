@@ -260,11 +260,15 @@ function judgeMh(raw) {
   const t = stripTags(raw);
   if (!t.trim()) return { state: '❌', note: 'timeout/empty' };
   if (/api-gate|拦下：这是飞书/i.test(t)) return { state: '❌', note: 'api-gate拦门' };
+  if (/\bAPI 报错\b|BadRequestError|Process exited with code|unsupported call/i.test(t) && !hasMhNames(t)) {
+    if (/unsupported call/i.test(t)) return { state: '❌', note: 'unsupported call' };
+    return { state: '❌', note: 'API报错/未进工具' };
+  }
   const bypass = /curl\s+(-s\s+)?-X\s+POST|127\.0\.0\.1:3466|桥接代调|callOpenmemBypass/i.test(t);
   const hasNativeTool =
     /mcp__openmem__mh_tools_list|openmem_mh_tools_list|openmem__mh_tools_list|call_mcp_tool|mh_tools_list/i.test(t) &&
     /工具执行|tool call succeeded|已调用|调用成功|✅|native/i.test(t);
-  const hasNames = /agent 花名册|GitHub 访问通道|本机环境事实速查/i.test(t);
+  const hasNames = hasMhNames(t);
   const unsupported = /unsupported call/i.test(t);
   const noTool = /没有 mh_\*|没有 mh_|no mh_|\bNO_MCP_TOOLS\b/i.test(t);
   if (noTool && !hasNames) return { state: '❌', note: '无mh_*' };
@@ -272,28 +276,39 @@ function judgeMh(raw) {
   if (hasNames && hasNativeTool && !bypass) return { state: '✅', note: 'native' };
   if (hasNames && bypass) return { state: '⚠️', note: 'curl/绕过' };
   if (hasNames) return { state: '✅', note: '有结果(未明示工具名)' };
-  // 工具卡已出 mh_tools_list 成功，但成品名还在流式后半段 → 等价半命中，交上层复读
   if (hasNativeTool && !bypass) return { state: '⏳', note: 'tool-ok-names-pending' };
   if (bypass && !hasNames) return { state: '⚠️', note: '仅curl/无成品名' };
   return { state: '❌', note: '未命中mh判定' };
+}
+
+function hasMhNames(t) {
+  return /agent 花名册|GitHub 访问通道|本机环境事实速查/i.test(String(t || ''));
 }
 
 function judgeLark(raw) {
   const t = stripTags(raw);
   if (!t.trim()) return { state: '❌', note: 'timeout/empty' };
   if (/api-gate|拦下：这是飞书/i.test(t)) return { state: '❌', note: 'api-gate拦门' };
+  // 模型层 API 报错（未进工具层）按 fail，不进 hasResult
+  if (/\bAPI 报错\b|BadRequestError|Process exited with code/i.test(t)) {
+    return { state: '❌', note: 'API报错/未进工具' };
+  }
   const bypass = /curl\s|127\.0\.0\.1:135|http:\/\/127\.0\.0\.1/i.test(t) && /lark|chat/i.test(t);
   const hasNative =
     /lark_list_chats|mcp__cti-builtin__lark|cti_builtin__lark|cti-builtin__lark/i.test(t) &&
     /工具执行|调用成功|✅|tool/i.test(t);
+  // 只认会话计数/列表结果；不拿状态栏里的 bot 名当结果（防 Codex/Reasnix 等误报）
   const hasResult = /\d+\s*(个)?(会话|聊天|群)|count\s*[:=]\s*\d+|共\s*\d+/i.test(t) ||
-    /团队群|Reasonix|Claude|Codex|openclaw/i.test(t);
+    /前\s*\d+\s*(个)?(会话|聊天|群)|团队群[A-Z]|群聊）/i.test(t);
   const noTool = /没有 lark_|no lark_/i.test(t);
   if (noTool) return { state: '❌', note: '无lark_*' };
   if (hasNative && hasResult && !bypass) return { state: '✅', note: 'native' };
   if (hasResult && bypass) return { state: '⚠️', note: 'curl/绕过' };
   if (hasResult) return { state: '✅', note: '有会话结果' };
   if (hasNative) return { state: '✅', note: '工具调用成功' };
+  if (/\bAPI 报错\b|BadRequestError|unsupported call/i.test(t)) {
+    return { state: '❌', note: 'API报错/未进工具' };
+  }
   return { state: '❌', note: '未命中lark判定' };
 }
 
