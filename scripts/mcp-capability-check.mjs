@@ -165,13 +165,13 @@ async function resolveBotChatIds() {
 }
 
 async function larkSend(chatId, text, key) {
-  // gate 首拦：send 若命中立即原样重试一次（5min 窗内放行）
+  const k0 = String(key).slice(0, 44);
   let r = await run(LARK_CLI, [
     'im', '+messages-send',
     '--chat-id', chatId,
     '--text', text,
     '--as', 'user',
-    '--idempotency-key', `${key}-a0`,
+    '--idempotency-key', `${k0}a0`.slice(0, 50),
   ], 45000);
   const blob = `${r.out || ''}${r.err || ''}`;
   if (looksLikeGate(blob)) {
@@ -180,18 +180,17 @@ async function larkSend(chatId, text, key) {
       '--chat-id', chatId,
       '--text', text,
       '--as', 'user',
-      '--idempotency-key', `${key}-a1`,
+      '--idempotency-key', `${k0}a1`.slice(0, 50),
     ], 45000);
   }
-  // validation 失败再试一次（偶发；不碰 gate 语义）
   const b2 = `${r.out || ''}${r.err || ''}`;
-  if (!/"ok"\s*:\s*true/i.test(b2) && /"type"\s*:\s*"valid/i.test(b2)) {
+  if (!/"ok"\s*:\s*true/i.test(b2) && /"type"\s*:\s*"validation"|invalid_argument/i.test(b2)) {
     r = await run(LARK_CLI, [
       'im', '+messages-send',
       '--chat-id', chatId,
       '--text', text,
       '--as', 'user',
-      '--idempotency-key', `${key}-a2`,
+      '--idempotency-key', `${k0}a2`.slice(0, 50),
     ], 45000);
   }
   return r;
@@ -353,7 +352,9 @@ function judgeLark(raw) {
 
 async function probeBot(name, chatId, kind, waitMs) {
   const text = kind === 'mh' ? PROBE_MH : PROBE_LARK;
-  const key = `mimo-mcpcheck-${kind}-${name}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  // lark-cli: idempotency-key ≤50 chars
+  const key = `mc${kind[0]}${name.slice(0, 6)}${Date.now().toString(36)}${randomUUID().slice(0, 4)}`
+    .replace(/-/g, '').slice(0, 44);
   const sent = await larkSend(chatId, text, key);
   const sentBlob = `${sent.out || ''}${sent.err || ''}`;
   if (/拦下|api-gate/i.test(sentBlob)) {
