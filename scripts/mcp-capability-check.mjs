@@ -245,6 +245,18 @@ function parseSendTimeMs(sentOut) {
   }
 }
 
+function parseSendMeta(sentOut) {
+  try {
+    const j = JSON.parse(String(sentOut || ''));
+    return { mid: j?.data?.message_id || null, ts: parseSendTimeMs(sentOut) };
+  } catch {
+    return { mid: null, ts: Date.now() };
+  }
+}
+
+/** 跨域去重：一条 bot 回复 message_id 只许判一个域 */
+const judgedMids = new Set();
+
 async function larkRead(chatId, pageSize = 5) {
   const r = await run(LARK_CLI, [
     'im', '+chat-messages-list',
@@ -289,16 +301,18 @@ function isFinalBotReply(text) {
   return /成品答案|agent 花名册|GitHub 访问通道|本机环境事实速查|没有 mh_|没有 lark_|没有桌面|没有视觉|没有生图|unsupported call|调用成功|会话|群列表|count\s*[:=]|✅|❌|CTI-PROBE|窗口数|窗口名|前台窗口|已出图|出图成功|image_key/i.test(t);
 }
 
-async function waitBotReply(chatId, totalWaitMs, afterMs = 0) {
+async function waitBotReply(chatId, totalWaitMs, afterMs = 0, skipMids = null) {
   const start = Date.now();
   let lastAll = '';
   let lastBot = '';
   let lastMeta = null;
   // 飞书 list 的 create_time 常只到分钟；send 带秒 → 按分钟下取整再回退 60s 窗
   const gateMs = afterMs > 0 ? Math.floor(afterMs / 60000) * 60000 - 60000 : 0;
+  const skip = skipMids || judgedMids;
   const pickFresh = async () => {
     const r = await larkRead(chatId, 8);
     const fresh = (r.msgs || []).filter((m) => {
+      if (skip && skip.has(m.message_id)) return false;
       if (gateMs <= 0) return true;
       const ts = Date.parse(String(m.create_time || '').replace(' ', 'T'));
       return Number.isFinite(ts) ? ts >= gateMs : true;
@@ -463,8 +477,8 @@ const JUDGES = {
 };
 
 function defaultWaitMs(kind) {
-  if (kind === 'gen') return 130000;
-  if (kind === 'vision' || kind === 'desktop') return 70000;
+  if (kind === 'gen') return Math.max(120000, Number(process.env.MCP_CHECK_GEN_WAIT || 130000));
+  if (kind === 'vision' || kind === 'desktop') return Math.max(70000, Number(process.env.MCP_CHECK_VIS_WAIT || 70000));
   return 50000;
 }
 
@@ -482,8 +496,9 @@ async function probeBot(name, chatId, kind, waitMs) {
   if (!/"ok"\s*:\s*true/i.test(sentBlob) && !sent.ok) {
     return { state: '❌', note: `send失败:${(sent.err || sent.out || '').slice(0, 70)}`, snippet: '' };
   }
-  const afterMs = parseSendTimeMs(sent.out);
-  const { bot, all, meta } = await waitBotReply(chatId, waitMs, afterMs);
+  const sendMeta = parseSendMeta(sent.out);
+  const afterMs = sendMeta.ts;
+  const { bot, all, meta } = await waitBotReply(chatId, waitMs, afterMs, judgedMids);
   const blob = bot || all || '';
   if (/拦下|api-gate/i.test(blob)) {
     return { state: '❌', note: 'api-gate拦门(read)', snippet: 'gate', mid: meta?.mid, at: meta?.at };
@@ -495,14 +510,15 @@ async function probeBot(name, chatId, kind, waitMs) {
   // 流式卡片：工具卡已出但正文未到 → 再等一轮复读一次
   if (judge.state === '⏳') {
     await new Promise((r) => setTimeout(r, 6000));
-    const again = await waitBotReply(chatId, 15000, afterMs);
+    const again = await waitBotReply(chatId, Math.min(20000, waitMs), afterMs, judgedMids);
     const blob2 = again.bot || again.all || '';
     judge = (JUDGES[kind] || judgeMh)(blob2);
     if (judge.state === '⏳') judge = { state: '✅', note: 'native(tool-ok)' };
-    if (again.meta?.mid) {
-      return { ...judge, snippet: stripTags(again.bot || bot).slice(0, 72), mid: again.meta.mid, at: again.meta.at };
-    }
+    const outMeta = again.meta || meta;
+    if (outMeta?.mid) judgedMids.add(outMeta.mid);
+    return { ...judge, snippet: stripTags(again.bot || bot).slice(0, 72), mid: outMeta?.mid, at: outMeta?.at };
   }
+  if (meta?.mid) judgedMids.add(meta.mid);
   return { ...judge, snippet: stripTags(bot).slice(0, 72), mid: meta?.mid, at: meta?.at };
 }
 
@@ -624,12 +640,16 @@ async function main() {
         notes.push('gen:N/A');
         continue;
       }
-      if (i > 0) await new Promise((r) => setTimeout(r, args.gap));
+      if (i > 0) {
+        // 域间 settle：等该域回复落定后再发下一域（防 auto-interrupt / 串判）
+        const settle = Math.max(args.gap, kind === 'gen' || args.domains[i - 1] === 'gen' ? 12000 : 10000);
+        await new Promise((r) => setTimeout(r, settle));
+      }
       process.stdout.write(`… ${name} ${kind} `);
-      const waitMs = kind === 'mh' || kind === 'lark'
-        ? (kind === 'mh' || kind === 'lark' ? Math.min(args.wait, defaultWaitMs(kind)) || defaultWaitMs(kind) : args.wait)
-        : defaultWaitMs(kind);
-      const w = (kind === 'mh' || kind === 'lark') ? args.wait : defaultWaitMs(kind);
+      // gen 出图实测 70s+：wait 不得低于 120s
+      const w = (kind === 'gen')
+        ? Math.max(120000, defaultWaitMs('gen'), args.wait)
+        : (kind === 'mh' || kind === 'lark') ? args.wait : defaultWaitMs(kind);
       const r = await probeBot(name, chatId, kind, w);
       cells[kind] = r.state;
       notes.push(`${kind}:${r.note}${r.mid ? '@' + r.at + '/' + r.mid.slice(-8) : ''}`);
