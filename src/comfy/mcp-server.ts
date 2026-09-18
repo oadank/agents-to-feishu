@@ -26,6 +26,7 @@ import http from 'node:http';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { runGenerateImage } from '../tools/registry.js';
 
 /** 归置 ComfyUI 的基址；默认本机 8090，可用环境变量覆盖（如指向配置中心 API） */
 export const COMFY_BASE_URL = process.env.COMFY_BASE_URL || 'http://127.0.0.1:8090';
@@ -97,12 +98,9 @@ export function createComfyMcpServer(): McpServer {
       if (args.image !== undefined) body.image = args.image;
       if (args.image_name !== undefined) body.image_name = args.image_name;
       try {
-        const data = await jsonFetch('/generate', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(body),
-        }, GENERATE_TIMEOUT);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+        // [2026-09-19 老大放行] 与 registry 同源：agnes 优先 → 失败回落 8090→XDN
+        const text = await runGenerateImage(body);
+        return { content: [{ type: 'text' as const, text }] };
       } catch (e) {
         return { content: [{ type: 'text' as const, text: `生图失败: ${(e as Error)?.message ?? String(e)}` }], isError: true };
       }

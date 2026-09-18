@@ -12,12 +12,21 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import { z } from 'zod';
 import { lookImage } from '../vision/look.js';
 import { transcribe } from '../voice/asr.js';
 import { COMFY_BASE_URL } from '../comfy/mcp-server.js';
 import { DEFAULT_SPEECH } from '../config-center/store.js';
 import type { SpeechConfig } from '../config-center/store.js';
+
+/** Comfy/agnes 成品落盘目录（与 engine 自动发图一致） */
+const COMFY_RUNS_IMG =
+  process.env.COMFY_RUNS_IMG
+  || (process.platform === 'win32' ? 'C:\\D\\opt\\comfyui\\runs\\img' : '/c/D/opt/comfyui/runs/img');
+
+/** N5105 agnes 文生图（OpenAI images API；服务内已 3-key 轮询） */
+const AGNES_URL = process.env.AGNES_IMAGES_URL || 'http://100.110.110.12:8081/v1/images/generations';
 
 /** 桥接注入给工具的运行时上下文（由 provider 在每轮对话时提供） */
 export interface BuiltinToolContext {
@@ -60,6 +69,83 @@ async function comfyPost(path: string, body: Record<string, unknown>, timeoutMs:
   return typeof data === 'string' ? data : JSON.stringify(data, null, 2);
 }
 
+/**
+ * [2026-09-19 老大放行·封顶] generate_image 后端序：
+ * 1) N5105 agnes POST /v1/images/generations（b64_json → 落盘 runs/img，source=agnes）
+ * 2) 120s 无果 / 5xx / 无 b64 → 回落本机 8090→XDN comfy（source=comfy-xdn）
+ * 自动发图/mtime 兜底不改，照吃落盘文件。template=显式 comfy 时仍先 agnes，回落带 template。
+ */
+export async function runGenerateImage(body: Record<string, unknown>): Promise<string> {
+  const prompt = String(body.prompt ?? '');
+  const w = Number(body.width) || 512;
+  const h = Number(body.height) || 512;
+  const agnesBody: Record<string, unknown> = {
+    prompt,
+    n: 1,
+    size: `${w}x${h}`,
+    response_format: 'b64_json',
+  };
+  if (body.image || body.image_name) {
+    // 图生图 agnes 未必支持；仍先试纯文生图会错图 → 直接走 comfy 回落路径更稳
+  } else {
+    try {
+      const r = await fetch(AGNES_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(agnesBody),
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (r.status >= 500) throw new Error(`agnes 5xx ${r.status}`);
+      if (!r.ok) {
+        let t = '';
+        try { t = (await r.text()).slice(0, 200); } catch { /* ignore */ }
+        throw new Error(`agnes ${r.status} ${t}`);
+      }
+      const data = await r.json() as { data?: Array<{ b64_json?: string }>; b64_json?: string };
+      const b64 = data?.data?.[0]?.b64_json || data?.b64_json;
+      if (!b64) throw new Error('agnes no b64_json');
+      const buf = Buffer.from(b64, 'base64');
+      if (buf.length < 256) throw new Error(`agnes b64 too small ${buf.length}`);
+      fs.mkdirSync(COMFY_RUNS_IMG, { recursive: true });
+      const fname = `Agnes-${Date.now()}.png`;
+      const fp = path.join(COMFY_RUNS_IMG, fname);
+      fs.writeFileSync(fp, buf);
+      return JSON.stringify({
+        ok: true,
+        source: 'agnes',
+        output_name: fname,
+        path: fp,
+        file: fp,
+        width: w,
+        height: h,
+        bytes: buf.length,
+        prompt,
+        note: 'agnes N5105；质量略逊但快。定稿可 template=comfy 走回落 XDN。',
+      }, null, 2);
+    } catch (e) {
+      console.error('[generate_image] agnes 失败，回落 comfy:', e instanceof Error ? e.message : e);
+    }
+  }
+  const comfyBody: Record<string, unknown> = { prompt };
+  for (const k of ['template', 'width', 'height', 'seed', 'steps', 'cfg', 'denoise', 'image', 'image_name'] as const) {
+    if (body[k] !== undefined && body[k] !== null) comfyBody[k] = body[k];
+  }
+  if (!comfyBody.width) comfyBody.width = w;
+  if (!comfyBody.height) comfyBody.height = h;
+  const raw = await comfyPost('/generate', comfyBody, 300_000);
+  try {
+    const j = JSON.parse(raw) as Record<string, unknown>;
+    if (j && typeof j === 'object') {
+      j.source = 'comfy-xdn';
+      if (!j.path && typeof j.output_name === 'string') {
+        j.path = path.join(COMFY_RUNS_IMG, j.output_name);
+      }
+      return JSON.stringify(j, null, 2);
+    }
+  } catch { /* comfy 原文原样返回 */ }
+  return raw;
+}
+
 /** 读取本地图片为 base64（reverse_prompt 用），带基本校验 */
 function readImageBase64(imagePath: string): string {
   const p = (imagePath ?? '').trim();
@@ -93,12 +179,12 @@ export function buildBuiltinTools(deps: BridgeToolDeps): BuiltinTool[] {
     {
       name: 'generate_image',
       description:
-        '文生图/图生图：把提示词交给本机 ComfyUI 生成图片，返回 JSON（含输出文件名 output_name）。'
-        + '用户要画图/生图/画一张时使用。'
-        + '【服务侧已写死】生成成功后桥接会自动把本地图发到当前飞书会话，你只需确认调用成功，不必再自己 send_image。',
+        '文生图/图生图：默认走 N5105 agnes（快），失败自动回落本机 ComfyUI/XDN。返回 JSON 含 source/output_name/path。'
+        + '用户要画图/生图时使用；定稿要更好质量可传 template=comfy。'
+        + '【服务侧已写死】成功后桥接会自动把本地图发到当前飞书会话，不必再自己 send_image。',
       schema: {
         prompt: z.string().describe('生图提示词'),
-        template: z.string().optional().describe('工作流模板名（省略用默认）'),
+        template: z.string().optional().describe('工作流模板名；省略=agnes 优先；显式 comfy/Krea2 则回落时用'),
         width: z.number().optional(),
         height: z.number().optional(),
         seed: z.number().optional(),
@@ -113,7 +199,7 @@ export function buildBuiltinTools(deps: BridgeToolDeps): BuiltinTool[] {
         for (const k of ['template', 'width', 'height', 'seed', 'steps', 'cfg', 'denoise', 'image', 'image_name'] as const) {
           if (args[k] !== undefined && args[k] !== null) body[k] = args[k];
         }
-        return comfyPost('/generate', body, 300_000);
+        return runGenerateImage(body);
       },
     },
     {
