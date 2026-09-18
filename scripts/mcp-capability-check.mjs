@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 /**
- * mcp-capability-check.mjs — 12 bot × mh_* / lark_* 只读体检器
+ * mcp-capability-check.mjs — 12 bot × mh_* / lark_* / 桌面 / 视觉 / 生图 只读体检器
  *
  * 用法（限流铁律见下，勿高峰跑全量）：
  *   node scripts/mcp-capability-check.mjs --quick claude,dsh
+ *   node scripts/mcp-capability-check.mjs --quick claude --domain desktop,vision
+ *   node scripts/mcp-capability-check.mjs --quick dsh --domain gen
  *   node scripts/mcp-capability-check.mjs --all --serial-slow
+ *
+ * --domain: mh,lark,desktop,vision,gen（默认 mh,lark）
  *
  * ⚠️ 2026-09-18：曾因 --all 叠打把 qwen3.8 并发打满。默认禁止裸 --all。
  * 只读验证：user 身份发飞书强制实调 → 限时读回复 → 打矩阵。
@@ -14,9 +18,9 @@
  * 撞 429/网关限流 → 立刻停，不要重试。
  *
  * 判定三态：
- *   ✅ native — 模型直接调 mh_* / lark_* 成功（工具卡 + 正文给出结果）
+ *   ✅ native — 模型直接调工具成功（工具卡 + 正文给出结果；视觉须复述 CTI-PROBE-2026）
  *   ⚠️ bypass — 靠 curl :3466/mcp 或桥接代调才成
- *   ❌ fail   — 看不见工具 / unsupported call / 超时 / 空回复
+ *   ❌ fail   — 看不见工具 / unsupported call / 超时 / 空回复 / 复述错误
  *
  * 退出码：0=全通过；1=存在 ❌ 或超时。
  */
@@ -26,7 +30,8 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 
 const USAGE =
-  'node scripts/mcp-capability-check.mjs --quick b1,b2   # 推荐\n' +
+  'node scripts/mcp-capability-check.mjs --quick b1,b2   # mh+lark\n' +
+  'node scripts/mcp-capability-check.mjs --quick b1 --domain desktop,vision\n' +
   'node scripts/mcp-capability-check.mjs --all --serial-slow   # 全量（必须限流，勿在高峰跑）';
 
 /** 团队 bot 花名册（config-center id）。chat_id 运行时从 lark chat-list 解析，不硬编码。 */
@@ -35,6 +40,8 @@ const BOT_IDS = [
   'dsh', 'zcode', 'hermes', 'opencode', 'mimo',
 ];
 const DEEPTUTOR_NA = 'deeptutor';
+const ALL_DOMAINS = ['mh', 'lark', 'desktop', 'vision', 'gen'];
+const GEN_BOTS = new Set(['dsh', 'zcode']);
 
 /** chat-list 会话名别名（user 视角 p2p name ≠ bot id） */
 const BOT_NAME_ALIASES = {
@@ -55,6 +62,21 @@ const PROBE_MH =
   '[MiMo] 体检：请调用 mh_tools_list 或 mcp__openmem__mh_tools_list（或 openmem_mh_tools_list），只回前3条成品答案名字。禁止 curl/shell；没有工具就说：没有 mh_*。';
 const PROBE_LARK =
   '[MiMo] 体检：请调用 lark_list_chats（或 mcp__cti-builtin__lark_list_chats 等同名变体），只回你会话/群数量或前2个会话名。禁止 curl；没有工具就说：没有 lark_*。';
+const PROBE_DESKTOP =
+  '[MiMo] 体检·桌面：请真调 win-desktop-helper 只读工具（active_window / list_apps / window_info 类），回「前台窗口名 + 窗口数」。禁止点击/按键/拖拽/截图写操作。没有工具就说：没有桌面。';
+const PROBE_VISION =
+  '[MiMo] 体检·视觉：请真调 visionqa/look_image OCR 或 describe，读 C:\\D\\opt\\agents-to-feishu\\team-artifacts\\probe-ocr.png，只复述图中文字（原样英文数字）。禁止 curl；没有工具就说：没有视觉。';
+const PROBE_GEN =
+  '[MiMo] 体检·生图：请真调 generate_image/comfy，512x512 简笔「简笔画：一只猫」，120秒内出图即算成功，回「已出图」+图片路径或 image_key。没有工具就说：没有生图。';
+
+const PROBES = {
+  mh: PROBE_MH,
+  lark: PROBE_LARK,
+  desktop: PROBE_DESKTOP,
+  vision: PROBE_VISION,
+  gen: PROBE_GEN,
+};
+const OCR_TEXT = 'CTI-PROBE-2026';
 
 const LARK_CANDIDATES = [
   process.env.MCP_CHECK_LARK_CLI,
@@ -245,43 +267,44 @@ function pickBotReply(msgs) {
 function isFinalBotReply(text) {
   const t = stripTags(text);
   if (!t.trim()) return false;
-  if (/正在处理上一条|已自动插队/.test(t) && !/✅|成品答案/.test(t)) return false;
-  if (/⏳\s*正在处理/.test(t) && !/✅|成品答案|没有 mh_|没有 lark_|unsupported|调用成功/.test(t)) {
+  if (/正在处理上一条|已自动插队/.test(t) && !/✅|成品答案|CTI-PROBE|窗口|出图|已生成/.test(t)) return false;
+  if (/⏳\s*正在处理/.test(t) && !/✅|成品答案|没有 mh_|没有 lark_|没有桌面|没有视觉|没有生图|unsupported|调用成功|CTI-PROBE|窗口数|已出图|已生成/.test(t)) {
     return false;
   }
-  return /成品答案|agent 花名册|GitHub 访问通道|本机环境事实速查|没有 mh_|没有 lark_|unsupported call|调用成功|会话|群列表|count\s*[:=]|✅|❌/i.test(t);
+  return /成品答案|agent 花名册|GitHub 访问通道|本机环境事实速查|没有 mh_|没有 lark_|没有桌面|没有视觉|没有生图|unsupported call|调用成功|会话|群列表|count\s*[:=]|✅|❌|CTI-PROBE|窗口数|窗口名|前台窗口|已出图|出图成功|image_key/i.test(t);
 }
 
 async function waitBotReply(chatId, totalWaitMs, afterMs = 0) {
   const start = Date.now();
   let lastAll = '';
   let lastBot = '';
-  while (Date.now() - start < totalWaitMs) {
+  let lastMeta = null;
+  const pickFresh = async () => {
     const r = await larkRead(chatId, 8);
-    lastAll = r.all || r.text || '';
-    // 只认探针发出之后的 bot 回复，避免捡到历史报错卡
     const fresh = (r.msgs || []).filter((m) => {
       if (afterMs <= 0) return true;
       const ts = Date.parse(String(m.create_time || '').replace(' ', 'T'));
-      // create_time 秒级；允许同秒内
       return Number.isFinite(ts) ? ts >= afterMs - 2000 : true;
     });
-    lastBot = pickBotReply(fresh);
+    return { r, fresh, bot: pickBotReply(fresh) };
+  };
+  while (Date.now() - start < totalWaitMs) {
+    const { r, fresh, bot } = await pickFresh();
+    lastAll = r.all || r.text || '';
+    lastBot = bot;
     if (lastBot && isFinalBotReply(lastBot)) {
-      return { bot: lastBot, all: lastAll };
+      const hit = fresh.find((m) => String(m.content || '') === lastBot);
+      lastMeta = hit ? { mid: hit.message_id, at: hit.create_time } : null;
+      return { bot: lastBot, all: lastAll, meta: lastMeta };
     }
     await new Promise((res) => setTimeout(res, 8000));
   }
-  // 超时回退：仍按新消息窗取，没有再退回全量（不主动拿历史报错充数）
-  const r = await larkRead(chatId, 8);
-  const fresh = (r.msgs || []).filter((m) => {
-    if (afterMs <= 0) return true;
-    const ts = Date.parse(String(m.create_time || '').replace(' ', 'T'));
-    return Number.isFinite(ts) ? ts >= afterMs - 2000 : true;
-  });
-  lastBot = pickBotReply(fresh);
+  const { r, fresh, bot } = await pickFresh();
+  lastBot = bot;
   lastAll = r.all || r.text || '';
-  return { bot: lastBot, all: lastAll };
+  const hit = fresh.find((m) => String(m.content || '') === lastBot);
+  lastMeta = hit ? { mid: hit.message_id, at: hit.create_time } : null;
+  return { bot: lastBot, all: lastAll, meta: lastMeta };
 }
 
 function stripTags(s) {
@@ -350,8 +373,87 @@ function judgeLark(raw) {
   return { state: '❌', note: '未命中lark判定' };
 }
 
+function judgeDesktop(raw) {
+  const t = stripTags(raw);
+  if (!t.trim()) return { state: '❌', note: 'timeout/empty' };
+  if (/api-gate|拦下：这是飞书/i.test(t)) return { state: '❌', note: 'api-gate拦门' };
+  if (/\bAPI 报错\b|BadRequestError|Process exited with code/i.test(t)) {
+    return { state: '❌', note: 'API报错/未进工具' };
+  }
+  const noTool = /没有桌面|no desktop|没有 win-desktop/i.test(t);
+  if (noTool) return { state: '❌', note: '无桌面' };
+  const toolHit =
+    /active_window|list_apps|window_info|win_desktop|win-desktop-helper|窗口数|前台窗口/i.test(t) &&
+    /工具执行|调用成功|✅|tool|窗口/i.test(t);
+  const hasCount = /\d+\s*个窗口|窗口数\s*[:：]?\s*\d+|共\s*\d+\s*个|windows?\s*[:=]\s*\d+/i.test(t);
+  const hasName = /前台窗口|active|front|title\s*[:=]/i.test(t) && /[A-Za-z一-鿿]/.test(t);
+  if ((hasCount || hasName) && toolHit) return { state: '✅', note: 'native' };
+  if (hasCount || (hasName && /窗口/.test(t))) return { state: '✅', note: '有窗口结果' };
+  if (toolHit) return { state: '⏳', note: 'tool-ok-result-pending' };
+  if (/unsupported call/i.test(t)) return { state: '❌', note: 'unsupported call' };
+  return { state: '❌', note: '未命中desktop判定' };
+}
+
+function judgeVision(raw) {
+  const t = stripTags(raw);
+  if (!t.trim()) return { state: '❌', note: 'timeout/empty' };
+  if (/api-gate|拦下：这是飞书/i.test(t)) return { state: '❌', note: 'api-gate拦门' };
+  if (/\bAPI 报错\b|BadRequestError|Process exited with code/i.test(t)) {
+    return { state: '❌', note: 'API报错/未进工具' };
+  }
+  const noTool = /没有视觉|no vision|没有 visionqa|没有 look_image/i.test(t);
+  if (noTool) return { state: '❌', note: '无视觉' };
+  // 复述对 OCR 文本才算过；差一个字符不算
+  const saidOk = t.includes(OCR_TEXT);
+  const toolHit =
+    /look_image|visionqa|ocr|describe|视觉/i.test(t) &&
+    /工具执行|调用成功|✅|tool|复述|图中/i.test(t);
+  if (saidOk && (toolHit || true)) return { state: '✅', note: 'native·复述正确' };
+  if (saidOk) return { state: '✅', note: '复述正确' };
+  if (toolHit && !saidOk) return { state: '❌', note: '复述不符(非CTI-PROBE-2026)' };
+  if (/unsupported call/i.test(t)) return { state: '❌', note: 'unsupported call' };
+  return { state: '❌', note: '未命中vision判定' };
+}
+
+function judgeGen(raw) {
+  const t = stripTags(raw);
+  if (!t.trim()) return { state: '❌', note: 'timeout/empty' };
+  if (/api-gate|拦下：这是飞书/i.test(t)) return { state: '❌', note: 'api-gate拦门' };
+  if (/\bAPI 报错\b|BadRequestError|Process exited with code/i.test(t)) {
+    return { state: '❌', note: 'API报错/未进工具' };
+  }
+  const noTool = /没有生图|no gen|没有 generate_image|没有 comfy|XDN 关机/i.test(t);
+  if (noTool) return { state: '❌', note: '无生图/引擎不在线' };
+  const saidOk = /已出图|出图成功|image_key|generated successfully|图片已生成|\.png|\.jpg/i.test(t) &&
+    /猫|简笔|512|出图|生成/i.test(t);
+  const toolHit =
+    /generate_image|comfy__generate|cti_builtin__generate|mcp__.*generate/i.test(t) &&
+    /工具执行|调用成功|✅|tool/i.test(t);
+  if (saidOk && toolHit) return { state: '✅', note: 'native' };
+  if (saidOk) return { state: '✅', note: '已出图' };
+  if (toolHit) return { state: '⏳', note: 'tool-ok-image-pending' };
+  if (/timeout|超时|120s/i.test(t)) return { state: '❌', note: '超时' };
+  if (/unsupported call/i.test(t)) return { state: '❌', note: 'unsupported call' };
+  return { state: '❌', note: '未命中gen判定' };
+}
+
+const JUDGES = {
+  mh: judgeMh,
+  lark: judgeLark,
+  desktop: judgeDesktop,
+  vision: judgeVision,
+  gen: judgeGen,
+};
+
+function defaultWaitMs(kind) {
+  if (kind === 'gen') return 130000;
+  if (kind === 'vision' || kind === 'desktop') return 70000;
+  return 50000;
+}
+
 async function probeBot(name, chatId, kind, waitMs) {
-  const text = kind === 'mh' ? PROBE_MH : PROBE_LARK;
+  const text = PROBES[kind];
+  if (!text) return { state: '❌', note: `未知域:${kind}`, snippet: '' };
   // lark-cli: idempotency-key ≤50 chars
   const key = `mc${kind[0]}${name.slice(0, 6)}${Date.now().toString(36)}${randomUUID().slice(0, 4)}`
     .replace(/-/g, '').slice(0, 44);
@@ -364,28 +466,31 @@ async function probeBot(name, chatId, kind, waitMs) {
     return { state: '❌', note: `send失败:${(sent.err || sent.out || '').slice(0, 70)}`, snippet: '' };
   }
   const afterMs = parseSendTimeMs(sent.out);
-  const { bot, all } = await waitBotReply(chatId, waitMs, afterMs);
+  const { bot, all, meta } = await waitBotReply(chatId, waitMs, afterMs);
   const blob = bot || all || '';
   if (/拦下|api-gate/i.test(blob)) {
-    return { state: '❌', note: 'api-gate拦门(read)', snippet: 'gate' };
+    return { state: '❌', note: 'api-gate拦门(read)', snippet: 'gate', mid: meta?.mid, at: meta?.at };
   }
   if (!stripTags(bot).trim()) {
-    return { state: '❌', note: '无bot回复/超时', snippet: stripTags(all).slice(0, 40) };
+    return { state: '❌', note: '无bot回复/超时', snippet: stripTags(all).slice(0, 40), mid: meta?.mid, at: meta?.at };
   }
-  let judge = kind === 'mh' ? judgeMh(blob) : judgeLark(blob);
-  // 流式卡片：工具卡已出但成品名未到 → 再等一轮复读一次
+  let judge = (JUDGES[kind] || judgeMh)(blob);
+  // 流式卡片：工具卡已出但正文未到 → 再等一轮复读一次
   if (judge.state === '⏳') {
     await new Promise((r) => setTimeout(r, 6000));
     const again = await waitBotReply(chatId, 15000, afterMs);
     const blob2 = again.bot || again.all || '';
-    judge = kind === 'mh' ? judgeMh(blob2) : judgeLark(blob2);
+    judge = (JUDGES[kind] || judgeMh)(blob2);
     if (judge.state === '⏳') judge = { state: '✅', note: 'native(tool-ok)' };
+    if (again.meta?.mid) {
+      return { ...judge, snippet: stripTags(again.bot || bot).slice(0, 72), mid: again.meta.mid, at: again.meta.at };
+    }
   }
-  return { ...judge, snippet: stripTags(bot).slice(0, 72) };
+  return { ...judge, snippet: stripTags(bot).slice(0, 72), mid: meta?.mid, at: meta?.at };
 }
 
 function parseArgs(argv) {
-  const args = { mode: 'quick', bots: null, wait: 50000, gap: 15000, serialSlow: false };
+  const args = { mode: 'quick', bots: null, wait: 50000, gap: 15000, serialSlow: false, domains: ['mh', 'lark'] };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--all') args.mode = 'all';
@@ -398,6 +503,16 @@ function parseArgs(argv) {
       if (list && !list.startsWith('--')) {
         args.bots = list.split(',').map((s) => s.trim()).filter(Boolean);
         i++;
+      }
+    } else if (a === '--domain' || a === '--domains') {
+      const list = argv[i + 1];
+      if (list && !list.startsWith('--')) {
+        args.domains = list.split(',').map((s) => s.trim()).filter((s) => ALL_DOMAINS.includes(s));
+        i++;
+      }
+      if (!args.domains.length) {
+        console.error(`--domain 需要: ${ALL_DOMAINS.join(',')}`);
+        process.exit(2);
       }
     } else if (a === '--wait') {
       const v = Number(argv[i + 1]);
@@ -457,46 +572,64 @@ async function main() {
     process.exit(2);
   }
 
-  console.log(`模式=${args.mode} wait=${args.wait}ms gap=${args.gap}ms bots=${names.length}`);
+  console.log(`模式=${args.mode} wait=${args.wait}ms gap=${args.gap}ms bots=${names.length} domains=${args.domains.join(',')}`);
   console.log('解析 chat_id（config-center + lark chat-list 运行时）…');
   const { map: BOTS } = await resolveBotChatIds();
   console.log(`chat_id 就绪: ${Object.keys(BOTS).length} 个（warm-up 已吃 gate 首拦）`);
   console.log('');
-  console.log('| bot | mh_* | lark_* | 备注 |');
-  console.log('|-----|------|--------|------|');
+  const head = args.domains.map((d) => d === 'mh' ? 'mh_*' : d === 'lark' ? 'lark_*' : d);
+  console.log(`| bot | ${head.join(' | ')} | 备注 |`);
+  console.log(`|-----|${head.map(() => '---').join('|')}|------|`);
 
   const rows = [];
   let failCount = 0;
 
   for (const name of names) {
     if (name === DEEPTUTOR_NA) {
-      console.log(`| ${name} | N/A | N/A | 无团队bot p2p；服务侧MCP另查 |`);
-      rows.push({ name, mh: 'N/A', lark: 'N/A', fail: false });
+      console.log(`| ${name} | ${head.map(() => 'N/A').join(' | ')} | 无团队bot p2p；服务侧MCP另查 |`);
+      rows.push({ name, fail: false, cells: Object.fromEntries(args.domains.map((d) => [d, 'N/A'])) });
       continue;
     }
     const chatId = BOTS[name];
     if (!chatId) {
-      console.log(`| ${name} | ❌ | ❌ | chat_id 解析缺失 |`);
+      console.log(`| ${name} | ${head.map(() => '❌').join(' | ')} | chat_id 解析缺失 |`);
       failCount++;
-      rows.push({ name, mh: '❌', lark: '❌', note: 'chat_id missing', fail: true });
+      rows.push({ name, fail: true, note: 'chat_id missing', cells: Object.fromEntries(args.domains.map((d) => [d, '❌'])) });
       continue;
     }
-    process.stdout.write(`… ${name} mh `);
-    const mh = await probeBot(name, chatId, 'mh', args.wait);
-    process.stdout.write(`${mh.state}  lark `);
-    await new Promise((r) => setTimeout(r, args.gap));
-    const lark = await probeBot(name, chatId, 'lark', args.wait);
-    console.log(`${lark.state}`);
-    const note = `mh:${mh.note}${mh.snippet ? '/' + mh.snippet.slice(0, 22) : ''} lark:${lark.note}`;
-    console.log(`| ${name} | ${mh.state} | ${lark.state} | ${note.replace(/\|/g, '/')} |`);
-    const fail = mh.state === '❌' || lark.state === '❌';
-    if (fail) failCount++;
-    rows.push({ name, mh: mh.state, lark: lark.state, note, fail });
+    const cells = {};
+    const notes = [];
+    let botFail = false;
+    let i = 0;
+    for (const kind of args.domains) {
+      if (kind === 'gen' && !GEN_BOTS.has(name)) {
+        cells[kind] = 'N/A';
+        notes.push('gen:N/A');
+        continue;
+      }
+      if (i > 0) await new Promise((r) => setTimeout(r, args.gap));
+      process.stdout.write(`… ${name} ${kind} `);
+      const waitMs = kind === 'mh' || kind === 'lark'
+        ? (kind === 'mh' || kind === 'lark' ? Math.min(args.wait, defaultWaitMs(kind)) || defaultWaitMs(kind) : args.wait)
+        : defaultWaitMs(kind);
+      const w = (kind === 'mh' || kind === 'lark') ? args.wait : defaultWaitMs(kind);
+      const r = await probeBot(name, chatId, kind, w);
+      cells[kind] = r.state;
+      notes.push(`${kind}:${r.note}${r.mid ? '@' + r.at + '/' + r.mid.slice(-8) : ''}`);
+      if (r.state === '❌') botFail = true;
+      console.log(`${r.state}${r.mid ? ' ' + r.mid : ''}`);
+      i++;
+    }
+    const note = notes.join(' ');
+    console.log(`| ${name} | ${args.domains.map((d) => cells[d]).join(' | ')} | ${note.replace(/\|/g, '/')} |`);
+    if (botFail) failCount++;
+    rows.push({ name, cells, note, fail: botFail });
     if (args.gap > 0) await new Promise((r) => setTimeout(r, args.gap));
   }
 
   console.log('');
-  console.log(`结果: ${rows.filter((r) => r.mh === '✅').length}/${names.length} mh=✅ · 失败项=${failCount}`);
+  const okDomain = (d) => rows.filter((r) => r.cells?.[d] === '✅').length;
+  console.log(`结果: ${args.domains.map((d) => `${d}=${okDomain(d)}✅`).join(' ')} · 失败项=${failCount}`);
   console.log(failCount === 0 ? 'PASS' : 'FAIL');
   process.exit(failCount === 0 ? 0 : 1);
 }
