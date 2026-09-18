@@ -589,6 +589,35 @@ function cliModelName(providerId: string, modelId: string): string {
   return (CLI_MODEL_NAMES[providerId] && CLI_MODEL_NAMES[providerId][modelId]) || modelId;
 }
 
+// ── 模型协议硬闸（openmem e58210eb · 老大亲定铁律 2026-09-18）──
+// 总纲：客户端说什么协议，就只能挂按该协议格式供数的模型。判据=接口格式
+// （codex=/v1/responses，claude=/v1/messages），不是供应商是谁。
+// 白名单成员 = 实测该协议端点通者；🔴 增删须附 openmem 实测记录 id，禁止拍脑补。
+//   codex-model/GwV4F/Gwglm5.3：litellm 组实测 /v1/responses 通（bb07220c）
+//   claude-model：anthropic/deepseek-v4-flash-0731@GW（e58210eb claude 细则）
+export const MODEL_PROTOCOL_ALLOWLIST: Record<'codex' | 'claude', readonly string[]> = {
+  codex: ['codex-model', 'GwV4F', 'Gwglm5.3'],
+  claude: ['claude-model'],
+};
+
+/**
+ * 协议硬闸：runtime ∈ {codex, claude} 且所选模型不在其协议白名单 → 抛错。
+ * 调用方（syncModelToCli / PUT /api/agents）必须让它 fail-fast 拒写产物，
+ * 不许 catch 吞掉后继续写配置 —— 09-18 codex 被指 QW3.8F 配瘫就是没这道闸。
+ */
+export function assertModelProtocolAllowed(runtime: string, modelId: string, cliModel?: string): void {
+  const allow = (MODEL_PROTOCOL_ALLOWLIST as Record<string, readonly string[] | undefined>)[runtime];
+  if (!allow) return; // 其它 runtime 协议不受此闸约束（e58210eb 只点名 codex/claude）
+  const effective = cliModel && cliModel !== modelId ? `（CLI 端 "${cliModel}"）` : '';
+  if (!allow.includes(modelId) && !(cliModel && allow.includes(cliModel))) {
+    throw new Error(
+      `[协议硬闸·e58210eb] runtime="${runtime}" 只能挂协议兼容白名单模型 [${allow.join(', ')}]，`
+      + `当前所选 modelId="${modelId}"${effective} 不在其中 ⇒ 拒写产物。`
+      + '修复：在网页把该 bot 的模型切回白名单内；白名单增删须附 openmem 实测记录 id。',
+    );
+  }
+}
+
 /**
  * 在 TOML 文本里把顶层 key 或指定 section 内的 key 替换为 newValue（保留缩进/其余结构）。
  * 用逐行定位（避开 \r\n / 空行 / 嵌套 section 的正则前瞻坑）：
@@ -669,6 +698,9 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
   const keyEnv = prov.apiKeyEnv || 'OPENAI_API_KEY';
   const cliModel = cliModelName(prov.id, modelId);
   const rt = agent.runtime || 'dsh';
+  // 协议硬闸（e58210eb 老大亲定铁律）：必须发生在写任何 CLI 配置文件之前 —— fail-fast 抛错，
+  // 让 apply/PUT 整体失败并带出原因，绝不静默把 bot 配死（09-18 codex 被指 QW3.8F 配瘫即无闸之祸）。
+  assertModelProtocolAllowed(rt, modelId, cliModel);
   const errs: string[] = [];
 
   try {

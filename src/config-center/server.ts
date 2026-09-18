@@ -30,7 +30,7 @@ import {
   type ConfigStore, type AgentDef, type ProviderDef, type McpDef, type SpeechConfig,
   readStore, writeStore, findProvider, DEFAULT_SPEECH, DEFAULT_INJECTION, defaultStorePath,
 } from './store.js';
-import { writeAgentArtifacts, readCredentialKey, readOldEnvKey } from './render.js';
+import { writeAgentArtifacts, readCredentialKey, readOldEnvKey, assertModelProtocolAllowed } from './render.js';
 // [根治 C 2026-09-15] 语法闸门。bot 服务由 tsx 直读 src，代码带语法错时「保存即 apply
 // 即重启」等于亲手打死一个还能跑的 bot —— 2026-09-15 早上就是这么全线瘫痪的。
 import { checkSrcSyntax, formatSyntaxErrors } from './syntax-check.js';
@@ -896,6 +896,16 @@ export function createConfigServer(opts: ConfigServerOptions) {
             // 2026-09-05 新增：runtime 透传（zcode 等新运行时经网页/API 建站时可选）
             runtime: body.runtime ?? a.runtime,
           };
+          // [协议硬闸 e58210eb 2026-09-18] 按 merge 后整体态校验（含存量）：runtime∈{codex,claude}
+          // 只吃协议兼容白名单模型。必须在 save() 之前 fail-fast —— 若只靠 render.ts 侧的闸，
+          // "先 save 再 apply" 的顺序会把非法配置先落盘、apply 才炸，store 与线上漂移。
+          // 判合并后整体态而非仅 delta：存量非法（如 claude+QW3.8F）连改名字也会被拦下，
+          // 逼先把模型切回白名单（PUT 修正模型本身能过闸，修复路径是通的）。
+          try {
+            assertModelProtocolAllowed(store.agents[idx].runtime || 'dsh', store.agents[idx].modelId);
+          } catch (e) {
+            return json(res, 422, { error: e instanceof Error ? e.message : String(e), saved: false, restarted: false });
+          }
           // [根治 C 2026-09-15] 语法闸门：不过就整体拒绝 —— store 一字节不写、nssm 一次不碰。
           // 为什么不采纳"写 store 但跳过重启"：那会形成静默漂移（store 已是新配置、线上还是
           // 旧进程、界面却显示保存成功），等下一个不相干的人 apply 时坏代码才上线，崩在他头上，

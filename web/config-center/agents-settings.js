@@ -32,6 +32,20 @@
     );
   }
 
+  // ── 模型协议硬闸（openmem e58210eb · 2026-09-18）──
+  // 与 src/config-center/render.ts 的 MODEL_PROTOCOL_ALLOWLIST 同步维护（前端只是拦截提示，
+  // 服务端 PUT/render.ts 才是真闸）；🔴 增删成员须附 openmem 实测记录 id，禁止拍脑补。
+  const MODEL_PROTOCOL_ALLOWLIST = {
+    codex: ["codex-model", "GwV4F", "Gwglm5.3"],
+    claude: ["claude-model"],
+  };
+  function modelAllowed(runtime, modelId) {
+    const allow = MODEL_PROTOCOL_ALLOWLIST[runtime || "dsh"];
+    if (!allow) return true;
+    return allow.indexOf(modelId) >= 0;
+  }
+  function runtimeGated(runtime) { return !!MODEL_PROTOCOL_ALLOWLIST[runtime || "dsh"]; }
+
   // ── 编辑模态 ──
   function AgentModal(props) {
     const isNew = !props.agent;
@@ -68,7 +82,25 @@
     function onProviderChange(newProviderId) {
       const p = props.providers.find((x) => x.id === newProviderId);
       const models = p ? (p.models || []) : [];
-      upd({ providerId: newProviderId, modelId: (models[0] && models[0].id) || "" });
+      let pick = (models[0] && models[0].id) || "";
+      // 协议硬闸：gated runtime 首选模型不合规时改选首个合规模型（无合规则保留首选，
+      // 让服务端 422 的错误文案兜底提示）
+      if (pick && !modelAllowed(f.runtime, pick)) {
+        const legal = models.find(function (m) { return modelAllowed(f.runtime, m.id); });
+        if (legal) pick = legal.id;
+      }
+      upd({ providerId: newProviderId, modelId: pick });
+    }
+    function onRuntimeChange(newRuntime) {
+      const patch = { runtime: newRuntime };
+      // 协议硬闸：切到 gated runtime 后当前模型不合规 → 自动校正到当前 provider 首个合规模型
+      if (!modelAllowed(newRuntime, f.modelId)) {
+        const p = props.providers.find((x) => x.id === f.providerId);
+        const models = p ? (p.models || []) : [];
+        const legal = models.find(function (m) { return modelAllowed(newRuntime, m.id); });
+        patch.modelId = legal ? legal.id : ""; // 无合规模型则清空，逼用户显式选择
+      }
+      upd(patch);
     }
     function toggleMcp(id) {
       const cur = f.mcps || [];
@@ -109,7 +141,7 @@
           Field({ label: "飞书 AppSecret" }, h(SecretInput, { value: f.appSecret, onInput: (e) => upd({ appSecret: e.target.value }) })),
         ),
         h("div", { class: "row" },
-          Field({ label: "运行时（CLI 引擎）" }, h("select", { value: f.runtime || "dsh", onInput: (e) => upd({ runtime: e.target.value }) },
+          Field({ label: "运行时（CLI 引擎）" }, h("select", { value: f.runtime || "dsh", onInput: (e) => onRuntimeChange(e.target.value) },
             (props.runtimes || []).map(function (rt) {
               const tag = rt.detected ? " ✓" : (rt.install ? " ✗（" + rt.install + "）" : " ✗（未检测到，作者自研运行时）");
               return h("option", { value: rt.runtime }, rt.display + tag);
@@ -119,8 +151,19 @@
           Field({ label: "Provider" }, h("select", { value: f.providerId, onInput: (e) => onProviderChange(e.target.value) },
             props.providers.map(function (p) { return h("option", { value: p.id }, p.displayName); }))),
           Field({ label: "模型" }, h("select", { value: f.modelId, onInput: (e) => upd({ modelId: e.target.value }) },
-            curProviderModels().map(function (m) { return h("option", { value: m.id }, (m.label || m.id) + " (" + m.id + ")"); }))),
+            curProviderModels().map(function (m) {
+              // 协议硬闸：gated runtime 下不兼容模型禁选（当前非法存量仍显示以便辨认，同样禁选）
+              const ok = modelAllowed(f.runtime, m.id);
+              const tag = ok ? "" : " ⛔协议不兼容";
+              return h("option", { value: m.id, disabled: !ok }, (m.label || m.id) + " (" + m.id + ")" + tag);
+            }))),
         ),
+        (runtimeGated(f.runtime) ? h("div", { class: "err", style: { marginBottom: 6 } },
+          "⛔ 协议绑定（e58210eb）：" + (f.runtime || "dsh") + " 只吃协议兼容模型 ["
+            + MODEL_PROTOCOL_ALLOWLIST[f.runtime || "dsh"].join(", ") + "]"
+            + (f.modelId && !modelAllowed(f.runtime, f.modelId)
+              ? "，当前所选 \"" + f.modelId + "\" 不在其中 ⇒ 保存将被拒绝"
+              : "。白名单增删须附 openmem 实测记录 id")) : null),
 
         h("div", { class: "row" },
           Field({ label: "状态栏样式" }, h("select", { value: (f.dividerMode === "icon" ? "full" : f.dividerMode) || "full", onInput: (e) => upd({ dividerMode: e.target.value }) },
