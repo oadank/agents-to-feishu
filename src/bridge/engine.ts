@@ -93,6 +93,37 @@ function sniffImageExt(buf: Buffer): string | null {
   return null;
 }
 
+/** ComfyUI 成品默认落盘目录（8090 遥控器写到本机 runs） */
+const COMFY_RUNS_IMG =
+  process.env.COMFY_RUNS_IMG
+  || (process.env.OS?.toLowerCase().includes('win') || process.platform === 'win32'
+    ? 'C:\\D\\opt\\comfyui\\runs\\img'
+    : '/c/D/opt/comfyui/runs/img');
+
+/**
+ * [2026-09-18 老大令·写死] 从 generate_image 工具输出提取本地图片绝对路径。
+ * 规则：JSON 字段 output_name/path/file/image_path/output + 正文里的绝对路径/成品文件名；
+ * 仅文件名时拼到 COMFY_RUNS_IMG。只认 png/jpg/jpeg/webp/gif。
+ */
+function extractGeneratedImagePaths(output: string): string[] {
+  const out = String(output || '');
+  const found = new Set<string>();
+  const push = (raw: string) => {
+    let p = String(raw || '').trim().replace(/^["']|["']$/g, '');
+    if (!p) return;
+    p = p.replace(/\\\\/g, '\\');
+    const looksAbs = /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('/');
+    const base = p.includes('/') || p.includes('\\') ? p.split(/[\\/]/).pop()! : p;
+    if (!/\.(png|jpe?g|webp|gif)$/i.test(base)) return;
+    if (looksAbs) found.add(p);
+    else found.add(path.join(COMFY_RUNS_IMG, base));
+  };
+  for (const m of out.matchAll(/"(?:output_name|path|file|image_path|output|task_id)"\s*:\s*"([^"]+)"/gi)) push(m[1]);
+  for (const m of out.matchAll(/[A-Za-z]:[\\/][^\s"'<>|*?]+\.(?:png|jpe?g|webp|gif)/gi)) push(m[0]);
+  for (const m of out.matchAll(/["']([^"']+\.(?:png|jpe?g|webp|gif))["']/gi)) push(m[1]);
+  return [...found];
+}
+
 /** 从 ~/.dsh/<bot>/stats/YYYY-MM-DD.jsonl 读缓存命中率与上下文用量。
  *  传入 sessionId 时只统计该对话的累计（按当前对话算），否则全量统计（按天）。 */
 function readCacheStats(contextLimitTokens: number, sessionId?: string): { lastRate: number; avgRate: number; contextPercent: number; contextUsed: number; contextLimit: number } | null {
@@ -423,6 +454,14 @@ export class MessageEngine {
     }
   }
 
+  /**
+   * 从 generate_image 工具输出解析本地图片路径（写死规则见 extractGeneratedImagePaths）。
+   * 生图成功必须自动发到飞书——只落盘不发=用户看不见。
+   */
+  private parseGeneratedImagePaths(output: string): string[] {
+    return extractGeneratedImagePaths(output);
+  }
+
   /** 命令回复：以卡片样式发（对齐主回复风格；老项目命令走富文本，卡片更统一） */
   async sendCommandCard(chatId: string, text: string): Promise<void> {
     try {
@@ -561,6 +600,7 @@ export class MessageEngine {
     let voiceText = ''; // agent 专门写的【语音】口语块；空=本回复无语音
     const pendingVoiceIds: string[] = []; // [2026-09-01] send_voice 工具产物（voiceId=sha256），本轮结束后投递到飞书
     const pendingImageIds: string[] = []; // [2026-09-17] send_image 工具产物（attachmentId=sha256），本轮结束后投递到飞书
+    const pendingGenFiles: string[] = []; // [2026-09-18 老大令] generate_image 本地成品——成功即必须自动发飞书
     let deeptutorSpoken = ''; // [2026-09-03] deeptutor 语音口语稿（voice_reply 事件携带），结束走控制中心 TTS
     const pendingMedia: Array<{ url: string; mime_type: string; filename: string }> = []; // [2026-09-03] deeptutor 图片/视频/文件兜底投递
     let hadError = false;
@@ -732,6 +772,18 @@ export class MessageEngine {
                 pendingImageIds.push(im[1]);
                 console.log(`[engine] send_image 捕获 attachmentId=${im[1].slice(0, 26)}… 待投递`);
               }
+              // [2026-09-18 老大令·写死] generate_image 成功 → 自动把本地图发到飞书。
+              // 不能只落盘给自己看：工具返回里凡出现 ComfyUI runs 下的图片路径/文件名，本轮结束强制投递。
+              const isGen = /generate_image|__generate_image|comfy__generate/i.test(ev.tool)
+                && !/send_image/i.test(ev.tool);
+              if (isGen && !/生图失败|工具执行失败|error/i.test(ev.output.slice(0, 200))) {
+                for (const p of this.parseGeneratedImagePaths(ev.output)) {
+                  if (!pendingGenFiles.includes(p)) {
+                    pendingGenFiles.push(p);
+                    console.log(`[engine] generate_image 捕获 ${p} → 本轮结束自动发飞书`);
+                  }
+                }
+              }
             }
             if (!this.opts.showToolCallCards) break;
             if (!ev.status || ev.status === 'running') {
@@ -894,6 +946,19 @@ export class MessageEngine {
           await this.sendImageObjectById(chatId, iid);
         } catch (e) {
           console.warn(`[engine] send_image 投递失败 attachmentId=${iid.slice(0, 26)}…: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      // [2026-09-18 老大令·写死] generate_image 成品自动发飞书（不能只落盘）。
+      for (const gp of pendingGenFiles) {
+        try {
+          if (!fs.existsSync(gp)) {
+            console.warn(`[engine] generate_image 自动发图跳过: 文件不存在 ${gp}`);
+            continue;
+          }
+          const ok = await this.sendImageFile(chatId, gp);
+          console.log(`[engine] generate_image 自动发图 chat=${chatId} file=${gp} ok=${ok}`);
+        } catch (e) {
+          console.warn(`[engine] generate_image 自动发图失败 ${gp}: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
       // [2026-09-03] deeptutor 语音投递：口语稿 → 控制中心 TTS（sendVoiceReply）→ opus → 飞书。
