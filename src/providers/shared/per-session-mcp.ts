@@ -22,7 +22,7 @@
 
 export type SessionMcpMode = 'stdioOnly' | 'nativeFileOnly' | 'rejectAllMcp' | 'typedHttpAll';
 
-interface CtiMcpDef {
+export interface CtiMcpDef {
   id: string;
   transport: string;
   url?: string;
@@ -34,38 +34,47 @@ interface CtiMcpDef {
 /** ACP session/new mcpServers 条目（stdio 形态：env 是 [{name,value}] 数组） */
 export type SessionMcpServer = Record<string, unknown>;
 
-/** 读取配置中心下发的勾选 MCP 池并按引擎模式映射（解析失败/未勾选一律返回 []，不抛错） */
-export function readSessionMcpServers(botId: string, mode: SessionMcpMode): SessionMcpServer[] {
-  if (mode === 'rejectAllMcp') return [];
+/**
+ * 读取配置中心下发的勾选 MCP 池原始 defs（解析失败/未勾选返回 []，不抛错）。
+ * 给非 ACP 数组形态的消费方用（如 claude SDK 的 record 形态）——解析单一真相源，
+ * 形态映射各自本地做，不强行套 ACP 形态。
+ */
+export function readCtiMcpDefs(botId: string): CtiMcpDef[] {
   try {
     const raw = process.env[`CTI_BOT_${botId.toUpperCase()}_MCP_SERVERS`] || '';
     if (!raw) return [];
-    const defs = JSON.parse(raw) as CtiMcpDef[];
-    const stdio = defs
-      .filter((m) => m.transport === 'stdio' && m.command)
-      .map((m): SessionMcpServer => ({
-        name: m.id,
-        command: m.command,
-        args: m.args || [],
-        env: Object.entries(m.env || {}).map(([k, v]) => ({ name: k, value: v })),
-      }));
-    if (mode === 'stdioOnly') return stdio;
-    const httpPlain = defs
-      .filter((m) => m.transport !== 'stdio' && m.url)
-      .map((m): SessionMcpServer => ({ name: m.id, url: m.url }));
-    if (mode === 'nativeFileOnly') return [...stdio, ...httpPlain];
-    // typedHttpAll（gemini CLI 0.58+）：http/sse 条目带 type 字面量 + headers 数组，
-    // 否则 zod union invalid_union ⇒ session/new -32603。
-    const httpTyped = defs
-      .filter((m) => m.transport !== 'stdio' && m.url)
-      .map((m): SessionMcpServer => ({
-        name: m.id,
-        type: m.transport === 'sse' ? 'sse' : 'http',
-        url: m.url,
-        headers: [],
-      }));
-    return [...stdio, ...httpTyped];
+    return JSON.parse(raw) as CtiMcpDef[];
   } catch {
     return [];
   }
+}
+
+/** 读取配置中心下发的勾选 MCP 池并按引擎模式映射（解析失败/未勾选一律返回 []，不抛错） */
+export function readSessionMcpServers(botId: string, mode: SessionMcpMode): SessionMcpServer[] {
+  if (mode === 'rejectAllMcp') return [];
+  const defs = readCtiMcpDefs(botId);
+  const stdio = defs
+    .filter((m) => m.transport === 'stdio' && m.command)
+    .map((m): SessionMcpServer => ({
+      name: m.id,
+      command: m.command,
+      args: m.args || [],
+      env: Object.entries(m.env || {}).map(([k, v]) => ({ name: k, value: v })),
+    }));
+  if (mode === 'stdioOnly') return stdio;
+  const httpPlain = defs
+    .filter((m) => m.transport !== 'stdio' && m.url)
+    .map((m): SessionMcpServer => ({ name: m.id, url: m.url }));
+  if (mode === 'nativeFileOnly') return [...stdio, ...httpPlain];
+  // typedHttpAll（gemini CLI 0.58+）：http/sse 条目带 type 字面量 + headers 数组，
+  // 否则 zod union invalid_union ⇒ session/new -32603。
+  const httpTyped = defs
+    .filter((m) => m.transport !== 'stdio' && m.url)
+    .map((m): SessionMcpServer => ({
+      name: m.id,
+      type: m.transport === 'sse' ? 'sse' : 'http',
+      url: m.url,
+      headers: [],
+    }));
+  return [...stdio, ...httpTyped];
 }

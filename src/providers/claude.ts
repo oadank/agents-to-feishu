@@ -17,8 +17,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { Query, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { Query, SDKMessage, SDKUserMessage, Options } from '@anthropic-ai/claude-agent-sdk';
 import type { RuntimeProvider, StreamChatParams, StreamEvent } from './types.js';
+import { readCtiMcpDefs } from './shared/per-session-mcp.js';
 import { buildClaudeBuiltinServer, setCurrentChatId } from '../tools/claude-tools.js';
 import type { ClaudeBuiltinServer } from '../tools/claude-tools.js';
 import type { BridgeToolDeps } from '../tools/registry.js';
@@ -233,29 +234,27 @@ export class ClaudeProvider implements RuntimeProvider {
     // 否则会被 HKCU\Environment 里 cc-haha 留下的 ANTHROPIC_MODEL=claude-model 顶掉。
     const cfgModel = process.env[`CTI_BOT_${(process.env.CTI_BOT || 'claude').toUpperCase()}_MODEL`];
     if (cfgModel) env.ANTHROPIC_MODEL = cfgModel;
-    // MCP 穿透（2026-09-10）：配置中心勾选的外接 MCP 池（渲染层 CTI_BOT_<ID>_MCP_SERVERS JSON，
-    // 与 zcode 穿透同源）映射进 SDK mcpServers——win-desktop-helper 等 stdio 外接由此真正到 claude。
-    let externalMcp: Record<string, unknown> = {};
-    try {
-      const raw = process.env[`CTI_BOT_${(process.env.CTI_BOT || 'claude').toUpperCase()}_MCP_SERVERS`] || '';
-      if (raw) {
-        for (const m of JSON.parse(raw) as Array<{ id: string; transport: string; url?: string; command?: string; args?: string[]; env?: Record<string, string> }>) {
-          if (m.transport === 'stdio' && m.command) {
-            externalMcp[m.id] = { type: 'stdio', command: m.command, args: m.args || [], ...(m.env && Object.keys(m.env).length ? { env: m.env } : {}) };
-          } else if (m.transport === 'streamable-http' && m.url) {
-            externalMcp[m.id] = { type: 'http', url: m.url };
-          } else if (m.transport === 'sse' && m.url) {
-            externalMcp[m.id] = { type: 'sse', url: m.url };
-          }
-        }
-        rtLog(`[claude] MCP 穿透: ${Object.keys(externalMcp).join(', ') || '（空）'}`);
+    // MCP 穿透（2026-09-10）：配置中心勾选的外接 MCP 池 → SDK mcpServers。
+    // 2026-09-18 收编：解析/过滤走共享模块 readCtiMcpDefs（单一真相源，随防冒名等
+    // 全局规则联动）；SDK record 形态映射 + 与内置 sdkMcp 合并保留在本地——
+    // claude SDK 是 record 形态（env 为对象），与 ACP 数组形态不同构，不强行套
+    // readSessionMcpServers（评估结论见 openmem 0642434c）。
+    const externalMcp: Record<string, unknown> = {};
+    for (const m of readCtiMcpDefs(process.env.CTI_BOT || 'claude')) {
+      if (m.transport === 'stdio' && m.command) {
+        externalMcp[m.id] = { type: 'stdio', command: m.command, args: m.args || [], ...(m.env && Object.keys(m.env).length ? { env: m.env } : {}) };
+      } else if (m.transport === 'streamable-http' && m.url) {
+        externalMcp[m.id] = { type: 'http', url: m.url };
+      } else if (m.transport === 'sse' && m.url) {
+        externalMcp[m.id] = { type: 'sse', url: m.url };
       }
-    } catch (e) {
-      rtLog('[claude] MCP 穿透解析失败（跳过外接 MCP）: ' + (e instanceof Error ? e.message : String(e)));
     }
+    rtLog(`[claude] MCP 穿透: ${Object.keys(externalMcp).join(', ') || '（空）'}`);
     try {
       const q = query({
-        prompt: queue,
+        // PushQueue 是本进程内的 AsyncIterable，元素形状与 SDKUserMessage 结构兼容但
+        // 字面类型不同——SDK 只在运行期读 .type/.message，这里收窄为 SDKUserMessage。
+        prompt: queue as unknown as AsyncIterable<SDKUserMessage>,
         options: {
           cwd: this.cwd,
           ...(this.cliPath ? { pathToClaudeCodeExecutable: this.cliPath } : {}),
@@ -320,7 +319,7 @@ export class ClaudeProvider implements RuntimeProvider {
           // Phase 1 内置工具注入：进程内 server（内存直调，无 HTTP）。attachBridgeTools 必须先于首条消息调用。
           // 2026-09-10 MCP 穿透：外接池与内置工具合并，同名时内置（spec）优先。
           ...(Object.keys(externalMcp).length || this.sdkMcp ? { mcpServers: { ...externalMcp, ...(this.sdkMcp ? this.sdkMcp.spec : {}) } } : {}),
-        },
+        } as unknown as Options,
       });
       this.q = q;
       this.queue = queue;
