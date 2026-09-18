@@ -94,7 +94,8 @@ export function buildBuiltinTools(deps: BridgeToolDeps): BuiltinTool[] {
       name: 'generate_image',
       description:
         '文生图/图生图：把提示词交给本机 ComfyUI 生成图片，返回 JSON（含输出文件名 output_name）。'
-        + '用户要画图/生图/画一张时使用。',
+        + '用户要画图/生图/画一张时使用。'
+        + '【服务侧已写死】生成成功后桥接会自动把本地图发到当前飞书会话，你只需确认调用成功，不必再自己 send_image。',
       schema: {
         prompt: z.string().describe('生图提示词'),
         template: z.string().optional().describe('工作流模板名（省略用默认）'),
