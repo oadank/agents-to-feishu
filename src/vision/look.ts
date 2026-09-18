@@ -1,11 +1,13 @@
 /**
  * agents-to-feishu 内建看图能力（look_image 三工具：describe / reverse / text）。
  *
- * 【可分发原则（用户 2026-08-25）】
- *  - 看图是项目自带能力，不依赖任何外部常驻服务（不依赖 vision-qa/8092、zai-vision、
- *    本机 ollama），也不需要 cordis.yml 配 MCP。
- *  - 只用在 config-store.json 的 vision 段配一个视觉模型（默认免费 agnes-ai）即可用。
- *  - 视觉后端用 OpenAI 兼容 /chat/completions 接口（image_url + text 多模态）。
+ * 【可分发原则（用户 2026-08-25；2026-09-19 后端链升级）】
+ *  - 看图是项目自带能力，不需要 cordis.yml 配 MCP。
+ *  - 后端链（2026-09-19 老大拍板：默认远程、本地只兜底）：
+ *      1. 主站：config-store.json vision.baseUrl（.cn 国内站 + VISION_API_KEY）
+ *      2. 回退：.com 国际站 apihub.agnes-ai.com + 备用 key（VISION_API_KEY_COM_2/COM_1）
+ *      3. 兜底：本地 vision-qa :8091（POST /analyze，服务本体零改动）
+ *  - 远程站走 OpenAI 兼容 /chat/completions 接口（image_url + text 多模态）。
  *
  * 三工具（对齐 dsh web 端 look_image 语义）：
  *  - describe : 简述图片内容（普通看图）
@@ -31,6 +33,8 @@ export interface LookResult {
   text?: string;
   task?: string;
   model?: string;
+  /** 命中的后端：main（主站）/ com（.com 国际站）/ local:8091（vision-qa 兜底） */
+  backend?: string;
   durationMs?: number;
   error?: string;
 }
@@ -74,6 +78,36 @@ export function resolveVisionApiKey(vision: VisionConfig, opts?: LookOptions): s
   return '';
 }
 
+/** 读取 .com 国际站备用 key（key2/key1）：env > 凭证文件（VISION_API_KEY_COM_2 优先于 COM_1） */
+export function resolveVisionComApiKeys(): string[] {
+  const seen = new Map<string, string>();
+  try {
+    const home = process.env.CTI_USER_HOME || os.homedir();
+    for (const fname of ['.credentials.yaml', '.env']) {
+      const p = path.join(home, '.agents-to-feishu', fname);
+      if (!fs.existsSync(p)) continue;
+      const txt = fs.readFileSync(p, 'utf-8');
+      for (const m of txt.matchAll(/^\s*(VISION_API_KEY_COM_2|VISION_API_KEY_COM_1|VISION_API_KEY_COM|AGNES_API_KEY_COM)\s*[:=]\s*(.+)/gm)) {
+        const v = m[2].trim();
+        if (v && !seen.has(m[1])) seen.set(m[1], v);
+      }
+      if (seen.size) break;
+    }
+  } catch { /* 忽略 */ }
+  const ordered = [
+    process.env.VISION_API_KEY_COM_2 ?? seen.get('VISION_API_KEY_COM_2'),
+    process.env.VISION_API_KEY_COM_1 ?? seen.get('VISION_API_KEY_COM_1'),
+    process.env.VISION_API_KEY_COM ?? seen.get('VISION_API_KEY_COM'),
+    process.env.AGNES_API_KEY_COM ?? seen.get('AGNES_API_KEY_COM'),
+  ];
+  const keys: string[] = [];
+  for (const k of ordered) {
+    const t = (k || '').trim();
+    if (t && !keys.includes(t)) keys.push(t);
+  }
+  return keys;
+}
+
 /** 通过文件头 magic bytes 判断图片真实 MIME（不依赖扩展名） */
 function sniffImageMime(b: Buffer): string {
   if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
@@ -83,6 +117,93 @@ function sniffImageMime(b: Buffer): string {
       b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
   if (b.length >= 6 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image/gif';
   return 'image/png';
+}
+
+/** 单站 OpenAI 兼容调用（/chat/completions，image_url + text 多模态） */
+async function callOpenAIChat(
+  backend: { label: string; baseUrl: string; apiKey: string },
+  imgB64: string,
+  imgMime: string,
+  userContent: string,
+  model: string,
+  timeoutMs: number,
+): Promise<{ ok: boolean; text?: string; error?: string }> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  let resp: Response;
+  try {
+    resp = await fetch((backend.baseUrl.endsWith('/') ? backend.baseUrl.slice(0, -1) : backend.baseUrl) + '/chat/completions', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(backend.apiKey ? { authorization: 'Bearer ' + backend.apiKey } : {}),
+      },
+      signal: ac.signal,
+      body: JSON.stringify({
+        model,
+        temperature: 0.4,
+        messages: [{ role: 'user', content: [
+          { type: 'text', text: userContent },
+          { type: 'image_url', image_url: { url: `data:${imgMime};base64,${imgB64}` } },
+        ] }],
+      }),
+    });
+  } catch (error) {
+    clearTimeout(timer);
+    const aborted = (error as Error)?.name === 'AbortError';
+    return { ok: false, error: aborted ? `超时（${Math.round(timeoutMs / 1000)}s）` : `无法连接：${((error as Error)?.message) ?? String(error)}` };
+  }
+  clearTimeout(timer);
+  if (!resp.ok) {
+    let body = ''; try { body = (await resp.text()).slice(0, 200); } catch { /* 忽略 */ }
+    return { ok: false, error: `HTTP ${resp.status}：${body}` };
+  }
+  try {
+    const data = await resp.json() as { choices?: Array<{ message?: { content?: unknown } }> };
+    const rawContent = data?.choices?.[0]?.message?.content;
+    const text = (typeof rawContent === 'string' ? rawContent : Array.isArray(rawContent) ? rawContent.map((c) => typeof c === 'object' && c && 'text' in c ? (c as { text: string }).text : '').join('') : '').trim();
+    if (!text) return { ok: false, error: '后端未返回内容' };
+    return { ok: true, text };
+  } catch (e) {
+    return { ok: false, error: `响应解析失败：${String((e as Error)?.message ?? e)}` };
+  }
+}
+
+/** 本地兜底：vision-qa :8091（POST /analyze 私有格式；task 映射 describe/reverse→general、text→text） */
+async function callLocalVisionqa(
+  imgB64: string,
+  task: 'describe' | 'text' | 'reverse',
+  timeoutMs: number,
+): Promise<{ ok: boolean; text?: string; error?: string }> {
+  const vqTask = task === 'text' ? 'text' : 'general';
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  let resp: Response;
+  try {
+    resp = await fetch('http://127.0.0.1:8091/analyze', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      signal: ac.signal,
+      body: JSON.stringify({ image: imgB64, task: vqTask }),
+    });
+  } catch (error) {
+    clearTimeout(timer);
+    const aborted = (error as Error)?.name === 'AbortError';
+    return { ok: false, error: aborted ? `超时（${Math.round(timeoutMs / 1000)}s）` : `无法连接：${((error as Error)?.message) ?? String(error)}` };
+  }
+  clearTimeout(timer);
+  if (!resp.ok) {
+    let body = ''; try { body = (await resp.text()).slice(0, 200); } catch { /* 忽略 */ }
+    return { ok: false, error: `HTTP ${resp.status}：${body}` };
+  }
+  try {
+    const data = await resp.json() as { text?: string; error?: string };
+    const text = (data.text || '').trim();
+    if (!text) return { ok: false, error: data.error || 'vision-qa 未返回内容' };
+    return { ok: true, text };
+  } catch (e) {
+    return { ok: false, error: `响应解析失败：${String((e as Error)?.message ?? e)}` };
+  }
 }
 
 /**
@@ -136,41 +257,35 @@ export async function lookImage(options: {
     const imgMime = sniffImageMime(imgRaw);
 
     const t0 = Date.now();
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), timeoutMs);
-    let resp: Response;
-    try {
-      resp = await fetch((baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl) + '/chat/completions', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(apiKey ? { authorization: 'Bearer ' + apiKey } : {}),
-        },
-        signal: ac.signal,
-        body: JSON.stringify({
-          model,
-          temperature: 0.4,
-          messages: [{ role: 'user', content: [
-            { type: 'text', text: userContent },
-            { type: 'image_url', image_url: { url: `data:${imgMime};base64,${imgB64}` } },
-          ] }],
-        }),
-      });
-    } catch (error) {
-      clearTimeout(timer);
-      const aborted = (error as Error)?.name === 'AbortError';
-      return { ok: false, error: aborted ? `视觉后端超时（${Math.round(timeoutMs / 1000)}s）：${baseUrl}` : `无法连接视觉后端（${baseUrl}）：${((error as Error)?.message) ?? String(error)}` };
+
+    // 后端链：主站（config-store baseUrl）→ .com 国际站（key2/key1）→ 本地 vision-qa :8091 兜底
+    const isLocalBase = /127\.0\.0\.1|localhost/i.test(baseUrl);
+    const backends: Array<{ label: string; baseUrl: string; apiKey: string }> = [
+      { label: isLocalBase ? 'local-custom' : 'main', baseUrl, apiKey },
+    ];
+    if (!isLocalBase) {
+      for (const k of resolveVisionComApiKeys()) {
+        backends.push({ label: 'com', baseUrl: 'https://apihub.agnes-ai.com/v1', apiKey: k });
+      }
     }
-    clearTimeout(timer);
-    if (!resp.ok) {
-      let body = ''; try { body = (await resp.text()).slice(0, 300); } catch { /* 忽略 */ }
-      return { ok: false, error: `视觉后端返回 ${resp.status}：${body}` };
+
+    const errs: string[] = [];
+    const remoteTimeout = Math.min(timeoutMs, 45000);
+    for (const b of backends) {
+      const r = await callOpenAIChat(b, imgB64, imgMime, userContent, model, remoteTimeout);
+      if (r.ok && r.text) {
+        return { ok: true, text: r.text, task, model, backend: b.label, durationMs: Date.now() - t0 };
+      }
+      errs.push(`[${b.label}] ${r.error}`);
     }
-    const data = await resp.json() as { choices?: Array<{ message?: { content?: unknown } }> };
-    const rawContent = data?.choices?.[0]?.message?.content;
-    const text = (typeof rawContent === 'string' ? rawContent : Array.isArray(rawContent) ? rawContent.map((c) => typeof c === 'object' && c && 'text' in c ? (c as { text: string }).text : '').join('') : '').trim();
-    if (!text) return { ok: false, error: '视觉后端未返回内容' };
-    return { ok: true, text, task, model, durationMs: Date.now() - t0 };
+
+    // 本地兜底：vision-qa :8091（POST /analyze 私有格式，服务本体零改动）
+    const lr = await callLocalVisionqa(imgB64, task, Math.min(timeoutMs, 120000));
+    if (lr.ok && lr.text) {
+      return { ok: true, text: lr.text, task, model: 'local-qwen3-vl', backend: 'local:8091', durationMs: Date.now() - t0 };
+    }
+    errs.push(`[local:8091] ${lr.error}`);
+    return { ok: false, error: `视觉后端全链失败（${errs.length} 站）：${errs.join('；')}` };
   } catch (e) {
     return { ok: false, error: String((e as Error)?.message ?? e) };
   }
