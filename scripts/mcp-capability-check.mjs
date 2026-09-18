@@ -41,7 +41,10 @@ const BOT_IDS = [
 ];
 const DEEPTUTOR_NA = 'deeptutor';
 const ALL_DOMAINS = ['mh', 'lark', 'desktop', 'vision', 'gen'];
-const GEN_BOTS = new Set(['dsh', 'zcode']);
+const GEN_BOTS = new Set([
+  'claude', 'codex', 'gemini', 'hermes', 'mimo', 'openakita', 'reasonix', 'openclaw', 'opencode',
+  'dsh', 'zcode',
+]); // 2026-09-19 放行：9 家 + dsh/zcode 全测生图（cti-builtin generate_image）
 
 /** chat-list 会话名别名（user 视角 p2p name ≠ bot id） */
 const BOT_NAME_ALIASES = {
