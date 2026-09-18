@@ -119,8 +119,11 @@ function extractGeneratedImagePaths(output: string): string[] {
     else found.add(path.join(COMFY_RUNS_IMG, base));
   };
   for (const m of out.matchAll(/"(?:output_name|path|file|image_path|output|task_id)"\s*:\s*"([^"]+)"/gi)) push(m[1]);
-  for (const m of out.matchAll(/[A-Za-z]:[\\/][^\s"'<>|*?]+\.(?:png|jpe?g|webp|gif)/gi)) push(m[0]);
+  // 绝对路径：允许文件名含空格/中文（Krea2 Turbo-文生图_00001.png）
+  for (const m of out.matchAll(/[A-Za-z]:[\\/](?:[^\\/:*?"<>|\r\n]+[\\/])*[^\\/:*?"<>|\r\n]+\.(?:png|jpe?g|webp|gif)/gi)) push(m[0]);
   for (const m of out.matchAll(/["']([^"']+\.(?:png|jpe?g|webp|gif))["']/gi)) push(m[1]);
+  // 裸文件名（含空格）→ 拼 runs 目录
+  for (const m of out.matchAll(/(?<![\\/\w.-])((?:Krea2|Z-IMAGE|ComfyUI_temp)[^"'<>|*\r\n]*\.(?:png|jpe?g|webp|gif))/gi)) push(m[1]);
   return [...found];
 }
 
@@ -952,11 +955,15 @@ export class MessageEngine {
         }
       }
       // [2026-09-18 老大令·写死] generate_image 成品自动发飞书（不能只落盘）。
-      // 兜底链：①工具 output 路径 ②本轮正文/工具卡路径 ③本轮 mtime 新鲜的 runs 目录成品
+      // 兜底链：①工具 output 路径 ②本轮正文/工具卡/思考 ③本轮 mtime 新鲜 runs 成品
+      // zcode 形态：tool 名 mcp__comfy__generate_image / 正文含 Krea2 路径（含空格）
+      const turnBlob = `${layers.text}\n${layers.toolLines.join('\n')}\n${layers.thinking}`;
+      if (/generate_image|__generate_image|comfy__generate|Krea2|文生图|ComfyUI_temp/i.test(turnBlob)) {
+        sawGenTool = true;
+      }
       if (pendingGenFiles.length === 0) {
-        const blob = `${layers.text}\n${layers.toolLines.join('\n')}\n${layers.thinking}`;
-        for (const p of this.parseGeneratedImagePaths(blob)) {
-          if (/comfyui[\\/]runs|comfyui_temp/i.test(p) && !pendingGenFiles.includes(p)) {
+        for (const p of this.parseGeneratedImagePaths(turnBlob)) {
+          if (/comfyui[\\/]runs|comfyui_temp|Krea2|文生图/i.test(p) && !pendingGenFiles.includes(p)) {
             pendingGenFiles.push(p);
             console.log(`[engine] generate_image 兜底捕获(正文) ${p}`);
           }
