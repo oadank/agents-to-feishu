@@ -183,7 +183,30 @@ async function larkSend(chatId, text, key) {
       '--idempotency-key', `${key}-a1`,
     ], 45000);
   }
+  // validation 失败再试一次（偶发；不碰 gate 语义）
+  const b2 = `${r.out || ''}${r.err || ''}`;
+  if (!/"ok"\s*:\s*true/i.test(b2) && /"type"\s*:\s*"valid/i.test(b2)) {
+    r = await run(LARK_CLI, [
+      'im', '+messages-send',
+      '--chat-id', chatId,
+      '--text', text,
+      '--as', 'user',
+      '--idempotency-key', `${key}-a2`,
+    ], 45000);
+  }
   return r;
+}
+
+function parseSendTimeMs(sentOut) {
+  try {
+    const j = JSON.parse(String(sentOut || ''));
+    const ct = j?.data?.create_time;
+    if (!ct) return Date.now();
+    const ts = Date.parse(String(ct).replace(' ', 'T'));
+    return Number.isFinite(ts) ? ts : Date.now();
+  } catch {
+    return Date.now();
+  }
 }
 
 async function larkRead(chatId, pageSize = 5) {
@@ -230,19 +253,35 @@ function isFinalBotReply(text) {
   return /成品答案|agent 花名册|GitHub 访问通道|本机环境事实速查|没有 mh_|没有 lark_|unsupported call|调用成功|会话|群列表|count\s*[:=]|✅|❌/i.test(t);
 }
 
-async function waitBotReply(chatId, totalWaitMs) {
+async function waitBotReply(chatId, totalWaitMs, afterMs = 0) {
   const start = Date.now();
   let lastAll = '';
   let lastBot = '';
   while (Date.now() - start < totalWaitMs) {
-    const r = await larkRead(chatId, 5);
+    const r = await larkRead(chatId, 8);
     lastAll = r.all || r.text || '';
-    lastBot = pickBotReply(r.msgs);
+    // 只认探针发出之后的 bot 回复，避免捡到历史报错卡
+    const fresh = (r.msgs || []).filter((m) => {
+      if (afterMs <= 0) return true;
+      const ts = Date.parse(String(m.create_time || '').replace(' ', 'T'));
+      // create_time 秒级；允许同秒内
+      return Number.isFinite(ts) ? ts >= afterMs - 2000 : true;
+    });
+    lastBot = pickBotReply(fresh);
     if (lastBot && isFinalBotReply(lastBot)) {
       return { bot: lastBot, all: lastAll };
     }
     await new Promise((res) => setTimeout(res, 8000));
   }
+  // 超时回退：仍按新消息窗取，没有再退回全量（不主动拿历史报错充数）
+  const r = await larkRead(chatId, 8);
+  const fresh = (r.msgs || []).filter((m) => {
+    if (afterMs <= 0) return true;
+    const ts = Date.parse(String(m.create_time || '').replace(' ', 'T'));
+    return Number.isFinite(ts) ? ts >= afterMs - 2000 : true;
+  });
+  lastBot = pickBotReply(fresh);
+  lastAll = r.all || r.text || '';
   return { bot: lastBot, all: lastAll };
 }
 
@@ -323,7 +362,8 @@ async function probeBot(name, chatId, kind, waitMs) {
   if (!/"ok"\s*:\s*true/i.test(sentBlob) && !sent.ok) {
     return { state: '❌', note: `send失败:${(sent.err || sent.out || '').slice(0, 70)}`, snippet: '' };
   }
-  const { bot, all } = await waitBotReply(chatId, waitMs);
+  const afterMs = parseSendTimeMs(sent.out);
+  const { bot, all } = await waitBotReply(chatId, waitMs, afterMs);
   const blob = bot || all || '';
   if (/拦下|api-gate/i.test(blob)) {
     return { state: '❌', note: 'api-gate拦门(read)', snippet: 'gate' };
@@ -335,7 +375,7 @@ async function probeBot(name, chatId, kind, waitMs) {
   // 流式卡片：工具卡已出但成品名未到 → 再等一轮复读一次
   if (judge.state === '⏳') {
     await new Promise((r) => setTimeout(r, 6000));
-    const again = await waitBotReply(chatId, 15000);
+    const again = await waitBotReply(chatId, 15000, afterMs);
     const blob2 = again.bot || again.all || '';
     judge = kind === 'mh' ? judgeMh(blob2) : judgeLark(blob2);
     if (judge.state === '⏳') judge = { state: '✅', note: 'native(tool-ok)' };
