@@ -238,9 +238,22 @@ export function writeEnvMerged(
   const { text, changes } = mergeEnvText(existing, renderedText, explicitKeys);
   const backup = backupFile(file);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, text, 'utf-8');
+  writeFileAtomic(file, text);
   logApply(agentId, file, changes, backup);
   return changes;
+}
+
+/** 原子写入（2026-09-19 撞名根治配套②）：同目录临时文件 + rename，消半份文件竞态。
+ *  读者要么看到旧完整文件要么看到新完整文件，绝不读到半个（进程崩溃/并发写场景）。 */
+export function writeFileAtomic(file: string, text: string): void {
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, text, 'utf-8');
+  try {
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    throw e;
+  }
 }
 
 /** 合并落盘（cordis.yml）：备份 → 托管区替换 → 写入 */
@@ -249,6 +262,6 @@ export function writeCordisMerged(file: string, generatedText: string, agentId: 
   const text = mergeCordisText(existing, generatedText);
   const backup = backupFile(file);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, text, 'utf-8');
+  writeFileAtomic(file, text);
   logApply(agentId, file, [{ key: '(cordis managed region)', oldValue: '', newValue: 'updated', kind: 'update' }], backup);
 }

@@ -17,7 +17,7 @@ import {
   type ConfigStore, type ProviderDef, type AgentDef, type McpDef,
   findProvider, findModel, resolveAgentWorkdir,
 } from './store.js';
-import { writeEnvMerged, writeCordisMerged, backupFile, logApply } from './patch-apply.js';
+import { writeEnvMerged, writeCordisMerged, backupFile, logApply, writeFileAtomic } from './patch-apply.js';
 
 /** 项目根（render.ts 位于 src/config-center/，上溯两级） */
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -567,7 +567,7 @@ export function writeAgentArtifacts(
     const personaBody = [personaGlobal, personaCustom].filter((s) => s && s.trim()).join('\n\n---\n\n');
     const personaPath = path.join(process.env.CTI_USER_HOME || os.homedir(), '.dsh', `${agent.id}-bot`, 'persona.md');
     fs.mkdirSync(path.dirname(personaPath), { recursive: true });
-    fs.writeFileSync(personaPath, personaBody, 'utf-8');
+    writeFileAtomic(personaPath, personaBody);
   }
   return { configEnv, cordisYml, configEnvPath, cordisYmlPath };
 }
@@ -715,7 +715,7 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
             j.endpoints[0].model = cliModel;
             j.endpoints[0].api_key_env = keyEnv;
             j.endpoints[0].note = `同步自配置中心 provider=${prov.id} model=${modelId} (${new Date().toISOString().slice(0, 10)})`;
-            fs.writeFileSync(f, JSON.stringify(j, null, 2), 'utf-8');
+            writeFileAtomic(f, JSON.stringify(j, null, 2));
           }
         }
         // MCP：openakita ACP adapter 不消费 session/new mcpServers（scripts/openakita-acp-server.py
@@ -735,7 +735,7 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
             ? JSON.parse(fs.readFileSync(mcpCfgPath, 'utf-8'))
             : { mcpServers: {} };
           prevCfg.mcpServers = httpMcps; // 配置中心勾选为权威（整表替换，避免已下线服务残留）
-          fs.writeFileSync(mcpCfgPath, `${JSON.stringify(prevCfg, null, 2)}\n`, 'utf-8');
+          writeFileAtomic(mcpCfgPath, `${JSON.stringify(prevCfg, null, 2)}\n`);
           for (const roots of [
             path.join(hunme, '.openakita', 'data', 'mcp', 'servers'),
             path.join(hunme, '.openakita', 'workspaces', 'default', 'data', 'mcp', 'servers'),
@@ -744,7 +744,7 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
             for (const [id, def] of Object.entries(httpMcps)) {
               const dir = path.join(roots, id);
               fs.mkdirSync(dir, { recursive: true });
-              fs.writeFileSync(path.join(dir, 'config.json'), `${JSON.stringify({ name: id, ...def }, null, 2)}\n`, 'utf-8');
+              writeFileAtomic(path.join(dir, 'config.json'), `${JSON.stringify({ name: id, ...def }, null, 2)}\n`);
             }
           }
         }
@@ -763,7 +763,7 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
           name: prov.displayName || pk,
           options: { baseURL: baseUrl, apiKey: `{env:${keyEnv}}` },
         };
-        fs.writeFileSync(f, JSON.stringify(j, null, 2), 'utf-8');
+        writeFileAtomic(f, JSON.stringify(j, null, 2));
         break;
       }
       case 'gemini': {
@@ -773,7 +773,7 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
         const j = JSON.parse(fs.readFileSync(f, 'utf-8'));
         j.model = j.model || {};
         j.model.name = cliModel;
-        fs.writeFileSync(f, JSON.stringify(j, null, 2), 'utf-8');
+        writeFileAtomic(f, JSON.stringify(j, null, 2));
         break;
       }
       case 'codex':
@@ -801,7 +801,7 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
             // 2026-08-30 思考深度开关：off=minimal（干活快）/ default=high（保持现状）/ high=high
             const codexEffort = agent.thinkingLevel === 'off' ? 'minimal' : 'high';
             t = setTomlValue(t, 'model_reasoning_effort', codexEffort);
-            fs.writeFileSync(f, t, 'utf-8');
+            writeFileAtomic(f, t);
           }
         }
         break;
@@ -900,7 +900,7 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
           }
         }
 
-        fs.writeFileSync(f, `${JSON.stringify(j, null, 2)}\n`, 'utf-8');
+        writeFileAtomic(f, `${JSON.stringify(j, null, 2)}\n`);
         break;
       }
       case 'reasonix': {
@@ -929,7 +929,7 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
         if (mm && !mm[2].includes(bare)) {
           t = t.replace(modelsRe, `$1${mm[2]}, "${bare}"$3`);
         }
-        fs.writeFileSync(f, t, 'utf-8');
+        writeFileAtomic(f, t);
         break;
       }
       case 'hermes': {
@@ -970,7 +970,7 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
             }
           }
         }
-        fs.writeFileSync(f, t, 'utf-8');
+        writeFileAtomic(f, t);
         break;
       }
       case 'claude':
@@ -1012,7 +1012,7 @@ export function syncModelToCli(store: ConfigStore, agent: AgentDef, globalExtra:
         if (!dp.modelPolicy.allow.includes(modelRef)) dp.modelPolicy.allow.unshift(modelRef);
         dp.models = dp.models || {};
         if (!dp.models[modelRef]) dp.models[modelRef] = {};
-        fs.writeFileSync(f, JSON.stringify(j, null, 2).split('\n').join(eol) + eol, 'utf-8');
+        writeFileAtomic(f, JSON.stringify(j, null, 2).split('\n').join(eol) + eol);
         console.log(`[render] openclaw 模型联动 ${agent.id}: ${oldRef || '(空)'} -> ${modelRef}`);
         break;
       }
@@ -1148,7 +1148,7 @@ export function syncMcpToCli(store: ConfigStore, agent: AgentDef): void {
         }
         if (touched.length) {
           const backup = backupFile(f);
-          fs.writeFileSync(f, JSON.stringify(j, null, 2).split('\n').join(eol) + eol, 'utf-8');
+          writeFileAtomic(f, JSON.stringify(j, null, 2).split('\n').join(eol) + eol);
           audit(f, backup, touched);
           console.log(`[render] openclaw MCP 同步 ${agent.id}: upsert ${touched.join(', ')}`);
         }
@@ -1178,7 +1178,7 @@ export function syncMcpToCli(store: ConfigStore, agent: AgentDef): void {
               const fp = path.join(dir, fname);
               if (fs.existsSync(fp) && fs.readFileSync(fp, 'utf-8') === content) continue; // 幂等
               const backup = backupFile(fp);
-              fs.writeFileSync(fp, content, 'utf-8');
+              writeFileAtomic(fp, content);
               audit(fp, backup, [m.id]);
             }
             touched.push(m.id);
@@ -1200,7 +1200,7 @@ export function syncMcpToCli(store: ConfigStore, agent: AgentDef): void {
         }
         if (touched.length) {
           const backup = backupFile(f);
-          fs.writeFileSync(f, t, 'utf-8');
+          writeFileAtomic(f, t);
           audit(f, backup, touched);
           console.log(`[render] codex MCP 同步 ${agent.id}: upsert ${touched.join(', ')}`);
         }
