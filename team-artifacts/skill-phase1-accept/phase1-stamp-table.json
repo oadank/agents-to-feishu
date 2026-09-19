@@ -1,0 +1,110 @@
+[
+  {
+    "bot": "claude",
+    "pass": true,
+    "at": "2026-09-19 12:04",
+    "n": 1,
+    "note": "PASS",
+    "mid": "om_x100b65d4d5f918a4c16b8cd09a5cfc6",
+    "expect": "all-platform-video-extract"
+  },
+  {
+    "bot": "codex",
+    "pass": true,
+    "at": "2026-09-19 12:04",
+    "n": 3,
+    "note": "PASS",
+    "mid": "om_x100b65d4d56af0acc4ed85c9593f3a1",
+    "expect": "feishu-bridge"
+  },
+  {
+    "bot": "mimo",
+    "pass": true,
+    "at": "2026-09-19 12:04",
+    "n": 5,
+    "note": "PASS",
+    "mid": "om_x100b65d4d2cc70a4ddce793a94abc48",
+    "expect": "memory-ops"
+  },
+  {
+    "bot": "gemini",
+    "pass": true,
+    "at": "2026-09-19 12:04",
+    "n": 2,
+    "note": "PASS",
+    "mid": "om_x100b65d4d2a430acc4a4a3c4ca4c12f",
+    "expect": "comfyui-ops"
+  },
+  {
+    "bot": "hermes",
+    "pass": true,
+    "at": "2026-09-19 12:04",
+    "n": 4,
+    "note": "PASS",
+    "mid": "om_x100b65d4d20964a0c4b97f2d57cc6e1",
+    "expect": "lark-ops"
+  },
+  {
+    "bot": "openakita",
+    "pass": true,
+    "at": "2026-09-19 12:04",
+    "n": 6,
+    "note": "PASS FINAL全文含openmem-rules",
+    "mid": "om_x100b65d4d3e5e4a8c399e40d0b54952",
+    "expect": "openmem-rules"
+  },
+  {
+    "bot": "reasonix",
+    "pass": true,
+    "at": "2026-09-19 12:04",
+    "n": 1,
+    "note": "PASS",
+    "mid": "om_x100b65d4d34580acc1927e67ca935f6",
+    "expect": "all-platform-video-extract"
+  },
+  {
+    "bot": "openclaw",
+    "pass": true,
+    "at": "2026-09-19 12:04",
+    "n": 3,
+    "note": "PASS",
+    "mid": "om_x100b65d4d32e3ca4dfaf4288cf688c0",
+    "expect": "feishu-bridge"
+  },
+  {
+    "bot": "opencode",
+    "pass": true,
+    "at": "2026-09-19 12:04",
+    "n": 5,
+    "note": "PASS",
+    "mid": "om_x100b65d4d0f6e8a0ddc8858539018e9",
+    "expect": "memory-ops"
+  },
+  {
+    "bot": "dsh",
+    "pass": true,
+    "at": "2026-09-19 12:04",
+    "n": 2,
+    "note": "PASS 全文第2个=comfyui-ops",
+    "mid": "om_x100b65d4d06c14a0c3452856dfbd31e",
+    "expect": "comfyui-ops"
+  },
+  {
+    "bot": "deeptutor",
+    "pass": false,
+    "at": "2026-09-19 12:05",
+    "n": 4,
+    "note": "FAIL 飞书原文：没有 skill_index/无cti-builtin",
+    "mid": "om_x100b65d4d1cc4538deb91015cf036a4",
+    "expect": "lark-ops"
+  },
+  {
+    "bot": "zcode",
+    "pass": true,
+    "at": "2026-09-19 12:05",
+    "n": 7,
+    "note": "PASS",
+    "mid": "om_x100b65d4d1bc6cacdf99bf40d622f19",
+    "expect": "vision-verify"
+  }
+]
