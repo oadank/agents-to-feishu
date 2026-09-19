@@ -43,6 +43,12 @@ import {
 } from '../voice/tts.js';
 import { transcribe, resolveFfmpeg, type AsrConfig } from '../voice/asr.js';
 import { createComfyMcpHttpHandler } from '../comfy/mcp-server.js';
+
+// MCP 代理通道调用计数（comfy/vision 旧通道退役取证的仪表；进程重启清零）
+const mcpProxyStats: Record<string, { calls: number; lastAt: string }> = {
+  comfy: { calls: 0, lastAt: '' },
+  vision: { calls: 0, lastAt: '' },
+};
 import { createVisionMcpHttpHandler } from '../vision/mcp.js';
 
 /** 项目根（server.ts 位于 src/config-center/，上溯两级） */
@@ -484,12 +490,21 @@ export function createConfigServer(opts: ConfigServerOptions) {
     try {
       // ── ComfyUI 生图 MCP 服务（Streamable HTTP，Tailscale 访问 /mcp/comfy）──
       if (p === '/mcp/comfy' || p === '/mcp/comfy/') {
+        mcpProxyStats.comfy.calls++; mcpProxyStats.comfy.lastAt = new Date().toISOString();
         await comfyMcpHandler(req, res);
         return;
       }
       // ── 内建看图 MCP 服务（Streamable HTTP，暴露 look_image 三任务给所有 agent）──
       if (p === '/mcp/vision' || p === '/mcp/vision/') {
+        mcpProxyStats.vision.calls++; mcpProxyStats.vision.lastAt = new Date().toISOString();
         await visionMcpHandler(req, res);
+        return;
+      }
+
+      // ── 旧通道使用计数查询（退役决策取证口）──
+      if (p === '/api/mcp-proxy-usage' && method === 'GET') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(mcpProxyStats));
         return;
       }
 

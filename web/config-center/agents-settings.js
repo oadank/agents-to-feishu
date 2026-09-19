@@ -207,9 +207,16 @@
           h("div", { class: "checks" },
             props.mcps.length === 0 ? h("span", { class: "dim" }, "暂无 MCP（去「总配置 · MCP」新增）") :
               props.mcps.map(function (m) {
-                return h("label", { key: m.id },
+                if (m.id === "cti-builtin") {
+                  return h("label", { key: m.id, class: "dim", title: "内置工具包全部 agent 自动挂载（claude 走引擎内注入故其数组里不出现，属正常），不可取消；这个勾代表恒挂" },
+                    h("input", { type: "checkbox", checked: true, disabled: true }),
+                    m.displayName + "（内建底座 · 不可拆）",
+                  );
+                }
+                var legacy = m.id === "comfy" || m.id === "vision";
+                return h("label", { key: m.id, title: legacy ? "旧代理通道：能力与内建底座重复，仅 zcode/dsh/deeptutor 等旧配置挂着；新 agent 不用勾" : "" },
                   h("input", { type: "checkbox", checked: (f.mcps || []).includes(m.id), onChange: () => toggleMcp(m.id) }),
-                  m.displayName,
+                  m.displayName + (legacy ? "（旧通道 · 与内建重复）" : ""),
                 );
               }),
           ),
