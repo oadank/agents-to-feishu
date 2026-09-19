@@ -93,6 +93,10 @@ function sniffImageExt(buf: Buffer): string | null {
   return null;
 }
 
+/** [2026-09-19 票1] 断头轮待投递台账条目：image-object=send_image 附件号（sha256:…），
+ *  gen-file=generate_image 本地成品路径。捕获即落盘，投递前销账（见 MessageEngine 台账段）。 */
+type PendingDeliveryEntry = { kind: 'image-object' | 'gen-file'; ref: string; chatId: string; ts: number };
+
 /** ComfyUI 成品默认落盘目录（8090 遥控器写到本机 runs） */
 const COMFY_RUNS_IMG =
   process.env.COMFY_RUNS_IMG
@@ -200,6 +204,60 @@ export class MessageEngine {
     this.opts = opts;
     this.modelGroup = opts.modelGroup;
     this.modelProvider = opts.modelProvider;
+    // [2026-09-19 票1·断头轮补投递] 开机扫账：上一进程被杀/重启腰斩的轮次，图已捕获未投递的
+    // 都留在台账里，这里延迟几秒（等飞书客户端就绪）补发。无陈账则静默。
+    const bootDelay = parseInt(process.env.CTI_BOOT_RESCUE_DELAY_MS || '2500', 10);
+    setTimeout(() => { void this.rescuePendingDeliveriesOnBoot(); }, bootDelay);
+  }
+
+  // ── [2026-09-19 票1] 断头轮产物台账 ──
+  // 背景（09-19 15:55 家装案）：dsh 生图轮在 generate_image 捕获 Agnes-*.png 之后、自动发图
+  // 之前被进程重启腰斩（dsh-out.log:11893 捕获 → :11899 重新开机横幅）——收尾投递链整体没跑，
+  // 图只落盘不送达。provider 流被掐成异常时（外层 catch）同理。两层防线：
+  //   ① 捕获即落盘（~/.agents-to-feishu/runtime/pending-deliveries-<bot>.json，与 session 落盘同区），
+  //     轮次异常结束（catch）时补投递；② 进程重启后开机扫台账补投递。
+  // 销账纪律（09-19 双发案红线）：发之前先销账 = 每条最多投递一次；发送明确失败才回账，
+  // 等下次开机重试；7 天陈账作废。toolSentPaths（send_image 双发台账）语义不变。
+
+  /** 断头轮待投递台账文件（按 bot 分账，路径惯例对齐 session.ts persistFile） */
+  private pendingLedgerFile(): string {
+    const home = process.env.CTI_USER_HOME || os.homedir();
+    return path.join(home, '.agents-to-feishu', 'runtime', `pending-deliveries-${process.env.CTI_BOT || 'default'}.json`);
+  }
+
+  private ledgerLoad(): PendingDeliveryEntry[] {
+    try {
+      const list = JSON.parse(fs.readFileSync(this.pendingLedgerFile(), 'utf-8'));
+      return Array.isArray(list)
+        ? list.filter((e: PendingDeliveryEntry) => e && typeof e.ref === 'string' && typeof e.chatId === 'string')
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private ledgerWrite(list: PendingDeliveryEntry[]): void {
+    try {
+      const file = this.pendingLedgerFile();
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const tmp = `${file}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(list));
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      console.warn(`[engine] 断头轮台账写盘失败:`, e);
+    }
+  }
+
+  /** 捕获即挂账（按 kind+ref 去重，容量上限 40 防失控） */
+  private ledgerAdd(kind: PendingDeliveryEntry['kind'], ref: string, chatId: string, ts = Date.now()): void {
+    const list = this.ledgerLoad().filter((e) => !(e.kind === kind && e.ref === ref));
+    list.push({ kind, ref, chatId, ts });
+    while (list.length > 40) list.shift();
+    this.ledgerWrite(list);
+  }
+
+  private ledgerRemove(kind: PendingDeliveryEntry['kind'], ref: string): void {
+    this.ledgerWrite(this.ledgerLoad().filter((e) => !(e.kind === kind && e.ref === ref)));
   }
 
   /**
@@ -789,6 +847,7 @@ export class MessageEngine {
                 ?? (/send_image/i.test(ev.tool) ? ev.output.match(/(sha256:[0-9a-f]{64})/) : null);
               if (im) {
                 pendingImageIds.push(im[1]);
+                this.ledgerAdd('image-object', im[1], chatId); // [票1] 捕获即挂账
                 console.log(`[engine] send_image 捕获 attachmentId=${im[1].slice(0, 26)}… 待投递`);
               }
               if (/send_image/i.test(ev.tool)) {
@@ -807,6 +866,7 @@ export class MessageEngine {
                 for (const p of this.parseGeneratedImagePaths(ev.output)) {
                   if (!pendingGenFiles.includes(p)) {
                     pendingGenFiles.push(p);
+                    this.ledgerAdd('gen-file', p, chatId); // [票1] 捕获即挂账
                     console.log(`[engine] generate_image 捕获 ${p} → 本轮结束自动发飞书`);
                   }
                 }
@@ -969,9 +1029,12 @@ export class MessageEngine {
       // [2026-09-17] send_image 工具产物投递：attachmentId(sha256:<64hex>) → 内容寻址对象
       // （DSH_HOME/attachments/v1/objects/<前2位>/<hash>）→ 按魔数定扩展名 → 上传 → 飞书图片消息。
       for (const iid of pendingImageIds) {
+        this.ledgerRemove('image-object', iid); // [票1] 发前销账（最多一次）
         try {
-          await this.sendImageObjectById(chatId, iid);
+          const okImg = await this.sendImageObjectById(chatId, iid);
+          if (!okImg) this.ledgerAdd('image-object', iid, chatId); // 失败回账，开机补投递兜底
         } catch (e) {
+          this.ledgerAdd('image-object', iid, chatId);
           console.warn(`[engine] send_image 投递失败 attachmentId=${iid.slice(0, 26)}…: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
@@ -990,6 +1053,7 @@ export class MessageEngine {
         for (const p of this.parseGeneratedImagePaths(turnBlob)) {
           if (/comfyui[\\/]runs|comfyui_temp|Krea2|文生图/i.test(p) && !p.includes("*") && !pendingGenFiles.includes(p) && !isToolSent(p)) {
             pendingGenFiles.push(p);
+            this.ledgerAdd('gen-file', p, chatId); // [票1] 兜底捕获同样挂账
             console.log(`[engine] generate_image 兜底捕获(正文) ${p}`);
           }
         }
@@ -1009,6 +1073,7 @@ export class MessageEngine {
             for (const p of fresh) {
               if (!pendingGenFiles.includes(p) && !isToolSent(p)) { // 🔴 09-19 双发防线
                 pendingGenFiles.push(p);
+                this.ledgerAdd('gen-file', p, chatId); // [票1] 兜底捕获同样挂账
                 console.log(`[engine] generate_image 兜底捕获(mtime) ${p}`);
               }
             }
@@ -1021,14 +1086,21 @@ export class MessageEngine {
         try {
           if (!fs.existsSync(gp)) {
             console.warn(`[engine] generate_image 自动发图跳过: 文件不存在 ${gp}`);
+            this.ledgerRemove('gen-file', gp); // [票1] 永久性失败，销账不留陈账
             continue;
           }
-          if (isToolSent(gp)) { console.log(`[engine] generate_image 自动发图跳过：send_image 本轮已发 ${gp}`); continue; }
+          if (isToolSent(gp)) {
+            console.log(`[engine] generate_image 自动发图跳过：send_image 本轮已发 ${gp}`);
+            this.ledgerRemove('gen-file', gp); // [票1] send_image 附件号另有台账，销账防开机重发
+            continue;
+          }
           const gkey = path.resolve(gp).toLowerCase();
           if (this.genAutoDelivered.get(chatId)?.has(gkey)) {
             console.log(`[engine] generate_image 自动发图跳过：桥上一轮已自动发过（跨轮双发防线） ${gp}`);
+            this.ledgerRemove('gen-file', gp); // [票1] 已发过=已履约，销账
             continue;
           }
+          this.ledgerRemove('gen-file', gp); // [票1] 发前销账（最多一次）
           const ok = await this.sendImageFile(chatId, gp);
           console.log(`[engine] generate_image 自动发图 chat=${chatId} file=${gp} ok=${ok}`);
           if (ok) {
@@ -1036,8 +1108,11 @@ export class MessageEngine {
             if (!s) { s = new Set(); this.genAutoDelivered.set(chatId, s); }
             s.add(gkey);
             if (s.size > 200) s.clear(); // 防膨胀：清空重攒（宁可极旧图可能重现，不可新图永发不出）
+          } else {
+            this.ledgerAdd('gen-file', gp, chatId); // [票1] 失败回账，开机补投递兜底
           }
         } catch (e) {
+          this.ledgerAdd('gen-file', gp, chatId); // [票1] 失败回账
           console.warn(`[engine] generate_image 自动发图失败 ${gp}: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
@@ -1085,6 +1160,9 @@ export class MessageEngine {
       } catch {
         await this.sendError(chatId, `引擎异常：${msg}`);
       }
+      // [2026-09-19 票1] 断头轮补投递：异常让正常收尾的投递链整体被跳过（此前=图烂在台账里，
+      // 15:55 家装案）。本轮已捕获产物有则补发+一句说明，无则静默。
+      await this.rescueInterruptedRound(chatId, pendingImageIds, pendingGenFiles, layers, isToolSent);
     } finally {
       if (flushTimer) clearTimeout(flushTimer);
       this.streamCards.delete(chatId);
@@ -1185,12 +1263,13 @@ export class MessageEngine {
    * [2026-09-17] send_image 工具产物投递：attachmentId(sha256:<64hex>) → 内容寻址对象
    * （DSH_HOME/attachments/v1/objects/<前2位>/<hash>）→ 上传 → 飞书图片消息。
    * 与 sendVoiceObjectById 对称；对象落盘时是原图字节，按魔数补扩展名即可直接上传。
+   * [2026-09-19 票1] 返回是否真实投递成功（断头轮台账回账判据）。
    */
-  async sendImageObjectById(chatId: string, attachmentId: string): Promise<void> {
+  async sendImageObjectById(chatId: string, attachmentId: string): Promise<boolean> {
     const hash = attachmentId.replace(/^sha256:/, '');
     if (!/^[0-9a-f]{64}$/.test(hash)) {
       console.warn(`[engine] send_image 投递跳过: attachmentId 格式不对 "${attachmentId.slice(0, 26)}…"`);
-      return;
+      return false;
     }
     const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
     const objFile = path.join(home, 'attachments', 'v1', 'objects', hash.slice(0, 2), hash);
@@ -1199,12 +1278,12 @@ export class MessageEngine {
       data = fs.readFileSync(objFile);
     } catch {
       console.warn(`[engine] send_image 投递跳过: 图片对象不存在 ${objFile}`);
-      return;
+      return false;
     }
     const ext = sniffImageExt(data);
     if (!ext) {
       console.warn(`[engine] send_image 投递跳过: 无法识别的图片格式 hash=${hash.slice(0, 16)}…`);
-      return;
+      return false;
     }
     const tmpDir = path.join(os.tmpdir(), 'agents-to-feishu-img');
     fs.mkdirSync(tmpDir, { recursive: true });
@@ -1213,8 +1292,111 @@ export class MessageEngine {
     try {
       const ok = await this.sendImageFile(chatId, tmpFile);
       console.log(`[engine] send_image 图片已投递 chat=${chatId} hash=${hash.slice(0, 16)}… bytes=${data.length} ok=${ok}`);
+      return ok;
     } finally {
       try { fs.unlinkSync(tmpFile); } catch { /* 忽略 */ }
+    }
+  }
+
+  // ── [2026-09-19 票1] 断头轮补投递 ──
+
+  /** 投递单条台账：发前先销账（每条最多投递一次，防 crash 窗口双发）；明确失败回账等下次开机重试，
+   *  gen-file 源文件已消失的永久失败不回账（重试无意义）。 */
+  private async deliverOnePending(e: PendingDeliveryEntry): Promise<boolean> {
+    this.ledgerRemove(e.kind, e.ref);
+    try {
+      if (e.kind === 'gen-file') {
+        if (!fs.existsSync(e.ref)) {
+          console.warn(`[engine][断头轮补投递] 跳过: 文件不存在 ${e.ref}`);
+          return false;
+        }
+        const ok = await this.sendImageFile(e.chatId, e.ref);
+        console.log(`[engine][断头轮补投递] gen-file ok=${ok} ${e.ref}`);
+        if (ok) {
+          // 同步登记票C 跨轮防线：补发过的图，正文再提及也不得重发
+          const gkey = path.resolve(e.ref).toLowerCase();
+          let s = this.genAutoDelivered.get(e.chatId);
+          if (!s) { s = new Set(); this.genAutoDelivered.set(e.chatId, s); }
+          s.add(gkey);
+        } else {
+          this.ledgerAdd(e.kind, e.ref, e.chatId, e.ts);
+        }
+        return ok;
+      }
+      const ok = await this.sendImageObjectById(e.chatId, e.ref);
+      console.log(`[engine][断头轮补投递] image-object ok=${ok} ${e.ref.slice(0, 26)}…`);
+      if (!ok) this.ledgerAdd(e.kind, e.ref, e.chatId, e.ts);
+      return ok;
+    } catch (err) {
+      console.warn(`[engine][断头轮补投递] 失败回账 ${e.kind} ${e.ref.slice(0, 40)}: ${err instanceof Error ? err.message : String(err)}`);
+      this.ledgerAdd(e.kind, e.ref, e.chatId, e.ts);
+      return false;
+    }
+  }
+
+  /** 开机扫账：上一进程死掉时已在台账里的产物逐条补发；有成功且带 chatId 的才补一句说明。无陈账静默。 */
+  private async rescuePendingDeliveriesOnBoot(): Promise<void> {
+    const entries = this.ledgerLoad();
+    if (entries.length === 0) return;
+    console.log(`[engine][断头轮补投递] 开机扫账: ${entries.length} 条待补发`);
+    const STALE_MS = 7 * 24 * 3600 * 1000;
+    const deliveredByChat = new Map<string, number>();
+    for (const e of entries) {
+      if (Date.now() - e.ts > STALE_MS) {
+        this.ledgerRemove(e.kind, e.ref);
+        console.warn(`[engine][断头轮补投递] 超过 7 天的陈账作废: ${e.kind} ${e.ref.slice(0, 40)}`);
+        continue;
+      }
+      if (await this.deliverOnePending(e)) {
+        deliveredByChat.set(e.chatId, (deliveredByChat.get(e.chatId) ?? 0) + 1);
+      }
+    }
+    for (const [chatId, n] of deliveredByChat) {
+      console.log(`[engine][断头轮补投递] chat=${chatId.slice(0, 12)}… 补发 ${n} 张完成`);
+      try { await this.sendText(chatId, '上一轮被打断，图已补发'); } catch { /* 说明句失败不影响补发结果 */ }
+    }
+  }
+
+  /**
+   * 轮次异常收尾补投递（provider 流 throw → handleText 外层 catch）：正常收尾的投递链被异常
+   * 整体跳过，这里把本轮已捕获产物补发出去。正文兜底捕获对齐正常收尾（轮子死在 tool done
+   * 事件之前时，成品路径只留在正文/工具层里）。无产物静默，不打扰。
+   */
+  private async rescueInterruptedRound(
+    chatId: string,
+    pendingImageIds: string[],
+    pendingGenFiles: string[],
+    layers: TurnLayers,
+    isToolSent: (p: string) => boolean,
+  ): Promise<void> {
+    try {
+      if (pendingGenFiles.length === 0) {
+        const turnBlob = `${layers.text}\n${layers.toolLines.join('\n')}\n${layers.thinking}`;
+        for (const p of this.parseGeneratedImagePaths(turnBlob)) {
+          if (/comfyui[\\/]runs|comfyui_temp|Krea2|文生图/i.test(p) && !p.includes("*") && !pendingGenFiles.includes(p) && !isToolSent(p)) {
+            pendingGenFiles.push(p);
+            this.ledgerAdd('gen-file', p, chatId);
+            console.log(`[engine][断头轮补投递] 正文兜底捕获 ${p}`);
+          }
+        }
+      }
+      if (pendingImageIds.length === 0 && pendingGenFiles.length === 0) return; // 无产物 → 静默
+      console.log(`[engine][断头轮补投递] 轮次被打断 chat=${chatId.slice(0, 12)}… imageIds=${pendingImageIds.length} genFiles=${pendingGenFiles.length}，开始补发`);
+      let delivered = 0;
+      for (const iid of pendingImageIds) {
+        if (await this.deliverOnePending({ kind: 'image-object', ref: iid, chatId, ts: Date.now() })) delivered += 1;
+      }
+      for (const gp of pendingGenFiles) {
+        if (isToolSent(gp)) { this.ledgerRemove('gen-file', gp); continue; } // send_image 本轮已投递，勿重发（双发台账）
+        if (await this.deliverOnePending({ kind: 'gen-file', ref: gp, chatId, ts: Date.now() })) delivered += 1;
+      }
+      if (delivered > 0) {
+        await this.sendText(chatId, '上一轮被打断，图已补发');
+        console.log(`[engine][断头轮补投递] chat=${chatId.slice(0, 12)}… 补发完成 ${delivered} 张`);
+      }
+    } catch (e) {
+      // 补投递自身出错不得外抛（已在 catch 块里，吞掉只留日志）
+      console.warn(`[engine][断头轮补投递] 补投递自身失败:`, e);
     }
   }
 

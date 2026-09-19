@@ -36,6 +36,7 @@ import { writeAgentArtifacts, readCredentialKey, readOldEnvKey, assertModelProto
 import { checkSrcSyntax, formatSyntaxErrors } from './syntax-check.js';
 import { startAgent as pmStart, stopAgent as pmStop, restartAgent as pmRestart, statusAll as pmStatus } from './process-manager.js';
 import { syncDeepTutorModel, syncDeepTutorMcp } from './sync-deeptutor.js';
+import { scanChatsMap } from './chats-map-scan.js';
 import { buildAgentRuntimeState, type AgentRuntimeState } from './runtime.js';
 import { lookImage } from '../vision/look.js';
 import {
@@ -653,6 +654,17 @@ export function createConfigServer(opts: ConfigServerOptions) {
           let chats = 0;
           try { chats = (JSON.parse(out)?.data?.chats ?? []).length; } catch { /* 忽略 */ }
           return json(res, 200, { ok, error: ok ? '' : out.slice(0, 200), chats });
+        } catch (e) {
+          return json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      // POST /api/tools/chats-map-scan —— [2026-09-19 票3] chats-map 补账：lark-cli user 身份扫
+      // 老大视角会话（app 视角枚举不到 p2p 单聊，隐私墙实测），按 bot 显示名匹配名册补
+      // logs/chats-map.json。手动触发，不建定时；只补缺失，已有账不符只报不改。
+      if (p === '/api/tools/chats-map-scan' && method === 'POST') {
+        try {
+          const report = await scanChatsMap();
+          return json(res, 200, report);
         } catch (e) {
           return json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
         }
