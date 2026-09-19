@@ -62,7 +62,57 @@ export function withToolRouteInject(globalInject: string): string {
  */
 export function buildAgentGlobalInject(store: ConfigStore, model?: ModelDef): string {
   const base = store.injection?.enabled === false ? '' : (store.injection?.global ?? '');
-  return withToolRouteInject(withVisionDegradeInject(base, model));
+  // skill Phase1：技能清单（name+一句 desc+路径）拼进统一注入，12 家同车（幂等，见 withSkillIndexInject）
+  return withToolRouteInject(withVisionDegradeInject(withSkillIndexInject(base, resolveMountedSkills(store)), model));
+}
+
+// ── skill Phase 1（2026-09-19 老大拍板：单源 skills/，双分发面）──
+// 分发面 A「目录注入面」：技能清单进统一注入（下方，全 12 家同车）。
+// 分发面 B「磁盘挂载面」：syncSkillsToCli 铺家目录/注册表/规则块（见 writeAgentArtifacts）。
+
+export interface SkillIndexEntry { name: string; description: string; dirPath: string; skillMd: string; }
+
+/** 技能清单注入标题（同时是幂等锚点：统一注入里已含【技能目录】则不重复拼） */
+const SKILL_INDEX_HEADING =
+  '【技能目录】任务命中下列技能时，先读该路径 SKILL.md 全文再行动（也可调 skill_index/skill_read 工具查询）：';
+
+/** 从 SKILL.md 抽一句话描述：frontmatter description 优先，否则首个非标题非空行（≤80字） */
+function skillDescription(md: string): string {
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(md);
+  if (fm) {
+    const m = /^description:\s*(.+)$/m.exec(fm[1]);
+    if (m) return m[1].trim().replace(/^["']|["']$/g, '').slice(0, 80);
+  }
+  const ln = md.split(/\r?\n/).map((x) => x.trim()).find((x) => x !== '' && !x.startsWith('#') && !x.startsWith('---'));
+  return (ln || '').slice(0, 80);
+}
+
+/** 扫描 skills/ 目录 + store.skills.enabled 白名单（与 cordis 挂载同口径，两个分发面永远一致） */
+export function resolveMountedSkills(store: ConfigStore): SkillIndexEntry[] {
+  const out: SkillIndexEntry[] = [];
+  try {
+    if (!fs.existsSync(PROJECT_SKILLS_DIR)) return out;
+    const enabled = store.skills?.enabled;
+    for (const ent of fs.readdirSync(PROJECT_SKILLS_DIR, { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue;
+      const skillMd = path.join(PROJECT_SKILLS_DIR, ent.name, 'SKILL.md');
+      if (!fs.existsSync(skillMd)) continue;
+      if (Array.isArray(enabled) && !enabled.includes(ent.name)) continue; // 白名单（存在即严格过滤，空数组=全停）
+      let description = '';
+      try { description = skillDescription(fs.readFileSync(skillMd, 'utf-8')); } catch { /* 读失败按空描述 */ }
+      out.push({ name: ent.name, description, dirPath: path.join(PROJECT_SKILLS_DIR, ent.name), skillMd });
+    }
+  } catch { /* 目录竞态：返回已收集的 */ }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** 目录注入面：技能清单拼进统一注入（幂等：已含【技能目录】则不动） */
+export function withSkillIndexInject(globalInject: string, skills: SkillIndexEntry[]): string {
+  if (!skills.length) return globalInject ?? '';
+  const base = globalInject ?? '';
+  if (base.includes('【技能目录】')) return base;
+  const block = [SKILL_INDEX_HEADING, ...skills.map((s) => `- ${s.name} ｜ ${s.description} ｜ ${s.skillMd}`)].join('\n');
+  return base.trim() ? `${base}\n\n${block}` : block;
 }
 
 /** 项目根（render.ts 位于 src/config-center/，上溯两级） */
@@ -584,6 +634,9 @@ export function writeAgentArtifacts(
   // 幂等落各自原生配置（手工删掉 apply 即长回）；其它 runtime 走 config.env 的 MCP_SERVERS 穿透
   syncMcpToCli(_store, agent);
 
+  // skill Phase 1 分发面 B：磁盘挂载/注册表/规则块（幂等；dsh 磁盘面走 cordis customSkillDirs，不在此）
+  syncSkillsToCli(_store, agent);
+
   const configEnv = renderConfigEnv(_store, agent, globalExtra);
   const isDsh = !agent.runtime || agent.runtime === 'dsh';
   let cordisYml = '';
@@ -618,6 +671,129 @@ export function writeAgentArtifacts(
     writeFileAtomic(personaPath, personaBody);
   }
   return { configEnv, cordisYml, configEnvPath, cordisYmlPath };
+}
+
+// ── skill Phase 1 分发面 B：磁盘挂载面（apply 时幂等落各家家目录，与 syncMcpToCli 同链）──
+// claude/hermes/openclaw：铺 <name>/SKILL.md 副本；openakita：installed_skills.json 注册 source_path；
+// codex/gemini/opencode：规则文件 BEGIN/END cti-skills 标记块幂等重写。
+// dsh：磁盘面走 cordis customSkillDirs（renderCordisYml）、注入面走 persona.md（globalInject 同车）——无需物理动作。
+// zcode/mimo/reasonix：注入面已覆盖（systemPrompt 同车）；物理落点待契约探明再挂（二期）。
+// 红线：写前 backupFile 备份；幂等（内容同则跳过）；绝不递归删除家目录任何内容。
+
+const RULES_BLOCK_BEGIN = '<!-- BEGIN: cti-skills (managed by agents-to-feishu apply; 幂等重写区勿手编) -->';
+const RULES_BLOCK_END = '<!-- END: cti-skills -->';
+
+function skillIndexBlockLines(skills: SkillIndexEntry[]): string {
+  return [RULES_BLOCK_BEGIN, SKILL_INDEX_HEADING, ...skills.map((s) => `- ${s.name} ｜ ${s.description} ｜ ${s.skillMd}`), RULES_BLOCK_END].join('\n');
+}
+
+/** 规则文件标记块幂等重写（有块换块，无块追加；文件不存在则创建） */
+function upsertRulesBlock(file: string, skills: SkillIndexEntry[], agentId: string): void {
+  const block = skillIndexBlockLines(skills);
+  let raw = '';
+  try { raw = fs.existsSync(file) ? fs.readFileSync(file, 'utf-8') : ''; } catch { return; }
+  const b = raw.indexOf(RULES_BLOCK_BEGIN);
+  const e = raw.indexOf(RULES_BLOCK_END);
+  let next: string;
+  if (b !== -1 && e !== -1 && e > b) next = raw.slice(0, b) + block + raw.slice(e + RULES_BLOCK_END.length);
+  else if (raw.trim()) next = raw.replace(/\s*$/, '\n\n') + block + '\n';
+  else next = block + '\n';
+  if (next === raw) return; // 幂等
+  try {
+    const backup = backupFile(file);
+    writeFileAtomic(file, next);
+    logApply(agentId, file, [{ key: 'cti-skills', oldValue: '(见备份)', newValue: `upsert ${skills.length} skills`, kind: 'update' }], backup);
+    console.log(`[render] skills 规则块同步 ${agentId}: ${file} (${skills.length} skills)`);
+  } catch (e) { console.log(`[render] skills 规则块同步失败 ${agentId} ${file}: ${e instanceof Error ? e.message : e}`); }
+}
+
+/** 铺目录挂载面：逐技能 <root>/<name>/SKILL.md 副本（幂等：内容同跳过，不同先备份再覆盖，不递归删） */
+function mountSkillCopies(root: string, skills: SkillIndexEntry[], agentId: string): void {
+  for (const s of skills) {
+    try {
+      const dir = path.join(root, s.name);
+      fs.mkdirSync(dir, { recursive: true });
+      const fp = path.join(dir, 'SKILL.md');
+      const content = fs.readFileSync(s.skillMd, 'utf-8');
+      if (fs.existsSync(fp) && fs.readFileSync(fp, 'utf-8') === content) continue;
+      const backup = backupFile(fp);
+      writeFileAtomic(fp, content);
+      logApply(agentId, fp, [{ key: `skill:${s.name}`, oldValue: '(见备份)', newValue: 'upsert', kind: 'update' }], backup);
+    } catch (e) { console.log(`[render] skill 铺目录失败 ${agentId} ${s.name}: ${e instanceof Error ? e.message : e}`); }
+  }
+}
+
+/** openakita：installed_skills.json 注册 source_path（update_policy=disk-only，deps 引擎自管留原值） */
+function syncOpenakitaSkillRegistry(hunme: string, skills: SkillIndexEntry[], agentId: string): void {
+  const regPath = path.join(hunme, '.openakita', 'skills', 'installed_skills.json');
+  if (!fs.existsSync(regPath)) return; // 引擎未初始化技能系统则不强造
+  try {
+    const raw = fs.readFileSync(regPath, 'utf-8');
+    const j = JSON.parse(raw) as { skills?: Record<string, Record<string, unknown>> };
+    const reg = (j.skills = j.skills || {});
+    const touched: string[] = [];
+    for (const s of skills) {
+      const prev = reg[s.name] || {};
+      const next: Record<string, unknown> = {
+        skill_id: s.name,
+        source_path: s.dirPath,
+        installed: true,
+        enabled: true,
+        loaded: prev.loaded ?? false,
+        dependencies: prev.dependencies ?? [],
+        deps_hash: prev.deps_hash ?? '',
+        last_loaded_at: prev.last_loaded_at ?? 0,
+        pending_update_revision: '',
+        pending_update_at: 0,
+        reload_required: false,
+        installed_at: prev.installed_at ?? Math.floor(Date.now() / 1000),
+        update_policy: 'disk-only',
+      };
+      if (JSON.stringify(prev) !== JSON.stringify(next)) { reg[s.name] = next; touched.push(s.name); }
+    }
+    if (!touched.length) return;
+    const backup = backupFile(regPath);
+    writeFileAtomic(regPath, `${JSON.stringify(j, null, 2)}\n`);
+    logApply(agentId, regPath, touched.map((n) => ({ key: `skill:${n}`, oldValue: '(见备份)', newValue: 'register source_path', kind: 'update' as const })), backup);
+    console.log(`[render] openakita skills 注册 ${agentId}: ${touched.join(', ')}`);
+  } catch (e) { console.log(`[render] openakita skills 注册失败 ${agentId}: ${e instanceof Error ? e.message : e}`); }
+}
+
+/** apply 时把 skills/ 分发到各原生家（调用点：writeAgentArtifacts，紧随 syncMcpToCli） */
+export function syncSkillsToCli(store: ConfigStore, agent: AgentDef): void {
+  const rt = agent.runtime || '';
+  if (!rt || rt === 'dsh') return; // dsh：cordis customSkillDirs + persona.md 已覆盖
+  const skills = resolveMountedSkills(store);
+  if (!skills.length) return;
+  const hunme = process.env.CTI_USER_HOME || os.homedir();
+  switch (rt) {
+    case 'claude': {
+      mountSkillCopies(path.join(hunme, '.claude', 'skills'), skills, agent.id);
+      // 畸形空壳 skills/skills/ 会让嵌套扫描永远扫不到（Phase1 设计稿实测）——rmdir 非空自动失败，无递归删风险
+      try { fs.rmdirSync(path.join(hunme, '.claude', 'skills', 'skills')); console.log(`[render] claude skills 空壳已清 (${agent.id})`); } catch { /* 非空或不存在：忽略 */ }
+      break;
+    }
+    case 'hermes':
+      mountSkillCopies(path.join(hunme, '.hermes', 'skills'), skills, agent.id);
+      break;
+    case 'openclaw':
+      mountSkillCopies(path.join(hunme, '.openclaw', 'workspace', 'skills'), skills, agent.id);
+      break;
+    case 'openakita':
+      syncOpenakitaSkillRegistry(hunme, skills, agent.id);
+      break;
+    case 'codex':
+      upsertRulesBlock(path.join(hunme, '.codex', 'AGENTS.md'), skills, agent.id);
+      break;
+    case 'gemini':
+      upsertRulesBlock(path.join(hunme, '.gemini', 'GEMINI.md'), skills, agent.id);
+      break;
+    case 'opencode':
+      upsertRulesBlock(path.join(hunme, '.config', 'opencode', 'AGENTS.md'), skills, agent.id);
+      break;
+    default:
+      break; // zcode/mimo/reasonix 等：注入面已同车覆盖
+  }
 }
 
 // ── 模型联动：config-store 选的 provider/model → 各 CLI 配置文件 ──
