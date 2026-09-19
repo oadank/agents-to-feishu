@@ -244,13 +244,13 @@ export class OpenAkitaProvider implements RuntimeProvider {
 
       // openakita ACP 冷启动给足 60s（不涉及 tsx 编译，比 DSH 快）
       const timeout = setTimeout(() => {
-        if (!this.child) { try { child.kill('SIGTERM'); } catch {} reject(new Error('Reasonix ACP initialize timeout')); }
+        if (!this.child) { try { child.kill('SIGTERM'); } catch {} reject(new Error('OpenAkita ACP initialize timeout')); }
       }, 60_000);
 
       this.waitResponse(initId, 60_000).then(
         (msg) => {
           clearTimeout(timeout);
-          if (msg.error) { reject(new Error('Reasonix ACP initialize failed')); return; }
+          if (msg.error) { reject(new Error('OpenAkita ACP initialize failed')); return; }
           rtLog(`[openakita] ACP initialized`);
           this.child = child;
           resolve(child);
@@ -282,9 +282,9 @@ export class OpenAkitaProvider implements RuntimeProvider {
     }) + '\n');
 
     const msg = await this.waitResponse(sessionNewId, 60_000);
-    if (!msg.result) throw new Error('Reasonix ACP session/new failed');
+    if (!msg.result) throw new Error('OpenAkita ACP session/new failed');
     const sessionId = (msg.result as Record<string, unknown>).sessionId as string | undefined;
-    if (!sessionId) throw new Error('Reasonix ACP session/new: missing sessionId');
+    if (!sessionId) throw new Error('OpenAkita ACP session/new: missing sessionId');
 
     rtLog(`[openakita] session/new OK: ${sessionId.slice(0, 8)}`);
     this.pruneOldSessions();
@@ -326,7 +326,7 @@ export class OpenAkitaProvider implements RuntimeProvider {
         this.sessions.set(sessionKey, session);
         this.startCleanupTimer();
       } catch (e) {
-        yield { type: 'error', message: `Reasonix ACP 会话创建失败: ${e instanceof Error ? e.message : String(e)}` };
+        yield { type: 'error', message: `OpenAkita ACP 会话创建失败: ${e instanceof Error ? e.message : String(e)}` };
         yield { type: 'done' };
         return;
       }
@@ -428,7 +428,7 @@ export class OpenAkitaProvider implements RuntimeProvider {
           console.log(`[OpenAkita] 超时但正文已完整流出——按正常完成处理`);
           promptHandler.onDone();
         } else {
-        promptHandler.onDone(`Reasonix ACP 卡死：连续 ${OpenAkitaProvider.PROMPT_TIMEOUT_MS / 1000}s 无输出，已中断`);
+        promptHandler.onDone(`OpenAkita ACP 卡死：连续 ${OpenAkitaProvider.PROMPT_TIMEOUT_MS / 1000}s 无输出，已中断`);
         }
         rtLog(`[openakita] watchdog timeout promptId=${promptId}`);
       }
