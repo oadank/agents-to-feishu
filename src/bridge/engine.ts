@@ -602,7 +602,11 @@ export class MessageEngine {
     const layers: TurnLayers = { text: '', thinking: '', toolLines: [] };
     let voiceText = ''; // agent 专门写的【语音】口语块；空=本回复无语音
     const pendingVoiceIds: string[] = []; // [2026-09-01] send_voice 工具产物（voiceId=sha256），本轮结束后投递到飞书
-    const pendingImageIds: string[] = []; // [2026-09-17] send_image 工具产物（attachmentId=sha256），本轮结束后投递到飞书
+    const pendingImageIds: string[] = [];
+    // 🔴 老大令 2026-09-19（双发二案）：事件层 send_image 输入路径台账——卡片文本会被渲染截断
+    // （"imagePath" 缺闭引号即漏判 Krea2_00014 双发），必须从 ev.input 原始 JSON 在截断前登记。
+    const toolSentPaths = new Set<string>();
+    const isToolSent = (p: string) => { try { return toolSentPaths.has(path.resolve(p).toLowerCase()); } catch { return false; } }; // [2026-09-17] send_image 工具产物（attachmentId=sha256），本轮结束后投递到飞书
     const pendingGenFiles: string[] = []; // [2026-09-18 老大令] generate_image 本地成品——成功即必须自动发飞书
     const genTurnStartMs = Date.now(); // 本轮开始时间，用于生图文件 mtime 兜底
     let sawGenTool = false; // 本轮是否出现过 generate_image 工具
@@ -783,6 +787,12 @@ export class MessageEngine {
               if (im) {
                 pendingImageIds.push(im[1]);
                 console.log(`[engine] send_image 捕获 attachmentId=${im[1].slice(0, 26)}… 待投递`);
+              }
+              if (/send_image/i.test(ev.tool)) {
+                try {
+                  const ip = JSON.parse(String(ev.input || "{}")).imagePath;
+                  if (typeof ip === "string" && ip.trim()) { toolSentPaths.add(path.resolve(ip).toLowerCase()); console.log(`[engine] 台账登记 send_image 输入 ${path.resolve(ip).slice(0, 60)}`); }
+                } catch { /* 非 JSON 输入忽略 */ }
               }
               // [2026-09-18 老大令·写死] generate_image 成功 → 自动把本地图发到飞书。
               // 不能只落盘给自己看：工具返回里凡出现 ComfyUI runs 下的图片路径/文件名，本轮结束强制投递。
@@ -966,17 +976,15 @@ export class MessageEngine {
       // zcode 形态：tool 名 mcp__comfy__generate_image / 正文含 Krea2 路径（含空格）
       const turnBlob = `${layers.text}\n${layers.toolLines.join('\n')}\n${layers.thinking}`;
       // 🔴 老大令 2026-09-19：本轮 send_image 已发文件台账 —— 模型发过的桥不得兜底再发（家装图双发根因）
-      const toolSentPaths = new Set<string>();
       for (const sm of turnBlob.matchAll(/"imagePath"\s*:\s*"((?:[^"\\]|\\.)*)"/g)) {
         try { toolSentPaths.add(path.resolve(JSON.parse('"' + sm[1] + '"')).toLowerCase()); } catch { /* 非 JSON 片段忽略 */ }
       }
-      const isToolSent = (p: string) => { try { return toolSentPaths.has(path.resolve(p).toLowerCase()); } catch { return false; } };
       if (/generate_image|__generate_image|comfy__generate|Krea2|文生图|ComfyUI_temp/i.test(turnBlob)) {
         sawGenTool = true;
       }
       if (pendingGenFiles.length === 0) {
         for (const p of this.parseGeneratedImagePaths(turnBlob)) {
-          if (/comfyui[\\/]runs|comfyui_temp|Krea2|文生图/i.test(p) && !pendingGenFiles.includes(p) && !isToolSent(p)) {
+          if (/comfyui[\\/]runs|comfyui_temp|Krea2|文生图/i.test(p) && !p.includes("*") && !pendingGenFiles.includes(p) && !isToolSent(p)) {
             pendingGenFiles.push(p);
             console.log(`[engine] generate_image 兜底捕获(正文) ${p}`);
           }
