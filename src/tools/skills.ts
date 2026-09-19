@@ -29,7 +29,9 @@ export interface SkillEntry {
 
 function extraSkillRoots(): string[] {
   const raw = process.env.CTI_SKILLS_DIRS || '';
-  return raw.split(/[;:]/).map((s) => s.trim()).filter(Boolean);
+  // 🔴 只按分号拆（2026-09-19 dsh 修）：原版 /[;:]/ 会把 Windows 盘符 "C:" 当分隔符切，
+  // "C:\Users\..." 裂成 "C"+残段，产生 C:\D\opt\C 假根（dsh 自检戳发现）。多目录=分号分隔。
+  return raw.split(';').map((s) => s.trim()).filter(Boolean);
 }
 
 /** 技能根目录列表（去重，项目 skills/ 恒在首位） */
