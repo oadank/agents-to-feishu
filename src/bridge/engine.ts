@@ -185,6 +185,9 @@ export class MessageEngine {
   private opts: EngineOptions;
   /** chatId → 当前轮流式卡 message_id（一轮一卡） */
   private streamCards = new Map<string, string>();
+  // [2026-09-19 票C] 桥侧自动发图跨轮台账（per chat，进程生命周期有效）：正文再提及上一轮的旧图，
+  // 兜底捕获(正文)不得再投一次——Z-IMAGE文生图_00003 同路径双发案（本轮台账挡不住跨轮重发）。
+  private genAutoDelivered = new Map<string, Set<string>>();
   /** chatId → 串行任务链（同一聊天室的消息排队执行，防止 ACP 并发撞车） */
   private chatQueues = new Map<string, Promise<void>>();
   /** [根治 A③] 每个 chat 当前 busy 周期的起点，用于「排队多久 / 卡住多久」留痕 */
@@ -790,7 +793,8 @@ export class MessageEngine {
               }
               if (/send_image/i.test(ev.tool)) {
                 try {
-                  const ip = JSON.parse(String(ev.input || "{}")).imagePath;
+                  const j = JSON.parse(String(ev.input || "{}"));
+                  const ip = j.imagePath || j.image_path || j.path; // cti-builtin 工具键是 image_path，此前只认 imagePath——事件层台账一直没活
                   if (typeof ip === "string" && ip.trim()) { toolSentPaths.add(path.resolve(ip).toLowerCase()); console.log(`[engine] 台账登记 send_image 输入 ${path.resolve(ip).slice(0, 60)}`); }
                 } catch { /* 非 JSON 输入忽略 */ }
               }
@@ -976,7 +980,7 @@ export class MessageEngine {
       // zcode 形态：tool 名 mcp__comfy__generate_image / 正文含 Krea2 路径（含空格）
       const turnBlob = `${layers.text}\n${layers.toolLines.join('\n')}\n${layers.thinking}`;
       // 🔴 老大令 2026-09-19：本轮 send_image 已发文件台账 —— 模型发过的桥不得兜底再发（家装图双发根因）
-      for (const sm of turnBlob.matchAll(/"imagePath"\s*:\s*"((?:[^"\\]|\\.)*)"/g)) {
+      for (const sm of turnBlob.matchAll(/"(?:imagePath|image_path)"\s*:\s*"((?:[^"\\]|\\.)*)"/g)) {
         try { toolSentPaths.add(path.resolve(JSON.parse('"' + sm[1] + '"')).toLowerCase()); } catch { /* 非 JSON 片段忽略 */ }
       }
       if (/generate_image|__generate_image|comfy__generate|Krea2|文生图|ComfyUI_temp/i.test(turnBlob)) {
@@ -1020,8 +1024,19 @@ export class MessageEngine {
             continue;
           }
           if (isToolSent(gp)) { console.log(`[engine] generate_image 自动发图跳过：send_image 本轮已发 ${gp}`); continue; }
+          const gkey = path.resolve(gp).toLowerCase();
+          if (this.genAutoDelivered.get(chatId)?.has(gkey)) {
+            console.log(`[engine] generate_image 自动发图跳过：桥上一轮已自动发过（跨轮双发防线） ${gp}`);
+            continue;
+          }
           const ok = await this.sendImageFile(chatId, gp);
           console.log(`[engine] generate_image 自动发图 chat=${chatId} file=${gp} ok=${ok}`);
+          if (ok) {
+            let s = this.genAutoDelivered.get(chatId);
+            if (!s) { s = new Set(); this.genAutoDelivered.set(chatId, s); }
+            s.add(gkey);
+            if (s.size > 200) s.clear(); // 防膨胀：清空重攒（宁可极旧图可能重现，不可新图永发不出）
+          }
         } catch (e) {
           console.warn(`[engine] generate_image 自动发图失败 ${gp}: ${e instanceof Error ? e.message : String(e)}`);
         }
