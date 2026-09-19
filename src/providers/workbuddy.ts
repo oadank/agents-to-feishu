@@ -21,6 +21,8 @@ import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent } from './types.js';
 import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
+import { readCtiMcpDefs } from './shared/per-session-mcp.js';
+import { resolveMcpArgPaths } from '../tools/mcp-path-resolve.js';
 
 function rtLog(msg: string): void {
   const file = process.env.CTI_RT_LOG || '';
@@ -74,6 +76,27 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
 const SESSIONS_FILE = (): string => path.join(
   process.env.CTI_USER_HOME || os.homedir(), '.agents-to-feishu', 'runtime', 'sessions-workbuddy.json',
 );
+
+/** 🔴 能力焊点：配置中心 MCP 六件套 → codebuddy --mcp-config（Claude 风格 mcpServers）。
+ *  不接这根线，WB 就是光杆引擎：聊得了天，够不着 lark / openmem / 桌面 / 生图。 */
+function writeMcpConfig(): string | null {
+  try {
+    const defs = readCtiMcpDefs('workbuddy');
+    if (!defs.length) return null;
+    const servers: Record<string, unknown> = {};
+    for (const d of defs) {
+      if (d.transport === 'stdio' && d.command) {
+        servers[d.id] = { type: 'stdio', command: d.command, args: resolveMcpArgPaths(d.id, d.args || []), env: d.env || {} };
+      } else if (d.url) {
+        servers[d.id] = { type: d.transport === 'sse' ? 'sse' : 'http', url: d.url };
+      }
+    }
+    const file = path.join(os.tmpdir(), 'wb-mcp-config.json');
+    fs.writeFileSync(file, JSON.stringify({ mcpServers: servers }), 'utf8');
+    rtLog(`[wb] mcp-config ${Object.keys(servers).length} 个: ${Object.keys(servers).join(', ')}`);
+    return file;
+  } catch (e) { rtLog(`[wb] mcp-config 生成失败: ${e}`); return null; }
+}
 
 export function createWorkBuddyProvider(): RuntimeProvider {
   const sessions = new Map<string, string>();
@@ -184,6 +207,8 @@ export function createWorkBuddyProvider(): RuntimeProvider {
       const sid = params.freshSession ? undefined : sessions.get(params.sessionKey);
       const mkArgs = (resume: string | undefined): string[] => {
         const a = [resolveWbCli(), '-p', '--output-format', 'stream-json', '-y', '--model', resolveModel()];
+        const mcpFile = writeMcpConfig();
+        if (mcpFile) a.push('--mcp-config', mcpFile);
         if (resume) a.push('--resume', resume);
         else if (params.systemPrompt) a.push('--append-system-prompt', params.systemPrompt);
         a.push(params.text);
