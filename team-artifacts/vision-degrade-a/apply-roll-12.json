@@ -1,0 +1,98 @@
+[
+  {
+    "agent": "claude",
+    "svc": "claude",
+    "apply": "ok",
+    "status": "S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000",
+    "inject": "toolRoute=True; visionDegrade=False; len=10565",
+    "note": "STATUS_S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000"
+  },
+  {
+    "agent": "codex",
+    "svc": "codex",
+    "apply": "ok",
+    "status": "S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000",
+    "inject": "toolRoute=True; visionDegrade=True; len=10632",
+    "note": "STATUS_S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000"
+  },
+  {
+    "agent": "mimo",
+    "svc": "mimo",
+    "apply": "ok",
+    "status": "S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000",
+    "inject": "toolRoute=True; visionDegrade=True; len=10632",
+    "note": "STATUS_S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000"
+  },
+  {
+    "agent": "gemini",
+    "svc": "gemini",
+    "apply": "ok",
+    "status": "S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000",
+    "inject": "toolRoute=True; visionDegrade=True; len=10632",
+    "note": "STATUS_S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000"
+  },
+  {
+    "agent": "hermes",
+    "svc": "hermes",
+    "apply": "ok",
+    "status": "S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000",
+    "inject": "toolRoute=True; visionDegrade=True; len=10632",
+    "note": "STATUS_S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000"
+  },
+  {
+    "agent": "openakita",
+    "svc": "openakita",
+    "apply": "ok",
+    "status": "S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000",
+    "inject": "toolRoute=True; visionDegrade=True; len=10632",
+    "note": "STATUS_S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000"
+  },
+  {
+    "agent": "reasonix",
+    "svc": "reasonix",
+    "apply": "ok",
+    "status": "S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000",
+    "inject": "toolRoute=True; visionDegrade=True; len=10632",
+    "note": "STATUS_S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000"
+  },
+  {
+    "agent": "openclaw",
+    "svc": "openclaw",
+    "apply": "ok",
+    "status": "S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000",
+    "inject": "toolRoute=True; visionDegrade=True; len=10632",
+    "note": "STATUS_S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000"
+  },
+  {
+    "agent": "opencode",
+    "svc": "opencode",
+    "apply": "ok",
+    "status": "S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000",
+    "inject": "toolRoute=True; visionDegrade=True; len=10632",
+    "note": "STATUS_S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000"
+  },
+  {
+    "agent": "dsh",
+    "svc": "dsh",
+    "apply": "ok",
+    "status": "S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000",
+    "inject": "toolRoute=True; visionDegrade=True; len=10632",
+    "note": "STATUS_S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000"
+  },
+  {
+    "agent": "deeptutor",
+    "svc": "deeptutor-bot",
+    "apply": "ok",
+    "status": "S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000",
+    "inject": "toolRoute=True; visionDegrade=True; len=10632",
+    "note": "STATUS_S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000"
+  },
+  {
+    "agent": "zcode",
+    "svc": "zcode",
+    "apply": "ok",
+    "status": "S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000",
+    "inject": "toolRoute=True; visionDegrade=True; len=10632",
+    "note": "STATUS_S\u0000E\u0000R\u0000V\u0000I\u0000C\u0000E\u0000_\u0000R\u0000U\u0000N\u0000N\u0000I\u0000N\u0000G\u0000\u0000\u0000"
+  }
+]

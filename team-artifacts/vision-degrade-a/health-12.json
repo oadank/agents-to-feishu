@@ -1,0 +1,98 @@
+[
+  {
+    "agent": "claude",
+    "nssm": "SERVICE_RUNNING",
+    "toolRoute": true,
+    "visionDegrade": "false",
+    "len": 10565,
+    "result": "PASS"
+  },
+  {
+    "agent": "codex",
+    "nssm": "SERVICE_RUNNING",
+    "toolRoute": true,
+    "visionDegrade": "true",
+    "len": 10632,
+    "result": "PASS"
+  },
+  {
+    "agent": "mimo",
+    "nssm": "SERVICE_RUNNING",
+    "toolRoute": true,
+    "visionDegrade": "true",
+    "len": 10632,
+    "result": "PASS"
+  },
+  {
+    "agent": "gemini",
+    "nssm": "SERVICE_RUNNING",
+    "toolRoute": true,
+    "visionDegrade": "true",
+    "len": 10632,
+    "result": "PASS"
+  },
+  {
+    "agent": "hermes",
+    "nssm": "SERVICE_RUNNING",
+    "toolRoute": true,
+    "visionDegrade": "true",
+    "len": 10632,
+    "result": "PASS"
+  },
+  {
+    "agent": "openakita",
+    "nssm": "SERVICE_RUNNING",
+    "toolRoute": true,
+    "visionDegrade": "true",
+    "len": 10632,
+    "result": "PASS"
+  },
+  {
+    "agent": "reasonix",
+    "nssm": "SERVICE_RUNNING",
+    "toolRoute": true,
+    "visionDegrade": "true",
+    "len": 10632,
+    "result": "PASS"
+  },
+  {
+    "agent": "openclaw",
+    "nssm": "SERVICE_RUNNING",
+    "toolRoute": true,
+    "visionDegrade": "true",
+    "len": 10632,
+    "result": "PASS"
+  },
+  {
+    "agent": "opencode",
+    "nssm": "SERVICE_RUNNING",
+    "toolRoute": true,
+    "visionDegrade": "true",
+    "len": 10632,
+    "result": "PASS"
+  },
+  {
+    "agent": "dsh",
+    "nssm": "SERVICE_RUNNING",
+    "toolRoute": true,
+    "visionDegrade": "true",
+    "len": 10632,
+    "result": "PASS"
+  },
+  {
+    "agent": "deeptutor",
+    "nssm": "SERVICE_RUNNING",
+    "toolRoute": true,
+    "visionDegrade": "true",
+    "len": 10632,
+    "result": "PASS"
+  },
+  {
+    "agent": "zcode",
+    "nssm": "SERVICE_RUNNING",
+    "toolRoute": true,
+    "visionDegrade": "true",
+    "len": 10632,
+    "result": "PASS"
+  }
+]

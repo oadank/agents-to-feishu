@@ -27,6 +27,14 @@ import { writeEnvMerged, writeCordisMerged, backupFile, logApply, writeFileAtomi
 export const VISION_DEGRADE_PROMPT =
   '你看图优先用自身视觉直接看；look_image/看图 MCP 仅在需要逐字提取、长图放大、像素级反推或你自看不准时作为兜底工具。';
 
+/**
+ * 工具路权令（老大 2026-09-19 裁定，同车 A 段）：配置不许摘 comfy/vision MCP，
+ * 但 prompt 层强制内建底座优先；旧通道仅备胎。前科：临时文件被清导致自动发图落空
+ * （2026-09-19 09:0x dsh 丢图实锤）。无条件注入，与 visionCapable 共用同一注入点。
+ */
+export const TOOL_ROUTE_PROMPT =
+  '生图/看图/反推一律优先内建底座（generate_image/look_image/reverse_prompt）；comfy/vision MCP 旧通道仅作备胎禁止首选（旧通道有临时文件被清导致自动发图落空的前科，禁止把首选让给它）。';
+
 /** 缺省视为支持看图（老大口径：现在都支持；纯文本模型在 store 里显式 false） */
 export function resolveVisionCapable(model?: ModelDef): boolean {
   return model?.visionCapable !== false;
@@ -38,6 +46,22 @@ export function withVisionDegradeInject(globalInject: string, model?: ModelDef):
   const base = globalInject ?? '';
   if (base.includes(VISION_DEGRADE_PROMPT)) return base;
   return base.trim() ? `${base}\n\n${VISION_DEGRADE_PROMPT}` : VISION_DEGRADE_PROMPT;
+}
+
+/** 工具路权令：全员无条件注入（幂等） */
+export function withToolRouteInject(globalInject: string): string {
+  const base = globalInject ?? '';
+  if (base.includes(TOOL_ROUTE_PROMPT)) return base;
+  return base.trim() ? `${base}\n\n${TOOL_ROUTE_PROMPT}` : TOOL_ROUTE_PROMPT;
+}
+
+/**
+ * apply 统一注入合成：store 全局注入 → 视觉降级令（按 model.visionCapable）→ 工具路权令（全员）。
+ * config.env 与 dsh persona.md 共用，保证两处口径一致。
+ */
+export function buildAgentGlobalInject(store: ConfigStore, model?: ModelDef): string {
+  const base = store.injection?.enabled === false ? '' : (store.injection?.global ?? '');
+  return withToolRouteInject(withVisionDegradeInject(base, model));
 }
 
 /** 项目根（render.ts 位于 src/config-center/，上溯两级） */
@@ -197,13 +221,10 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   lines.push('');
   // 注入（systemPrompt）：统一注入(全局) + 独立注入(该 agent)。值用 JSON 字符串编码，
   // loadConfig 读取时 JSON.parse 还原（支持多行/引号）。空字符串也写，保证键存在。
-  // 视觉降级令：该 agent 所选 model.visionCapable=true/缺省 时，统一注入尾部追加兜底指令。
-  const globalInject = withVisionDegradeInject(
-    store.injection?.enabled === false ? '' : (store.injection?.global ?? ''),
-    model,
-  );
+  // 合成：store 全局 → 视觉降级令（visionCapable）→ 工具路权令（全员，内建底座优先）。
+  const globalInject = buildAgentGlobalInject(store, model);
   lines.push('# ── systemPrompt 注入：统一(全局) + 独立(本 agent) ──');
-  lines.push(`# visionCapable=${resolveVisionCapable(model)}（true 时统一注入含视觉降级令）`);
+  lines.push(`# visionCapable=${resolveVisionCapable(model)}；toolRoute=always`);
   lines.push(`CTI_SYSTEM_PROMPT_GLOBAL=${JSON.stringify(globalInject)}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_SYSTEM_PROMPT=${JSON.stringify(agent.systemPrompt ?? '')}`);
   lines.push('');
@@ -587,11 +608,8 @@ export function writeAgentArtifacts(
     writeCordisMerged(cordisYmlPath, cordisYml, agent.id);
     // 生成 persona.md：cordis.yml 的 acp-agent 段用 readFileSync 引用它，缺失会导致
     // 插件树加载失败（ENOENT persona.md）→ acp-demo 崩溃 → ACP 全部超时（"ACP request 100 timeout"）。
-    // 内容 = 统一注入(全局, 含视觉降级令) + 独立注入(本 agent)，拼接规则对齐 config.ts buildInjectedSystemPrompt。
-    const personaGlobal = withVisionDegradeInject(
-      _store.injection?.enabled === false ? '' : (_store.injection?.global ?? ''),
-      findModel(_store, agent.providerId, agent.modelId),
-    );
+    // 内容 = 统一注入(全局, 视觉降级令+工具路权令) + 独立注入(本 agent)，拼接规则对齐 config.ts buildInjectedSystemPrompt。
+    const personaGlobal = buildAgentGlobalInject(_store, findModel(_store, agent.providerId, agent.modelId));
     const personaCustom = agent.systemPrompt ?? '';
     const personaBody = [personaGlobal, personaCustom].filter((s) => s && s.trim()).join('\n\n---\n\n');
     const personaPath = path.join(process.env.CTI_USER_HOME || os.homedir(), '.dsh', `${agent.id}-bot`, 'persona.md');
