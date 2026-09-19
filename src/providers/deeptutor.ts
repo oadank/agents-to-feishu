@@ -34,6 +34,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
+import { readCtiMcpDefs } from './shared/per-session-mcp.js';
 import type {
   RuntimeProvider,
   StreamChatParams,
@@ -137,7 +138,65 @@ export function createDeeptutorProvider(): RuntimeProvider {
     return kbCache?.ids ?? [];
   }
 
+  // ── 桥接 MCP 工具下发（2026-09-19 票：deeptutor provider 工具下发接线）──
+  // 背景：CTI_BOT_DEEPTUTOR_MCP_SERVERS（配置中心勾选池，含 cti-builtin stdio）此前
+  // 无任何消费方——provider 只发 start_turn，从不把工具注册进 DeepTutor。DeepTutor 内核
+  // 有完整 MCP 栈（services/mcp + /api/settings/mcp admin CRUD，AUTH_ENABLED=false 时
+  // admin 直通），实测侧栏手工注册后 load_tools 即可用 wrapped 名（mcp_cti-builtin_*）
+  // 调用——缺的不是内核能力，是"配置中心=唯一真源"的自动同步：手工注册漂移/丢失无人修。
+  // 本函数 = claude 家 attachBridgeTools 的等价物（进程内 SDK 注入不适用于 WS 常驻服务，
+  // 换成其原生 HTTP upsert）。只管配置点名的条目，别家手工注册的 server 不碰。
+  const MCP_SYNC_MS = 10 * 60 * 1000;
+  const DEEPTUTOR_TOOL_TIMEOUT_S = 300; // 生图 XDN 产线可达数分钟，内核默认 30s 会掐死
+  let mcpSyncAt = 0;
+
+  async function syncMcpRegistry(): Promise<void> {
+    const defs = readCtiMcpDefs('deeptutor');
+    if (!defs.length) return;
+    let current: Record<string, Record<string, unknown>> = {};
+    try {
+      const r = await fetch(`${HTTP_BASE}/api/settings/mcp`);
+      if (!r.ok) throw new Error(`GET mcp HTTP ${r.status}`);
+      const j = (await r.json()) as { servers?: Record<string, Record<string, unknown>> };
+      current = j.servers ?? {};
+    } catch (e) {
+      rtLog(`deeptutor MCP 同步跳过（读现状失败，8001 未就绪?）: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    for (const m of defs) {
+      if (m.transport !== 'stdio' || !m.command) continue; // 本票只下发 stdio 形态（cti-builtin）
+      const cfg = {
+        type: 'stdio', command: m.command, args: m.args ?? [], env: m.env ?? {},
+        cwd: '', url: '', headers: {}, tool_timeout: DEEPTUTOR_TOOL_TIMEOUT_S,
+        enabled_tools: ['*'], disabled_tools: [], enabled: true, auth: '',
+      };
+      const cur = current[m.id];
+      const same = cur && cur.command === cfg.command
+        && JSON.stringify(cur.args ?? []) === JSON.stringify(cfg.args)
+        && JSON.stringify(cur.env ?? {}) === JSON.stringify(cfg.env)
+        && cur.enabled === true && cur.tool_timeout === cfg.tool_timeout;
+      if (same) continue;
+      try {
+        const r = await fetch(`${HTTP_BASE}/api/settings/mcp/servers/${encodeURIComponent(m.id)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(cfg),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status} ${String((await r.text()).slice(0, 120))}`);
+        rtLog(`deeptutor MCP 同步: ${m.id} ${cur ? '已更新(配置漂移修复)' : '已注册'}（stdio, ${cfg.args.length} args, timeout=${cfg.tool_timeout}s）`);
+      } catch (e) {
+        rtLog(`deeptutor MCP 同步失败 ${m.id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    mcpSyncAt = Date.now();
+  }
+
   async function *streamChat(params: StreamChatParams): AsyncGenerator<StreamEvent> {
+    // 工具下发保鲜：配置中心改勾选项/DeepTutor 侧重装丢注册 → 10 分钟节流内自动修复，
+    // 服务未就绪时 prepare 没同步成，首轮消息这里兜住。失败静默（rtLog 留痕），不拦对话。
+    if (Date.now() - mcpSyncAt > MCP_SYNC_MS) {
+      try { await syncMcpRegistry(); } catch { /* 非致命 */ }
+    }
     // ── 组装 content：语音转写带 [语音消息] 前缀（触发 DeepTutor 语音契约）──
     // [2026-09-03 修] engine 传的 audio 标记 text 为空串（存在即语义），旧条件
     // `a.text` truthy 永远匹配不上 → 语音消息被 DeepTutor 当普通文字（实测）。
@@ -328,6 +387,10 @@ export function createDeeptutorProvider(): RuntimeProvider {
       // 自检：DeepTutor 后端可达 + 飞书凭证之外的核心依赖就绪
       const r = await fetch(`${HTTP_BASE}/docs`);
       if (!r.ok) throw new Error(`DeepTutor 后端不可达: ${HTTP_BASE} HTTP ${r.status}`);
+      // 首轮工具下发：把配置中心勾选的 cti-builtin 注册进 DeepTutor admin MCP 表（非致命）
+      try { await syncMcpRegistry(); } catch (e) {
+        rtLog(`deeptutor prepare MCP 同步异常（不拦启动）: ${e instanceof Error ? e.message : String(e)}`);
+      }
       rtLog('deeptutor provider 就绪');
     },
 

@@ -16,6 +16,7 @@
  * | 'nativeFileOnly' | session/new 的 mcpServers 引擎不消费（stdio 静默失败），真挂载走引擎原生配置文件 | openakita（workspace data/mcp/servers/<id>/，由配置中心 syncMcpToCli 维护；此处仍回传全量条目保持现网线上行为不变） |
  * | 'rejectAllMcp' | 引擎明确拒绝一切非空 mcpServers（ACP bridge 模式）→ 只能传 [] | openclaw（-32603 "ACP bridge mode does not support per-session MCP servers"，09-12 实测；MCP 真挂载走 ~/.openclaw/openclaw.json mcp.servers，由配置中心 syncMcpToCli 维护） |
  * | 'typedHttpAll' | 全量穿透，但 http/sse 条目必须带 type 字面量 + headers 数组（zod union schema） | gemini（CLI 0.58+ 只给 {name,url} 命中 invalid_union ⇒ session/new -32603 收消息卡死；2026-09-11 补 type+headers 后 4 个 MCP 全通） |
+ * | (非 ACP 通道)  | 不走 session/new——provider 直连 DeepTutor admin API `PUT /api/settings/mcp/servers/<id>` upsert（AUTH off 时 admin 直通），stdio 条目 tool_timeout 抬到 300s（生图 XDN 分钟级，内核默认 30s 掐死）。工具以 wrapped 名 `mcp_<server>_<tool>` 进 deferred 池，模型 load_tools 后可调 | deeptutor（2026-09-19 票：config→mcp.json 无消费方→provider syncMcpRegistry 接线；实弹痕=本地 WS 轮真调 mcp_cti-builtin_skill_index 返回 13 技能） |
  *
  * ⚠ 实测矩阵更新时同步改这张表；引擎行为有变先改 flag 再动代码。
  */
