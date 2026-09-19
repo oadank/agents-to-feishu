@@ -729,11 +729,18 @@ export class MessageEngine {
         freshSession: fresh,
         systemPrompt: this.buildSystemPrompt(),
         workdir: session.workdir,
-        // [2026-09-17] 恒传 history：provider 内存会话可能因空闲回收（默认 30min）/进程
-        // 重启丢失，新建会话时靠这份落盘 context 续上下文。provider 侧仅在「本轮新建
-        // 会话」时注入（正常轮次 harness 自带历史，注入会双份）；/new 时 context 已清空
-        // → 天然空白。此前仅 fresh||interrupted 时传，空闲回收路径漏传 = 跨消息失忆根因。
+        // [2026-09-17] 恒传 history（现仅供 /new 语义的合法携带）。
+        // 🔴 老大令 2026-09-19：影子回灌废除 —— provider 在「非用户 /new 的新建会话」
+        // 分支回调 onSessionLost：桥清空 context + 发卡片告知（自动 /new）。
         ...(session.context.length > 0 ? { history: [...session.context] } : {}),
+        onSessionLost: () => {
+          if (session.context.length === 0) return;
+          session.context = [];
+          session.pendingFresh = true;
+          this.opts.sessions.persist();
+          console.log(`[engine] auto /new on engine session lost chat=${chatId.slice(0, 12)}`);
+          void this.sendCommandCard(chatId, '🆕 检测到引擎会话丢失（进程被杀/空闲回收/历史库被清），已自动新建会话并清空桥侧历史副本——记忆从此归各引擎自管。');
+        },
       })) {
         switch (ev.type) {
           case 'text':

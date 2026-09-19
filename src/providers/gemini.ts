@@ -326,7 +326,12 @@ export class GeminiProvider implements RuntimeProvider {
 
     // 人设 + 上下文拼接：[2026-09-05] 新会话首条注入 systemPrompt；
     // [2026-09-17] history 仅新建会话时注入（engine 恒传，靠 injectHistory 门控防重复拼接）。
-    const historyText = injectHistory && params.history && params.history.length > 0
+    // 🔴 老大令 2026-09-19：非 /new 的丢失性新建 → 自动 /new（回调桥清 shadow 并告知），影子回灌废除
+    if (injectHistory && !params.freshSession && params.history && params.history.length > 0) {
+      rtLog(`[gemini] engine session lost (shadow ${params.history.length}) → auto /new`);
+      params.onSessionLost?.();
+    }
+    const historyText = injectHistory && params.freshSession && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
       : '';
     const promptParts: string[] = [];

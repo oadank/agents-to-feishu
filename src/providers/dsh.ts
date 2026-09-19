@@ -824,7 +824,12 @@ export class DshProvider implements RuntimeProvider {
       session.personaInjected = true;
     }
     // [2026-09-17] history 注入条件改为 isNewSession（见上方注释）。
-    const historyText = isNewSession && params.history && params.history.length > 0
+    // 🔴 老大令 2026-09-19：非 /new 的丢失性新建 → 自动 /new（回调桥清 shadow 并告知），影子回灌废除
+    if (isNewSession && !params.freshSession && params.history && params.history.length > 0) {
+      rtLog(`[dsh] engine session lost (shadow ${params.history.length}) → auto /new`);
+      params.onSessionLost?.();
+    }
+    const historyText = isNewSession && params.freshSession && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
       : '';
     if (historyText) {

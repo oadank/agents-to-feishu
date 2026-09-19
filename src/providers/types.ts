@@ -68,6 +68,9 @@ export interface StreamChatParams {
   freshSession?: boolean;
   /** 会话内已累积的正文（发给 CLI 型运行时的历史回放；/compact 摘要也在里面） */
   history?: ChatMessage[];
+  /** 🔴 老大令 2026-09-19：桥发现引擎侧会话已丢（被杀/回收/库被清）时回调 ——
+   *  桥清空 shadow context 并发卡片告知，等效自动 /new。各引擎自管记忆，桥不回灌。 */
+  onSessionLost?: () => void;
   /**
    * 会话绑定的工作目录（/new [目录] 指定，缺省用 provider 默认）。
    * 2026-08-29 新增：此前该字段缺失，导致 /new 绑定目录对所有 runtime 都不生效

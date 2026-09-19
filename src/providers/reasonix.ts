@@ -346,7 +346,12 @@ export class ReasonixProvider implements RuntimeProvider {
       fullPrompt = `${params.systemPrompt || ''}\n\n${params.text}`;
       session.personaInjected = true;
     }
-    const historyText = isNewSession && params.history && params.history.length > 0
+    // 🔴 老大令 2026-09-19：非 /new 的丢失性新建 → 自动 /new（回调桥清 shadow 并告知），影子回灌废除
+    if (isNewSession && !params.freshSession && params.history && params.history.length > 0) {
+      rtLog(`[reasonix] engine session lost (shadow ${params.history.length}) → auto /new`);
+      params.onSessionLost?.();
+    }
+    const historyText = isNewSession && params.freshSession && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
       : '';
     if (historyText) {
