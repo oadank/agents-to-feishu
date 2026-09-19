@@ -112,7 +112,7 @@ export async function runGenerateImage(body: Record<string, unknown>): Promise<s
       const buf = Buffer.from(b64, 'base64');
       if (buf.length < 256) throw new Error(`agnes b64 too small ${buf.length}`);
       fs.mkdirSync(COMFY_RUNS_IMG, { recursive: true });
-      const fname = `Agnes-${Date.now()}.png`;
+      const fname = `Agnes-${Date.now()}.${buf[0] === 0xff && buf[1] === 0xd8 ? 'jpg' : buf[0] === 0x47 ? 'gif' : 'png'}`; // 🔴 09-19 按内容定扩展：JPEG 冒充 .png 曾被模型误判缺IHDR坏图
       const fp = path.join(COMFY_RUNS_IMG, fname);
       fs.writeFileSync(fp, buf);
       return JSON.stringify({

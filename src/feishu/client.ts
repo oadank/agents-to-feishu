@@ -411,9 +411,13 @@ export class FeishuClient {
       const os = await import('node:os');
       const path = await import('node:path');
       const fs = await import('node:fs');
-      const tmpDir = path.join(os.tmpdir(), 'agents-to-feishu');
+      // 🔴 老大令 2026-09-19：收图落盘从 %TEMP% 迁到工作区（沙箱文件工具读不进 temp，look_image/read_image 双❌冤案根因）；扩展名按内容真身嗅探（JPEG 不再谎报 .png）
+      void os;
+      const tmpDir = path.join(process.cwd(), 'inbox', 'feishu-img');
       fs.mkdirSync(tmpDir, { recursive: true });
-      const tmpFile = path.join(tmpDir, `${Date.now()}-${fileKey}.${ext}`);
+      const sniff = Buffer.concat(chunks).subarray(0, 4);
+      const realExt = sniff[0] === 0xff && sniff[1] === 0xd8 ? 'jpg' : sniff[0] === 0x89 && sniff[1] === 0x50 ? 'png' : sniff[0] === 0x47 ? 'gif' : sniff[0] === 0x52 && sniff[1] === 0x49 ? 'webp' : ext;
+      const tmpFile = path.join(tmpDir, `${Date.now()}-${fileKey}.${realExt}`);
       fs.writeFileSync(tmpFile, Buffer.concat(chunks));
       return tmpFile;
     } catch (e) {

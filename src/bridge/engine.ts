@@ -965,12 +965,18 @@ export class MessageEngine {
       // 兜底链：①工具 output 路径 ②本轮正文/工具卡/思考 ③本轮 mtime 新鲜 runs 成品
       // zcode 形态：tool 名 mcp__comfy__generate_image / 正文含 Krea2 路径（含空格）
       const turnBlob = `${layers.text}\n${layers.toolLines.join('\n')}\n${layers.thinking}`;
+      // 🔴 老大令 2026-09-19：本轮 send_image 已发文件台账 —— 模型发过的桥不得兜底再发（家装图双发根因）
+      const toolSentPaths = new Set<string>();
+      for (const sm of turnBlob.matchAll(/"imagePath"\s*:\s*"((?:[^"\\]|\\.)*)"/g)) {
+        try { toolSentPaths.add(path.resolve(JSON.parse('"' + sm[1] + '"')).toLowerCase()); } catch { /* 非 JSON 片段忽略 */ }
+      }
+      const isToolSent = (p: string) => { try { return toolSentPaths.has(path.resolve(p).toLowerCase()); } catch { return false; } };
       if (/generate_image|__generate_image|comfy__generate|Krea2|文生图|ComfyUI_temp/i.test(turnBlob)) {
         sawGenTool = true;
       }
       if (pendingGenFiles.length === 0) {
         for (const p of this.parseGeneratedImagePaths(turnBlob)) {
-          if (/comfyui[\\/]runs|comfyui_temp|Krea2|文生图/i.test(p) && !pendingGenFiles.includes(p)) {
+          if (/comfyui[\\/]runs|comfyui_temp|Krea2|文生图/i.test(p) && !pendingGenFiles.includes(p) && !isToolSent(p)) {
             pendingGenFiles.push(p);
             console.log(`[engine] generate_image 兜底捕获(正文) ${p}`);
           }
@@ -989,7 +995,7 @@ export class MessageEngine {
               .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
               .slice(0, 3);
             for (const p of fresh) {
-              if (!pendingGenFiles.includes(p)) {
+              if (!pendingGenFiles.includes(p) && !isToolSent(p)) { // 🔴 09-19 双发防线
                 pendingGenFiles.push(p);
                 console.log(`[engine] generate_image 兜底捕获(mtime) ${p}`);
               }
@@ -1005,6 +1011,7 @@ export class MessageEngine {
             console.warn(`[engine] generate_image 自动发图跳过: 文件不存在 ${gp}`);
             continue;
           }
+          if (isToolSent(gp)) { console.log(`[engine] generate_image 自动发图跳过：send_image 本轮已发 ${gp}`); continue; }
           const ok = await this.sendImageFile(chatId, gp);
           console.log(`[engine] generate_image 自动发图 chat=${chatId} file=${gp} ok=${ok}`);
         } catch (e) {

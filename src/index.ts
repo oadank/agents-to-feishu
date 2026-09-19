@@ -84,7 +84,8 @@ async function imagePromptFor(imagePath: string): Promise<string> {
 // ── 收图磁盘清理策略（2026-08-30 老大提出：垃圾越来越多）──
 /** 收图落盘目录（与 feishu/client.ts downloadResource 同源：os.tmpdir()/agents-to-feishu） */
 function imageDir(): string {
-  return path.join(os.tmpdir(), 'agents-to-feishu');
+  // 🔴 老大令 2026-09-19：与工作区同源收图目录（feishu/client.ts downloadResource 同改），%TEMP% 沙箱读不进
+  return path.join(process.cwd(), 'inbox', 'feishu-img');
 }
 /** 图片文件保留时长，默认 24 小时（0 = 永不自动清理） */
 const IMAGE_TTL_MS = parseInt(process.env.CTI_IMAGE_TTL_MS || String(24 * 60 * 60 * 1000), 10);
