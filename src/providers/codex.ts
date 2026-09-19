@@ -141,6 +141,8 @@ export class CodexProvider implements RuntimeProvider {
         resumed = true;
       } catch (e) {
         rtLog(`[codex] thread/resume failed, fallback to start: ${e instanceof Error ? e.message.slice(0, 120) : String(e).slice(0, 120)}`);
+        // 🔴 老大令 2026-09-19：resume 失败=引擎线程丢失 → 自动 /new（桥清影子+告知卡片），不回灌
+        params.onSessionLost?.();
         threadId = '';
       }
     }
