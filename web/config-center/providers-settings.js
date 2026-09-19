@@ -40,6 +40,14 @@
     return h("div", { class: "model-row" },
       h("input", { class: "mid", type: "text", value: m.id || "", onInput: (e) => props.onChange({ id: e.target.value }), placeholder: "模型名（如 deepseek-chat）" }),
       h("input", { class: "mlabel", type: "text", value: m.label || "", onInput: (e) => props.onChange({ label: e.target.value }), placeholder: "状态栏短名" }),
+      // 模型支持看图（默认开）：true/缺省 → apply 注入「优先自身视觉，look_image 仅兜底」；false 不注入
+      h("label", { style: { fontSize: 11, whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 4, flex: "none" }, title: "开：模型自有视觉优先，look_image/看图 MCP 仅兜底；关：不注入降级令，工具行为不变（纯文本模型）" },
+        h("input", {
+          type: "checkbox",
+          checked: m.visionCapable !== false,
+          onChange: (e) => props.onChange({ visionCapable: e.target.checked }),
+        }),
+        "模型支持看图"),
       h("span", { class: res ? (res.ok ? "ok" : "err") : "", style: { fontSize: 11, minWidth: 70, display: "inline-block", textAlign: "right" } },
         res ? (res.ok ? "✓ " + res.latencyMs + "ms" : "✗") : ""),
       h("button", { class: "btn mini danger", onClick: props.onRemove }, "删"),
@@ -126,6 +134,7 @@
         h("div", { class: "model-row", style: { fontSize: 12, color: "var(--dim)", margin: "10px 0 4px" } },
           h("span", { style: { flex: 2, minWidth: 0 } }, "模型（状态栏显示的模型）"),
           h("span", { style: { flex: 1, minWidth: 0 } }, "状态栏短名"),
+          h("span", { style: { flex: "none", minWidth: 90 } }, "模型支持看图"),
           h("span", { style: { flex: "none", minWidth: 70 } }, ""),
           h("span", { style: { flex: "none", minWidth: 30 } }, ""),
           h("span", { style: { flex: "none", minWidth: 42 } }, ""),
@@ -134,7 +143,7 @@
           return h(ModelRow, { key: i, m, providerId: origId || p.id, onChange: (partial) => updModel(i, partial), onRemove: () => { const models = (p.models || []).slice(); models.splice(i, 1); upd({ models }); } });
         }),
         h("div", { class: "row" },
-          h("button", { class: "btn mini", onClick: () => { const models = (p.models || []).slice(); models.push({ id: '', label: '', contextWindow: 1000000 }); upd({ models }); } }, "+ 模型"),
+          h("button", { class: "btn mini", onClick: () => { const models = (p.models || []).slice(); models.push({ id: '', label: '', contextWindow: 1000000, visionCapable: true }); upd({ models }); } }, "+ 模型"),
         ),
         h("div", { class: "row" },
           h("button", { class: "btn primary", onClick: save, disabled: saving }, saving ? "保存中…" : "保存"),

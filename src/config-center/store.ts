@@ -46,6 +46,12 @@ export interface ModelDef {
   contextWindow?: number;
   /** 状态行显示的 model 标签；缺省用 id */
   label?: string;
+  /**
+   * 模型是否支持看图（默认 true——现役模型大多自生视觉）。
+   * true/缺省：apply 时向 systemPrompt 注入「优先用自身视觉，look_image 仅兜底」降级令。
+   * false：不注入，现有 look_image/看图 MCP 工具行为不变（纯文本模型手动关）。
+   */
+  visionCapable?: boolean;
 }
 
 /** 一个 MCP 服务定义 —— 总配置池的一项 */

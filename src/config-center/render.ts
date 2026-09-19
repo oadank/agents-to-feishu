@@ -14,10 +14,31 @@ import { resolveMcpArgPaths } from '../tools/mcp-path-resolve.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  type ConfigStore, type ProviderDef, type AgentDef, type McpDef,
+  type ConfigStore, type ProviderDef, type AgentDef, type McpDef, type ModelDef,
   findProvider, findModel, resolveAgentWorkdir,
 } from './store.js';
 import { writeEnvMerged, writeCordisMerged, backupFile, logApply, writeFileAtomic } from './patch-apply.js';
+
+/**
+ * 视觉能力降级令（A 段 · 2026-09-19 老大亲提）：
+ * model.visionCapable=true/缺省 时 apply 注入；false 不注入。
+ * 只动注入文案，不碰 look.ts / registry.ts / engine.ts 的看图实现。
+ */
+export const VISION_DEGRADE_PROMPT =
+  '你看图优先用自身视觉直接看；look_image/看图 MCP 仅在需要逐字提取、长图放大、像素级反推或你自看不准时作为兜底工具。';
+
+/** 缺省视为支持看图（老大口径：现在都支持；纯文本模型在 store 里显式 false） */
+export function resolveVisionCapable(model?: ModelDef): boolean {
+  return model?.visionCapable !== false;
+}
+
+/** apply 时把降级令拼进该 agent 的统一注入（幂等：已含同文则不重复） */
+export function withVisionDegradeInject(globalInject: string, model?: ModelDef): string {
+  if (!resolveVisionCapable(model)) return globalInject ?? '';
+  const base = globalInject ?? '';
+  if (base.includes(VISION_DEGRADE_PROMPT)) return base;
+  return base.trim() ? `${base}\n\n${VISION_DEGRADE_PROMPT}` : VISION_DEGRADE_PROMPT;
+}
 
 /** 项目根（render.ts 位于 src/config-center/，上溯两级） */
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -176,8 +197,13 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   lines.push('');
   // 注入（systemPrompt）：统一注入(全局) + 独立注入(该 agent)。值用 JSON 字符串编码，
   // loadConfig 读取时 JSON.parse 还原（支持多行/引号）。空字符串也写，保证键存在。
-  const globalInject = store.injection?.enabled === false ? '' : (store.injection?.global ?? '');
+  // 视觉降级令：该 agent 所选 model.visionCapable=true/缺省 时，统一注入尾部追加兜底指令。
+  const globalInject = withVisionDegradeInject(
+    store.injection?.enabled === false ? '' : (store.injection?.global ?? ''),
+    model,
+  );
   lines.push('# ── systemPrompt 注入：统一(全局) + 独立(本 agent) ──');
+  lines.push(`# visionCapable=${resolveVisionCapable(model)}（true 时统一注入含视觉降级令）`);
   lines.push(`CTI_SYSTEM_PROMPT_GLOBAL=${JSON.stringify(globalInject)}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_SYSTEM_PROMPT=${JSON.stringify(agent.systemPrompt ?? '')}`);
   lines.push('');
@@ -561,8 +587,11 @@ export function writeAgentArtifacts(
     writeCordisMerged(cordisYmlPath, cordisYml, agent.id);
     // 生成 persona.md：cordis.yml 的 acp-agent 段用 readFileSync 引用它，缺失会导致
     // 插件树加载失败（ENOENT persona.md）→ acp-demo 崩溃 → ACP 全部超时（"ACP request 100 timeout"）。
-    // 内容 = 统一注入(全局) + 独立注入(本 agent)，拼接规则对齐 config.ts buildInjectedSystemPrompt。
-    const personaGlobal = _store.injection?.enabled === false ? '' : (_store.injection?.global ?? '');
+    // 内容 = 统一注入(全局, 含视觉降级令) + 独立注入(本 agent)，拼接规则对齐 config.ts buildInjectedSystemPrompt。
+    const personaGlobal = withVisionDegradeInject(
+      _store.injection?.enabled === false ? '' : (_store.injection?.global ?? ''),
+      findModel(_store, agent.providerId, agent.modelId),
+    );
     const personaCustom = agent.systemPrompt ?? '';
     const personaBody = [personaGlobal, personaCustom].filter((s) => s && s.trim()).join('\n\n---\n\n');
     const personaPath = path.join(process.env.CTI_USER_HOME || os.homedir(), '.dsh', `${agent.id}-bot`, 'persona.md');
