@@ -294,12 +294,26 @@ ${trimmed}`);
   });
   await wsClient.start({ eventDispatcher: dispatcher });
 
+  // WS 静默失联监测（2026-09-19）：09:07 dsh / 09:20 openakita 双双出现「WS 显示已连接
+  // 但飞书事件断流」（dsh 28min 自愈、openakita restart 才恢复；TCP ESTABLISHED 无从感知，
+  // 实测 c443=1 却零 handleIncoming）。只能按「最后收到消息的时间」兜底告警，为自动重连
+  // 修复票（ws-keepalive）留证据。深夜无消息也会告警——告警≠故障，连续多条才需人工查。
+  setInterval(() => {
+    const silentMin = Math.round((Date.now() - wsLastIncomingAt) / 60000);
+    if (silentMin >= 10) {
+      console.warn(`[agents-to-feishu] [ws-watch] WS 已静默 ${silentMin} 分钟无任何消息事件（连接可能假活，若 bot 同时无响应请 restart 并附本日志）`);
+    }
+  }, 5 * 60_000).unref?.();
+
   console.log(`[agents-to-feishu] 飞书 WebSocket 已连接，等待消息…`);
 }
 
 /** 统一入口：解析事件 → 鉴权 → 命令 / 消息 */
 const processedMessageIds = new Set<string>();  // 去重：飞书 SDK 偶发对同一条消息 dispatch 多次
 const MAX_PROCESSED_IDS = 500;
+
+// ws-watch 基准：最后一条收到的事件时间（含 message_read 等非消息事件回调外的所有 handleIncoming）
+let wsLastIncomingAt = Date.now();
 
 let myBotOpenId: string | null = null;
 let myBotOpenIdPromise: Promise<string | null> | null = null;
@@ -356,6 +370,7 @@ async function handleIncoming(
   // 到底是用户没说"用语音"还是 wantsVoiceReply 漏判，只能靠猜（老大为此骂了半天）
   console.log(`[agents-to-feishu] handleIncoming chat=${chatId} mid=${fullId.slice(0, 24)} sender=${senderId.slice(0, 8)} msgType=${msg.message_type} text.len=${text.length} text="${text.replace(/\s+/g, ' ').slice(0, 40)}"`);
   rtLog(`[handleIncoming] chat=${chatId} mid=${fullId.slice(0, 24)} text=${text.slice(0, 100)}`);
+  wsLastIncomingAt = Date.now();
 
   // 命令消息豁免去重：命令幂等（重复执行无害），必须保证不被 SDK 重复 dispatch 在首次执行前判重跳过
   // （否则 /new 等边命令可能"被吞"）。普通消息仍正常去重。先 trim 防前导空格/不可见字符。
