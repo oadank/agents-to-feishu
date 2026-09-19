@@ -59,6 +59,9 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
   const home = process.env.CTI_USER_HOME || os.homedir();
   if (clean.USERPROFILE === undefined || clean.USERPROFILE.includes('systemprofile')) clean.USERPROFILE = home;
   if (clean.HOME === undefined || clean.HOME.includes('systemprofile')) clean.HOME = home;
+  // 🔴 LocalSystem 服务账号补丁：codebuddy 会话/配置存储走 APPDATA 系，不改就落在 systemprofile 目录
+  clean.APPDATA = path.join(home, 'AppData', 'Roaming');
+  clean.LOCALAPPDATA = path.join(home, 'AppData', 'Local');
   clean.PATH = buildWindowsPath(getEnvPath(clean));
   clean.CODEBUDDY_API_KEY = resolveApiKey();
   clean.NO_COLOR = '1';
@@ -85,7 +88,7 @@ function buildMcpServers(): Array<Record<string, unknown>> {
   return out;
 }
 
-interface WbSession { sid: string; model: string; }
+interface WbSession { sid: string; model: string; gen?: number; }
 const MAP_FILE = (): string => path.join(
   process.env.CTI_USER_HOME || os.homedir(), '.agents-to-feishu', 'runtime', 'sessions-wb-acp.json',
 );
@@ -102,7 +105,7 @@ export function createWorkBuddyProvider(): RuntimeProvider {
 
   try {
     const raw = JSON.parse(fs.readFileSync(MAP_FILE(), 'utf8')) as Record<string, WbSession>;
-    for (const [k, v] of Object.entries(raw)) if (v?.sid) sessions.set(k, v);
+    for (const [k, v] of Object.entries(raw)) if (v?.sid) sessions.set(k, { sid: v.sid, model: v.model });
   } catch { /* 首跑 */ }
   const saveMap = (): void => {
     try {
@@ -150,7 +153,9 @@ export function createWorkBuddyProvider(): RuntimeProvider {
     if (child?.stdin?.writable && child.exitCode === null) return;
     if (startPromise) return startPromise;
     startPromise = (async (): Promise<void> => {
-      child = spawn(process.execPath, [resolveWbCli(), '--acp'], { cwd: cwdOf(), env: buildSpawnEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+      // 🔴 老大令 09-19 三治之二（工具风暴/慢）：--tools 砍内置工具面（46 件套=作恶入口，MCP 池不受限）；
+      // --max-turns 防失控兜底；--effort medium 砍掉高推理（闲聊 4225 字内心戏的油门）。
+      child = spawn(process.execPath, [resolveWbCli(), '--acp', '--tools', 'Bash,Read,Write,Edit,Grep,Glob', '--max-turns', '40', '--effort', 'medium'], { cwd: cwdOf(), env: buildSpawnEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
       let buf = '';
       child.stdout!.setEncoding('utf8');
       child.stdout!.on('data', (d: string) => {
@@ -190,25 +195,29 @@ export function createWorkBuddyProvider(): RuntimeProvider {
     async *streamChat(params: StreamChatParams): AsyncGenerator<StreamEvent> {
       const workdir = cwdOf(params.workdir);
       await ensureChild();
+      // 09-19 晚间纠错：codebuddy 有真记忆系统（~/.codebuddy/projects/*/memory/MEMORY.md + 词文件），
+      // session/load 重启恢复实测有效（老大亲证）。恢复 load 路径，"换代强制失忆"补丁为误判产物，废除。
       const wantSid = params.freshSession ? '' : sessions.get(params.sessionKey)?.sid || '';
-      const loadOk: boolean = await (async (): Promise<boolean> => {
-        if (!wantSid) return false;
-        try { const r = await rpc('session/load', { sessionId: wantSid, cwd: workdir, mcpServers: buildMcpServers() }); return !r.error; }
-        catch { return false; }
-      })();
-      if (wantSid && !loadOk) {
-        params.onSessionLost?.();
-        sessions.delete(params.sessionKey);
-        saveMap();
-        rtLog(`[wb-acp] 引擎会话丢失 key=${params.sessionKey.slice(0, 10)} → onSessionLost+新会话`);
+      let sid = '';
+      if (wantSid) {
+        try {
+          const r = await rpc('session/load', { sessionId: wantSid, cwd: workdir, mcpServers: buildMcpServers() });
+          if (!r.error) sid = wantSid;
+        } catch { /* 落新建 */ }
+        if (!sid) {
+          params.onSessionLost?.();
+          sessions.delete(params.sessionKey);
+          saveMap();
+          rtLog(`[wb-acp] load 真失败 key=${params.sessionKey.slice(0, 10)} → 弹卡+新建`);
+        }
       }
-      let sid = (wantSid && loadOk) ? wantSid : '';
-      if (!sid) { sid = await newSession(workdir); }
+      if (!sid) sid = await newSession(workdir);
       if (!sid) throw new Error('WB ACP 无法建立会话');
       sessions.set(params.sessionKey, { sid, model: resolveModel() });
       saveMap();
 
       const queue: StreamEvent[] = [];
+      let rtLoggedUsage = false;
       let doneMark: (() => void) | null = null;
       active = {
         key: params.sessionKey,
@@ -224,6 +233,18 @@ export function createWorkBuddyProvider(): RuntimeProvider {
             const raw = u.rawInput !== undefined ? JSON.stringify(u.rawInput) : undefined;
             const outTxt = u.rawOutput !== undefined ? String(JSON.stringify(u.rawOutput)).slice(0, 4000) : undefined;
             queue.push({ type: 'tool', tool: title.slice(0, 80), input: raw?.slice(0, 2000), status: st === 'failed' ? 'error' : (st === 'completed' ? 'done' : 'running'), output: outTxt });
+          } else if (s === 'usage_update') {
+            // 🔴 三治之三：codebuddy 原生 usage_update{used,size,_meta['codebuddy.ai/usageByCategory']}
+            const meta = (u._meta as Record<string, unknown>) || {};
+            const cat = (meta['codebuddy.ai/usageByCategory'] as Record<string, number>) || {};
+            const num = (...ks: string[]): number => { for (const k of ks) { const v = cat[k]; if (typeof v === 'number') return v; } return 0; };
+            queue.push({ type: 'usage', usage: {
+              inputTokens: Number(u.used || 0),
+              outputTokens: num('output', 'output_tokens', 'completion'),
+              cacheReadTokens: num('cacheRead', 'cache_read', 'cache_read_input_tokens'),
+              cacheWriteTokens: num('cacheWrite', 'cache_creation', 'cache_creation_input_tokens'),
+            }, sessionId: sid });
+            if (!rtLoggedUsage) { rtLoggedUsage = true; rtLog(`[wb-acp] usage_update 首见: used=${u.used} size=${u.size} cat=${JSON.stringify(cat).slice(0, 300)}`); }
           } else if (s === 'session_info_update') {
             const meta = (u._meta as Record<string, unknown>) || u;
             const tok = (meta as { usage?: Record<string, number> }).usage || (meta as { tokens?: Record<string, number> }).tokens;

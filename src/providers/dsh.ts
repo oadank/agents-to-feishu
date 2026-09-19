@@ -350,7 +350,7 @@ export class DshProvider implements RuntimeProvider {
   /** 进程 spawn 等待队列（initialize 未完成时排队的请求） */
   private spawnPromise: Promise<ChildProcess> | null = null;
 
-  private static IDLE_TIMEOUT_MS = parseInt(process.env.CTI_DSH_IDLE_TIMEOUT_MS || '1800000', 10); // 默认 30min
+  private static IDLE_TIMEOUT_MS = parseInt(process.env.CTI_DSH_IDLE_TIMEOUT_MS || '43200000', 10); // 默认 12h（09-19 老大令：30min 对聊天 bot 太狠，长提示词场景实测踩坑）
   /** 进程内最大会话数（超出按 LRU 淘汰最久未用的） */
   private static MAX_SESSIONS = parseInt(process.env.CTI_DSH_MAX_SESSIONS || '20', 10);
   private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_DSH_TIMEOUT_MS || '300000', 10); // 5min 无输出判卡死
