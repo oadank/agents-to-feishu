@@ -31,3 +31,9 @@ config-store MCP 池 comfy/vision **未摘**（仍勾选/仍在数组），仅 p
 
 ## 代码
 render.ts：`TOOL_ROUTE_PROMPT` / `withToolRouteInject` / `buildAgentGlobalInject`（config.env + persona.md 共用）
+
+## 销案（2026-09-19 上午老大亲裁）
+- 原「B 段卸载令」**永久作废**：不再从产物摘除 comfy/vision，不再等 workbuddy syncMcpToCli 或任何前置
+- 永久口径：**配置不许摘，降级只许 prompt 文字级**
+- 本单 A 段降级令 + 工具路权令 12 家已验真，**收工**
+- openmem 活条目 `6114d9f5` 已同步清账（无「B 段待做」字样）
