@@ -22,6 +22,7 @@ import { createHermesProvider } from './providers/hermes.js';
 import { createCodexProvider } from './providers/codex.js';
 import { createClaudeProvider } from './providers/claude.js';
 import { createZcodeProvider } from './providers/zcode.js';
+import { createWorkBuddyProvider } from './providers/workbuddy.js';
 import { handleCommand } from './commands.js';
 import type { RuntimeProvider } from './providers/types.js';
 import { transcribe } from './voice/asr.js';
@@ -154,6 +155,7 @@ const BOT_RUNTIMES: Record<string, () => RuntimeProvider> = {
   codex: createCodexProvider,
   claude: createClaudeProvider,
   zcode: createZcodeProvider,
+  workbuddy: createWorkBuddyProvider,
 };
 
 function resolveProvider(runtime: string): RuntimeProvider {
@@ -288,12 +290,43 @@ ${trimmed}`);
     },
   });
 
+  // ── WS 保活（2026-09-19 票1：ws-keepalive）────────────────────────────────
+  // 病灶：SDK 默认 pingInterval=120s，且【没有任何 pong 看门狗】——发完 ping 就不管了。
+  // 一旦 TCP 半开（NAT 超时 / 对端静默丢包 / CLOSE 帧丢失），socket 仍报 OPEN，
+  // 连接变"僵尸"：不再收事件、也不触发 close→重连。实测 reasonix 曾连续静默 84 分钟
+  // 而进程毫不知情（logs/reasonix-err-*.log 里 81 条 ws-watch 告警）。
+  //
+  // 修法（两处，都不改 SDK 源码）：
+  //   ① wsConfig.pingInterval：SDK 构造函数只暴露 pingTimeout，pingInterval 不在
+  //      IConstructorParams 白名单里 → 构造时传不进去。但 SDK 在 start() 里会
+  //      updateWs({pingInterval: ClientConfig.PingInterval*1000}) 用服务端值覆盖，
+  //      所以必须【start() 之后再改】。ping 本身不依赖连接状态，改完立刻按新间隔跑。
+  //   ② wsConfig.pingTimeout：SDK 原生 pong 看门狗。发 ping 后 N 秒内无任何入站帧
+  //      → terminate() → 走 SDK 标准 close→重连流程。这是治"僵尸连接"的关键。
+  //      取 45s（> 30s ping 间隔，留一个 ping 周期的余量；飞书 pong 通常 <1s）。
   const wsClient = new lark.WSClient({
     appId: bot.appId,
     appSecret: bot.appSecret,
     loggerLevel: lark.LoggerLevel.info,
+    wsConfig: { pingTimeout: 45 },
   });
   await wsClient.start({ eventDispatcher: dispatcher });
+
+  // start() 之后覆写 pingInterval（此时才不会被 pullConnectConfig 的服务端值冲掉）。
+  // 30s ≈ 票面要求的 30 秒 ping 心跳。SDK 内部私有字段 wsConfig 有 getWS/updateWs，
+  // 用鸭子类型访问（TS 下 any），避免 SDK 升级新增公开 API 时失效。
+  try {
+    const wsCfg = (wsClient as unknown as { wsConfig?: { updateWs?: (o: Record<string, unknown>) => void; getWS?: () => { pingInterval?: number } } }).wsConfig;
+    if (wsCfg?.updateWs) {
+      wsCfg.updateWs({ pingInterval: 30_000 });
+      const eff = wsCfg.getWS?.().pingInterval;
+      rtLog(`[ws-keepalive] pingInterval=${eff}ms（30s 心跳）+ pingTimeout=45s（pong 看门狗已启用）`);
+    } else {
+      rtLog(`[ws-keepalive] ⚠️ 未能取到 SDK wsConfig.updateWs，pingInterval 保持默认 120s`);
+    }
+  } catch (e) {
+    rtLog(`[ws-keepalive] ⚠️ 覆写 pingInterval 失败: ${(e as Error).message}`);
+  }
 
   // WS 静默失联监测（2026-09-19）：09:07 dsh / 09:20 openakita 双双出现「WS 显示已连接
   // 但飞书事件断流」（dsh 28min 自愈、openakita restart 才恢复；TCP ESTABLISHED 无从感知，
@@ -305,6 +338,54 @@ ${trimmed}`);
       console.warn(`[agents-to-feishu] [ws-watch] WS 已静默 ${silentMin} 分钟无任何消息事件（连接可能假活，若 bot 同时无响应请 restart 并附本日志）`);
     }
   }, 5 * 60_000).unref?.();
+
+  // ── 指数退避重连（票1 第 2 项）──────────────────────────────────────────────
+  // SDK 自带的重连是【固定间隔】：reconnectInterval 由服务端下发，实测恒为 120s，
+  // 且 loopReConnect() 里是 `setTimeout(..., reconnectInterval)` —— 不随失败次数增长。
+  // 票面要求「指数退避」。SDK 的 onReconnecting 只能观测、不能改间隔，所以这里
+  // 在外面加一层：**连续失败次数 → 到点强杀重连**，退避序列 1/2/4/8/16/32/60s 封顶。
+  //
+  // 判定「失败」的口径：SDK 重连成功会触发 onReconnected（首连是 onReady）。
+  // 若 onReconnecting 后超过 backoff 上限（60s）仍未收到 onReconnected，
+  // 说明 SDK 自己的重连卡住了（半开 socket 常卡在这一步），此时 terminate 现有
+  // 连接并 start() 一次，把状态机重置回干净起点。
+  let reconnectAttempts = 0;
+  let lastReconnectAt = 0;
+  const BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000];
+  const backoffFor = (n: number) => BACKOFF_MS[Math.min(n, BACKOFF_MS.length - 1)];
+
+  // SDK 内部重连成功后重置计数
+  (wsClient as unknown as { onReconnected?: () => void }).onReconnected = () => {
+    if (reconnectAttempts > 0) {
+      rtLog(`[ws-backoff] 重连成功（此前连续失败 ${reconnectAttempts} 次），退避计数归零`);
+    }
+    reconnectAttempts = 0;
+    lastReconnectAt = Date.now();
+  };
+  // SDK 进入重连时记录起点
+  (wsClient as unknown as { onReconnecting?: () => void }).onReconnecting = () => {
+    reconnectAttempts += 1;
+    lastReconnectAt = Date.now();
+    rtLog(`[ws-backoff] 检测到断连，第 ${reconnectAttempts} 次重连（SDK 固定 120s 间隔，外层退避上限 ${backoffFor(reconnectAttempts)}ms）`);
+  };
+
+  // 兜底看门狗：SDK 重连卡死时强制重置
+  setInterval(() => {
+    if (reconnectAttempts <= 0) return;
+    const stuckMs = Date.now() - lastReconnectAt;
+    const cap = backoffFor(reconnectAttempts) + 60_000; // 给 SDK 一个周期 + 余量
+    if (stuckMs > cap) {
+      console.warn(`[agents-to-feishu] [ws-backoff] 重连已卡 ${Math.round(stuckMs / 1000)}s（上限 ${Math.round(cap / 1000)}s），强制 terminate + 重启连接`);
+      try {
+        const inst = (wsClient as unknown as { wsConfig?: { getWSInstance?: () => { terminate?: () => void } | null } }).wsConfig?.getWSInstance?.();
+        inst?.terminate?.();
+      } catch { /* best effort */ }
+      lastReconnectAt = Date.now();
+      void wsClient.start({ eventDispatcher: dispatcher }).catch((e: unknown) => {
+        console.error(`[agents-to-feishu] [ws-backoff] 强制重启失败: ${(e as Error).message}`);
+      });
+    }
+  }, 15_000).unref?.();
 
   console.log(`[agents-to-feishu] 飞书 WebSocket 已连接，等待消息…`);
 }
