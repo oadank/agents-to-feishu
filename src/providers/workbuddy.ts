@@ -1,21 +1,21 @@
 /**
- * WorkBuddy Provider —— 第 13 家（老大 2026-09-19 令）。
+ * WorkBuddy Provider（第 13 家）—— CodeBuddy ACP 常驻（老大 2026-09-19 令：直接改常驻）。
  *
- * 引擎 = WorkBuddy 桌面版内置的 CodeBuddy CLI，headless 一轮一进程：
- *   node codebuddy.js -p --output-format stream-json -y --model custom-local:<id>
- *     [--resume <sid>] [--append-system-prompt <人设>] "<文本>"
- * 免腾讯登录（实测 CODEBUDDY_API_KEY 指本机 litellm 即可跑通）、免公网回调
- * （飞书 WS 长连接由本桥扛）、模型走 ~/.workbuddy/models.json 的 custom-local 池。
+ * 一轮一进程 headless 版（9e19668）已废弃：冷启动+工具循环单轮 120s+。现对齐
+ * mimo/opencode 家法：常驻 `node codebuddy.js --acp`（JSON-RPC 2.0 over stdio）。
  *
- * stream-json 事件（2026-09-19 实测形状，Anthropic 风格 NDJSON）：
- *   system/init{session_id} → assistant{message.content[]: thinking|text|tool_use}
- *   → user{tool_result} → result{subtype:'success'|'error', result, usage?, session_id}
- *
- * 会话：sessionKey→sessionId 映射落盘（重启续聊）；resume 失败（会话被清）→
- * 调 params.onSessionLost()（老大 09-19 令：禁止静默失忆）并以新会话重跑本轮。
+ * 协议实测 09-19：initialize{protocolVersion:1,loadSession:true} → session/new{cwd,mcpServers}
+ *   → session/set_config_option{configId:'model'|'mode'} → session/prompt{prompt:[{type:'text'}]}
+ *   流事件 session/update{agent_message_chunk|agent_thought_chunk|tool_call|tool_call_update|
+ *   session_info_update|config_option_update}；回合终止=prompt 响应 {stopReason:'end_turn'}；
+ *   反向请求 session/request_permission（配 bypassPermissions 兜底自动放行）。
+ * 免腾讯登录：CODEBUDDY_API_KEY（本机 litellm key）；模型 custom-local:<id>（models.json 池）。
+ * 会话：sessionKey→wbSessionId 落盘 runtime/sessions-wb-acp.json（🔴 与桥 SessionManager 的
+ *   sessions-workbuddy.json 分文件，headless 版同路径互踩是自家事故，已避）；重启后
+ *   session/load 恢复，load 失败 → onSessionLost + 新会话重跑（09-19 令禁静默失忆）。
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -30,30 +30,21 @@ function rtLog(msg: string): void {
   try { fs.appendFileSync(file, `[${new Date().toISOString()}] ${msg}\n`, 'utf-8'); } catch {}
 }
 
-/** CodeBuddy CLI 入口（WorkBuddy 内置）。CTI_WB_CLI 可覆盖。 */
 function resolveWbCli(): string {
   const custom = process.env.CTI_WB_CLI || '';
   if (custom && fs.existsSync(custom)) return custom;
-  const candidates = [
-    'C:\\Program Files\\WorkBuddy\\resources\\app.asar.unpacked\\cli\\dist\\codebuddy.js',
-  ];
-  for (const c of candidates) { if (fs.existsSync(c)) return c; }
-  return candidates[0];
+  return 'C:\\Program Files\\WorkBuddy\\resources\\app.asar.unpacked\\cli\\dist\\codebuddy.js';
 }
 
-/** headless 认证 key：环境优先，否则回读 ~/.workbuddy/models.json 里 custom 模型自带的 key。 */
 function resolveApiKey(): string {
   if (process.env.CODEBUDDY_API_KEY) return process.env.CODEBUDDY_API_KEY;
   try {
     const home = process.env.CTI_USER_HOME || os.homedir();
     const mj = JSON.parse(fs.readFileSync(path.join(home, '.workbuddy', 'models.json'), 'utf8')) as Array<{ apiKey?: string }>;
-    const key = mj.find((m) => m.apiKey)?.apiKey || '';
-    if (key) return key;
-  } catch { /* 读不到就走环境 */ }
-  return '';
+    return mj.find((m) => m.apiKey)?.apiKey || '';
+  } catch { return ''; }
 }
 
-/** 模型 id：配置中心渲染 CTI_BOT_WORKBUDDY_MODEL → custom-local:<id>（CLI 里自定义模型带前缀）。 */
 function resolveModel(): string {
   const raw = process.env.CTI_BOT_WORKBUDDY_MODEL || 'QW3.8F';
   return raw.startsWith('custom-local:') || raw === 'auto' ? raw : `custom-local:${raw}`;
@@ -70,176 +61,215 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
   if (clean.HOME === undefined || clean.HOME.includes('systemprofile')) clean.HOME = home;
   clean.PATH = buildWindowsPath(getEnvPath(clean));
   clean.CODEBUDDY_API_KEY = resolveApiKey();
+  clean.NO_COLOR = '1';
   return clean;
 }
 
-const SESSIONS_FILE = (): string => path.join(
-  process.env.CTI_USER_HOME || os.homedir(), '.agents-to-feishu', 'runtime', 'sessions-workbuddy.json',
-);
-
-/** 🔴 能力焊点：配置中心 MCP 六件套 → codebuddy --mcp-config（Claude 风格 mcpServers）。
- *  不接这根线，WB 就是光杆引擎：聊得了天，够不着 lark / openmem / 桌面 / 生图。 */
-function writeMcpConfig(): string | null {
+/** ACP mcpServers 数组（stdio/http/sse 三形态），配置中心池直读 */
+function buildMcpServers(): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
   try {
-    const defs = readCtiMcpDefs('workbuddy');
-    if (!defs.length) return null;
-    const servers: Record<string, unknown> = {};
-    for (const d of defs) {
+    for (const d of readCtiMcpDefs('workbuddy')) {
       if (d.transport === 'stdio' && d.command) {
-        servers[d.id] = { type: 'stdio', command: d.command, args: resolveMcpArgPaths(d.id, d.args || []), env: d.env || {} };
+        out.push({
+          name: d.id,
+          command: d.command,
+          args: resolveMcpArgPaths(d.id, d.args || []),
+          env: Object.entries(d.env || {}).map(([name, value]) => ({ name, value })),
+        });
       } else if (d.url) {
-        servers[d.id] = { type: d.transport === 'sse' ? 'sse' : 'http', url: d.url };
+        out.push({ name: d.id, type: d.transport === 'sse' ? 'sse' : 'http', url: d.url, headers: [] });
       }
     }
-    const file = path.join(os.tmpdir(), 'wb-mcp-config.json');
-    fs.writeFileSync(file, JSON.stringify({ mcpServers: servers }), 'utf8');
-    rtLog(`[wb] mcp-config ${Object.keys(servers).length} 个: ${Object.keys(servers).join(', ')}`);
-    return file;
-  } catch (e) { rtLog(`[wb] mcp-config 生成失败: ${e}`); return null; }
+  } catch (e) { rtLog(`[wb-acp] mcp 池读取失败: ${e}`); }
+  return out;
 }
 
+interface WbSession { sid: string; model: string; }
+const MAP_FILE = (): string => path.join(
+  process.env.CTI_USER_HOME || os.homedir(), '.agents-to-feishu', 'runtime', 'sessions-wb-acp.json',
+);
+
 export function createWorkBuddyProvider(): RuntimeProvider {
-  const sessions = new Map<string, string>();
-  let currentChild: ReturnType<typeof spawn> | null = null;
-  let aborted = false;
+  let child: ChildProcess | null = null;
+  let startPromise: Promise<void> | null = null;
+  let idc = 0;
+  const pend = new Map<number, (m: Record<string, unknown>) => void>();
+  // 当前 prompt 的收流器：sessionKey → 回调
+  let active: { key: string; onUpdate: (u: Record<string, unknown>) => void } | null = null;
+  const sessions = new Map<string, WbSession>();
+  const cwdOf = (p?: string): string => p || process.env.CTI_WORKDIR || 'C:\\D\\opt';
 
-  const loadSessions = (): void => {
+  try {
+    const raw = JSON.parse(fs.readFileSync(MAP_FILE(), 'utf8')) as Record<string, WbSession>;
+    for (const [k, v] of Object.entries(raw)) if (v?.sid) sessions.set(k, v);
+  } catch { /* 首跑 */ }
+  const saveMap = (): void => {
     try {
-      const raw = JSON.parse(fs.readFileSync(SESSIONS_FILE(), 'utf8')) as Record<string, string>;
-      for (const [k, v] of Object.entries(raw)) sessions.set(k, v);
-    } catch { /* 首跑无文件 */ }
+      fs.mkdirSync(path.dirname(MAP_FILE()), { recursive: true });
+      fs.writeFileSync(MAP_FILE(), JSON.stringify(Object.fromEntries(sessions)), 'utf8');
+    } catch { /* 落盘失败不拦主流程 */ }
   };
-  const saveSessions = (): void => {
-    try {
-      fs.mkdirSync(path.dirname(SESSIONS_FILE()), { recursive: true });
-      fs.writeFileSync(SESSIONS_FILE(), JSON.stringify(Object.fromEntries(sessions)), 'utf8');
-    } catch (e) { rtLog(`[wb] 会话落盘失败: ${e}`); }
-  };
-  loadSessions();
 
-  async function* runTurn(args: string[], cwd: string, env: NodeJS.ProcessEnv, onSid: (sid: string) => void): AsyncGenerator<StreamEvent> {
-    const child = spawn(process.execPath, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    currentChild = child;
-    let buf = '';
-    let stderr = '';
-    const queue: StreamEvent[] = [];
-    let notify: (() => void) | null = null;
-    let closed = false;
-    const wake = (): void => { notify?.(); };
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (d: string) => {
-      buf += d;
-      let i: number;
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, i).trim();
-        buf = buf.slice(i + 1);
-        if (!line) continue;
-        let ev: Record<string, unknown>;
-        try { ev = JSON.parse(line); } catch { continue; }
-        const t = String(ev.type);
-        if (t === 'system' && ev.session_id) onSid(String(ev.session_id));
-        if (t === 'assistant') {
-          const content = (ev.message as { content?: Array<Record<string, unknown>> })?.content || [];
-          for (const c of content) {
-            const ct = String(c.type);
-            if (ct === 'text' && c.text) queue.push({ type: 'text', text: String(c.text) });
-            else if (ct === 'thinking' && c.thinking) queue.push({ type: 'thinking', text: String(c.thinking) });
-            else if (ct === 'tool_use') queue.push({ type: 'tool', tool: String(c.name || 'tool'), input: JSON.stringify(c.input ?? {}), status: 'running' });
-          }
-        } else if (t === 'user') {
-          const content = (ev.message as { content?: Array<Record<string, unknown>> })?.content || [];
-          for (const c of content) {
-            if (String(c.type) === 'tool_result') {
-              const txt = typeof c.content === 'string' ? c.content : JSON.stringify(c.content ?? '');
-              queue.push({ type: 'tool', tool: 'tool_result', input: undefined, status: c.is_error ? 'error' : 'done', output: String(txt).slice(0, 4000) });
-            }
-          }
-        } else if (t === 'result') {
-          const sid = String(ev.session_id || '');
-          if (sid) onSid(sid);
-          const u = ev.usage as Record<string, number> | undefined;
-          if (u) {
-            queue.push({ type: 'usage', usage: {
-              inputTokens: u.input_tokens || u.prompt_tokens || 0,
-              outputTokens: u.output_tokens || u.completion_tokens || 0,
-              cacheReadTokens: u.cache_read_input_tokens || 0,
-              cacheWriteTokens: u.cache_creation_input_tokens || 0,
-            }, sessionId: sid || undefined });
-          }
-          if (ev.is_error) queue.push({ type: 'error', message: String(ev.result || 'WB 引擎报错') });
-          rtLog(`[wb] result subtype=${ev.subtype} sid=${sid} usage=${u ? '有' : '无'}`);
-        }
-        wake();
-      }
+  const rpc = (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> =>
+    new Promise((resolve, reject) => {
+      if (!child?.stdin?.writable) return reject(new Error('WB ACP 子进程不在'));
+      const id = ++idc;
+      pend.set(id, resolve);
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+      setTimeout(() => { if (pend.has(id)) { pend.delete(id); reject(new Error(`${method} 超时 180s`)); } }, 180000);
     });
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (d: string) => { stderr = (stderr + d).slice(-4000); });
-    child.on('close', () => { closed = true; wake(); });
-    child.on('error', (e) => { queue.push({ type: 'error', message: `WB CLI 启动失败: ${e.message}` }); closed = true; wake(); });
+  const notify = (method: string, params: Record<string, unknown>): void => {
+    try { child?.stdin?.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n'); } catch { /* 尽力 */ }
+  };
 
-    try {
-      while (true) {
-        while (queue.length > 0) yield queue.shift()!;
-        if (closed) break;
-        if (aborted) { try { child.kill('SIGKILL'); } catch {} break; }
-        await new Promise<void>((r) => { notify = r; setTimeout(r, 300); });
-      }
-      while (queue.length > 0) yield queue.shift()!;
-    } finally {
-      notify = null;
-      currentChild = null;
+  const onLine = (line: string): void => {
+    let m: Record<string, unknown>;
+    try { m = JSON.parse(line); } catch { return; }
+    if (m.id !== undefined && pend.has(Number(m.id))) {
+      const cb = pend.get(Number(m.id))!;
+      pend.delete(Number(m.id));
+      cb(m);
+      return;
     }
-    if (aborted) yield { type: 'done' };
-    else if (!stderr.includes('No conversation found')) yield { type: 'done' };
-    else yield { type: 'error', message: `WB_RESUME_LOST:${stderr.slice(-300)}` };
+    if (m.method === 'session/update') { active?.onUpdate((m.params as { update?: Record<string, unknown> })?.update || {}); return; }
+    if (m.method === 'session/request_permission') {
+      // bypassPermissions 已配，正常不会来；来了就放行第一项，绝不让它卡死
+      const opts = ((m.params as { options?: Array<Record<string, unknown>> })?.options) || [];
+      try {
+        child?.stdin?.write(JSON.stringify({
+          jsonrpc: '2.0', id: m.id,
+          result: { outcome: { outcomeSel: 'selected', optionId: opts[0]?.optionId || 'allow_once' } },
+        }) + '\n');
+      } catch { /* 死了有看门狗 */ }
+      rtLog('[wb-acp] request_permission 自动放行（异常路径，查 mode 配置）');
+    }
+  };
+
+  async function ensureChild(): Promise<void> {
+    if (child?.stdin?.writable && child.exitCode === null) return;
+    if (startPromise) return startPromise;
+    startPromise = (async (): Promise<void> => {
+      child = spawn(process.execPath, [resolveWbCli(), '--acp'], { cwd: cwdOf(), env: buildSpawnEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+      let buf = '';
+      child.stdout!.setEncoding('utf8');
+      child.stdout!.on('data', (d: string) => {
+        buf += d;
+        let i: number;
+        while ((i = buf.indexOf('\n')) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1); if (l.trim()) onLine(l.trim()); }
+      });
+      let stderr = '';
+      child.stderr!.setEncoding('utf8');
+      child.stderr!.on('data', (d: string) => { stderr = (stderr + d).slice(-4000); });
+      child.on('exit', (code) => { rtLog(`[wb-acp] 子进程退出 code=${code} stderr尾=${stderr.slice(-200)}`); child = null; startPromise = null; });
+      const r = await rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
+      if (!r.result) throw new Error('WB ACP initialize 失败');
+      rtLog('[wb-acp] initialize OK');
+    })();
+    try { await startPromise; } finally { if (!child) startPromise = null; }
+  }
+
+  async function newSession(workdir: string): Promise<string> {
+    const r = await rpc('session/new', { cwd: workdir, mcpServers: buildMcpServers() });
+    const sid = String((r.result as { sessionId?: string })?.sessionId || '');
+    if (!sid) throw new Error(`WB ACP session/new 失败: ${JSON.stringify(r.error || {}).slice(0, 200)}`);
+    try { await rpc('session/set_config_option', { sessionId: sid, configId: 'mode', value: 'bypassPermissions' }); }
+    catch (e) { rtLog(`[wb-acp] mode 设置失败（不致命）: ${e}`); }
+    try { await rpc('session/set_config_option', { sessionId: sid, configId: 'model', value: resolveModel() }); }
+    catch (e) { rtLog(`[wb-acp] model 设置失败（不致命）: ${e}`); }
+    return sid;
   }
 
   return {
     name: 'workbuddy',
     async prepare(): Promise<void> {
-      if (!fs.existsSync(resolveWbCli())) throw new Error(`WorkBuddy CLI 不存在: ${resolveWbCli()}`);
+      if (!fs.existsSync(resolveWbCli())) throw new Error(`CodeBuddy CLI 不存在: ${resolveWbCli()}`);
       if (!resolveApiKey()) throw new Error('WB 认证 key 缺失（CODEBUDDY_API_KEY / models.json 均无）');
+      await ensureChild();
     },
     async *streamChat(params: StreamChatParams): AsyncGenerator<StreamEvent> {
-      aborted = false;
-      const env = buildSpawnEnv();
-      const cwd = params.workdir || process.env.CTI_WORKDIR || 'C:\\D\\opt';
-      const sid = params.freshSession ? undefined : sessions.get(params.sessionKey);
-      const mkArgs = (resume: string | undefined): string[] => {
-        const a = [resolveWbCli(), '-p', '--output-format', 'stream-json', '-y', '--model', resolveModel()];
-        const mcpFile = writeMcpConfig();
-        if (mcpFile) a.push('--mcp-config', mcpFile);
-        if (resume) a.push('--resume', resume);
-        else if (params.systemPrompt) a.push('--append-system-prompt', params.systemPrompt);
-        a.push(params.text);
-        return a;
-      };
-      let lostDetected = false;
-      const onSid = (s: string): void => { if (s) { sessions.set(params.sessionKey, s); saveSessions(); } };
-      for await (const ev of runTurn(mkArgs(sid), cwd, env, onSid)) {
-        if (ev.type === 'error' && ev.message.startsWith('WB_RESUME_LOST:')) { lostDetected = true; break; }
-        yield ev;
-      }
-      if (lostDetected) {
+      const workdir = cwdOf(params.workdir);
+      await ensureChild();
+      const wantSid = params.freshSession ? '' : sessions.get(params.sessionKey)?.sid || '';
+      const loadOk: boolean = await (async (): Promise<boolean> => {
+        if (!wantSid) return false;
+        try { const r = await rpc('session/load', { sessionId: wantSid, cwd: workdir, mcpServers: buildMcpServers() }); return !r.error; }
+        catch { return false; }
+      })();
+      if (wantSid && !loadOk) {
         params.onSessionLost?.();
         sessions.delete(params.sessionKey);
-        saveSessions();
-        rtLog(`[wb] resume 丢失 → onSessionLost + 新会话重跑 key=${params.sessionKey}`);
-        for await (const ev of runTurn(mkArgs(undefined), cwd, env, onSid)) yield ev;
+        saveMap();
+        rtLog(`[wb-acp] 引擎会话丢失 key=${params.sessionKey.slice(0, 10)} → onSessionLost+新会话`);
+      }
+      let sid = (wantSid && loadOk) ? wantSid : '';
+      if (!sid) { sid = await newSession(workdir); }
+      if (!sid) throw new Error('WB ACP 无法建立会话');
+      sessions.set(params.sessionKey, { sid, model: resolveModel() });
+      saveMap();
+
+      const queue: StreamEvent[] = [];
+      let doneMark: (() => void) | null = null;
+      active = {
+        key: params.sessionKey,
+        onUpdate: (u) => {
+          const s = String(u.sessionUpdate || '');
+          if (s === 'agent_message_chunk' && (u.content as { type?: string })?.type === 'text' && (u.content as { text?: string })?.text) {
+            queue.push({ type: 'text', text: String((u.content as { text: string }).text) });
+          } else if (s === 'agent_thought_chunk' && (u.content as { type?: string })?.type === 'text' && (u.content as { text?: string })?.text) {
+            queue.push({ type: 'thinking', text: String((u.content as { text: string }).text) });
+          } else if (s === 'tool_call' || s === 'tool_call_update') {
+            const title = String(u.title || u.kind || 'tool');
+            const st = String(u.status || (s === 'tool_call' ? 'running' : 'done'));
+            const raw = u.rawInput !== undefined ? JSON.stringify(u.rawInput) : undefined;
+            const outTxt = u.rawOutput !== undefined ? String(JSON.stringify(u.rawOutput)).slice(0, 4000) : undefined;
+            queue.push({ type: 'tool', tool: title.slice(0, 80), input: raw?.slice(0, 2000), status: st === 'failed' ? 'error' : (st === 'completed' ? 'done' : 'running'), output: outTxt });
+          } else if (s === 'session_info_update') {
+            const meta = (u._meta as Record<string, unknown>) || u;
+            const tok = (meta as { usage?: Record<string, number> }).usage || (meta as { tokens?: Record<string, number> }).tokens;
+            if (tok) {
+              queue.push({ type: 'usage', usage: { inputTokens: Number(tok.input || tok.input_tokens || 0), outputTokens: Number(tok.output || tok.output_tokens || 0), cacheReadTokens: Number(tok.cacheRead || tok.cache_read_input_tokens || 0), cacheWriteTokens: Number(tok.cacheWrite || tok.cache_creation_input_tokens || 0) }, sessionId: sid });
+            }
+          }
+          doneMark?.();
+        },
+      };
+      try {
+        const p = rpc('session/prompt', { sessionId: sid, prompt: [{ type: 'text', text: params.text }] });
+        p.then((res) => {
+          if (res.error) queue.push({ type: 'error', message: `WB 引擎报错: ${JSON.stringify(res.error).slice(0, 300)}` });
+          else if (res.result && !String((res.result as { stopReason?: string }).stopReason || '').includes('cancel')) {
+            /* 正常 end_turn，下面统一 done */
+          }
+          doneMark?.();
+        }).catch((e: unknown) => { queue.push({ type: 'error', message: `WB 回合失败: ${String(e).slice(0, 200)}` }); doneMark?.(); });
+        while (true) {
+          while (queue.length > 0) yield queue.shift()!;
+          const finished = await Promise.race([
+            p.then(() => true).catch(() => true),
+            new Promise<boolean>((r) => { doneMark = () => r(false); setTimeout(() => r(false), 300); }),
+          ]);
+          if (finished) break;
+        }
+        while (queue.length > 0) yield queue.shift()!;
+        yield { type: 'done' };
+      } finally {
+        active = null;
+        doneMark = null;
       }
     },
     async resetSession(sessionKey?: string): Promise<void> {
       if (sessionKey) sessions.delete(sessionKey);
       else sessions.clear();
-      saveSessions();
-      if (currentChild) { try { currentChild.kill('SIGKILL'); } catch {} }
+      saveMap();
     },
     async interrupt(): Promise<void> {
-      aborted = true;
-      if (currentChild) { try { currentChild.kill('SIGKILL'); } catch { /* 已退出 */ } }
+      const s = active && sessions.get(active.key);
+      if (s) notify('session/cancel', { sessionId: s.sid });
     },
     async dispose(): Promise<void> {
-      if (currentChild) { try { currentChild.kill('SIGKILL'); } catch {} }
+      try { child?.kill('SIGTERM'); } catch { /* 退了 */ }
+      child = null;
     },
   };
 }
