@@ -536,6 +536,7 @@ export class ClaudeProvider implements RuntimeProvider {
       // 否则此后每条消息都 resume 同一坏会话，bot 变砖直到手动 /new
       if (doneErr && NON_RETRYABLE_RE.test(doneErr) && readSavedSessionId()) {
         clearSavedSessionId();
+        params.onSessionLost?.(); // 老大令 09-19：引擎历史不可恢复=自动 /new（桥清影子+告知），不回灌
         rtLog(`[claude] resume 会话不可恢复（${doneErr.slice(0, 120)}），已清除 session_id，下条消息开新会话`);
       }
       // 不可重试 / 重试耗尽：明确回报，绝不静默半截
