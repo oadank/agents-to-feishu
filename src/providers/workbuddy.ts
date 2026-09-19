@@ -15,7 +15,7 @@
  *   session/load 恢复，load 失败 → onSessionLost + 新会话重跑（09-19 令禁静默失忆）。
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -35,6 +35,9 @@ function resolveWbCli(): string {
   if (custom && fs.existsSync(custom)) return custom;
   return 'C:\\Program Files\\WorkBuddy\\resources\\app.asar.unpacked\\cli\\dist\\codebuddy.js';
 }
+
+/** 人设单点：spawn 时经 --append-system-prompt 全局注入一次（桥 systemPrompt 含配置中心段）。 */
+let lastPersona = '';
 
 function resolveApiKey(): string {
   if (process.env.CODEBUDDY_API_KEY) return process.env.CODEBUDDY_API_KEY;
@@ -114,14 +117,21 @@ export function createWorkBuddyProvider(): RuntimeProvider {
     } catch { /* 落盘失败不拦主流程 */ }
   };
 
-  const rpc = (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> =>
+  const rpc = (method: string, params: Record<string, unknown>, timeoutMs = 180000): Promise<Record<string, unknown>> =>
     new Promise((resolve, reject) => {
       if (!child?.stdin?.writable) return reject(new Error('WB ACP 子进程不在'));
       const id = ++idc;
       pend.set(id, resolve);
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-      setTimeout(() => { if (pend.has(id)) { pend.delete(id); reject(new Error(`${method} 超时 180s`)); } }, 180000);
+      // 🔴 09-19 事故：prompt 曾同吃 180s 保险丝，长任务回合（生图/审计）没到终点先被我们枪毙，
+      // 卡上留下"session/prompt 超时"假死状。调用方给 prompt 传 15min。
+      setTimeout(() => { if (pend.has(id)) { pend.delete(id); reject(new Error(`${method} 超时 ${Math.round(timeoutMs / 1000)}s`)); } }, timeoutMs);
     });
+  // 🔴 codebuddy 吞 SIGTERM（09-19 实锤：换代后老进程 3 代同堂堆积）——整树强杀
+  const hardKill = (c: ChildProcess | null): void => {
+    if (!c?.pid) return;
+    try { execFileSync('taskkill.exe', ['/T', '/F', '/PID', String(c.pid)], { stdio: 'ignore' }); } catch { /* 已死 */ }
+  };
   const notify = (method: string, params: Record<string, unknown>): void => {
     try { child?.stdin?.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n'); } catch { /* 尽力 */ }
   };
@@ -155,7 +165,9 @@ export function createWorkBuddyProvider(): RuntimeProvider {
     startPromise = (async (): Promise<void> => {
       // 🔴 老大令 09-19 三治之二（工具风暴/慢）：--tools 砍内置工具面（46 件套=作恶入口，MCP 池不受限）；
       // --max-turns 防失控兜底；--effort medium 砍掉高推理（闲聊 4225 字内心戏的油门）。
-      child = spawn(process.execPath, [resolveWbCli(), '--acp', '--tools', 'Bash,Read,Write,Edit,Grep,Glob', '--max-turns', '40', '--effort', 'medium'], { cwd: cwdOf(), env: buildSpawnEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+      const cliArgs = [resolveWbCli(), '--acp', '--tools', 'Bash,Read,Write,Edit,Grep,Glob', '--max-turns', '40', '--effort', 'medium'];
+      if (lastPersona) cliArgs.push('--append-system-prompt', lastPersona);
+      child = spawn(process.execPath, cliArgs, { cwd: cwdOf(), env: buildSpawnEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
       let buf = '';
       child.stdout!.setEncoding('utf8');
       child.stdout!.on('data', (d: string) => {
@@ -193,6 +205,15 @@ export function createWorkBuddyProvider(): RuntimeProvider {
       await ensureChild();
     },
     async *streamChat(params: StreamChatParams): AsyncGenerator<StreamEvent> {
+      // 人设变更（配置中心改了）→ 重启子进程一次注入；会话记忆由 load 路径兜底
+      if (params.systemPrompt && params.systemPrompt !== lastPersona) {
+        lastPersona = params.systemPrompt;
+        if (child) {
+          rtLog('[wb-acp] 人设变更 → 重启 ACP 子进程（--append-system-prompt 只在 spawn 生效）');
+          hardKill(child);
+          child = null; startPromise = null;
+        }
+      }
       const workdir = cwdOf(params.workdir);
       await ensureChild();
       // 09-19 晚间纠错：codebuddy 有真记忆系统（~/.codebuddy/projects/*/memory/MEMORY.md + 词文件），
@@ -211,7 +232,13 @@ export function createWorkBuddyProvider(): RuntimeProvider {
           rtLog(`[wb-acp] load 真失败 key=${params.sessionKey.slice(0, 10)} → 弹卡+新建`);
         }
       }
-      if (!sid) sid = await newSession(workdir);
+      if (!sid) {
+        sid = await newSession(workdir);
+        // 🔴 会话身份只建一次：人设（桥 systemPrompt + 配置中心段）走 --append-system-prompt
+        // 在进程 spawn 时全局注入一次；此前"每条首消息拼人设"的做法会让长会话每轮重放
+        // 纪律、被模型当新指令解读（09-19 验收发现，禁止）。
+      }
+      const promptText = params.text;
       if (!sid) throw new Error('WB ACP 无法建立会话');
       sessions.set(params.sessionKey, { sid, model: resolveModel() });
       saveMap();
@@ -256,7 +283,7 @@ export function createWorkBuddyProvider(): RuntimeProvider {
         },
       };
       try {
-        const p = rpc('session/prompt', { sessionId: sid, prompt: [{ type: 'text', text: params.text }] });
+        const p = rpc('session/prompt', { sessionId: sid, prompt: [{ type: 'text', text: promptText }] }, 900000);
         p.then((res) => {
           if (res.error) queue.push({ type: 'error', message: `WB 引擎报错: ${JSON.stringify(res.error).slice(0, 300)}` });
           else if (res.result && !String((res.result as { stopReason?: string }).stopReason || '').includes('cancel')) {
@@ -289,7 +316,7 @@ export function createWorkBuddyProvider(): RuntimeProvider {
       if (s) notify('session/cancel', { sessionId: s.sid });
     },
     async dispose(): Promise<void> {
-      try { child?.kill('SIGTERM'); } catch { /* 退了 */ }
+      hardKill(child);
       child = null;
     },
   };
