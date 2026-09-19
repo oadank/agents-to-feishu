@@ -20,8 +20,9 @@ description: 视觉/体检探针的判分与核验口径：物理痕迹为准、
 - OCR 大小写波动正常（CTi vs CTI），主体一致即算过；回复里有诚实披露更好。
 - 探针期间禁批量重启；看回包用 `logs/openakita-rt.log`（或对应 bot 日志）里 `[Session:...] Agent:` 行。
 
-## 引擎卡死排查速查（openakita 实例）
+## "引擎卡死"排查速查（openakita 实例，2026-09-19 py-spy 实测改判）
 
-- 任务层几乎都 `TaskMonitor: Task completed, success=True`（14s 级）；静默点在任务完成后的 memory finalization 后台链（`Relational encoding` 之后）。
-- `_finalize_session` 跑在主事件循环上，同步 SQLite 写遇锁竞争会卡死整个循环 → ACP stdout 停摆 → 桥 watchdog 5min 判死 respawn。
-- 抓现行：任务 completed 后 0-40s 窗口内 `py-spy dump --pid <ACP引擎pid>`（pid 从 rt.log `ACP spawned pid=` 取）。
+- 🔴 **stderr 静默 ≠ 卡死**：任务完成后的 memory finalization（`Relational encoding` 之后）stderr 静默是常态；py-spy 7 连 dump 实测主循环全程 asyncio `_poll` idle，无阻塞。
+- 🔴 **判死前必查飞书 DM 卡片**：`lark-cli im +chat-messages-list --chat-id <id> --as user`，卡片含完整回复（`updated: true`）= 已送达。2026-09-19 10:23 探针实为 33s 完成+送达（卡 om_…385da），此前「卡死 4 分钟」是只盯 rt.log 的误判。
+- 桥 watchdog(5min) respawn 可能发生在任务成功之后——respawn ≠ 引擎卡死证据，先核对卡片。
+- 真要抓引擎栈：`py-spy dump --pid <ACP引擎pid>`（pid 从 rt.log `ACP spawned pid=` 取；对活进程直接可用，无需提权）。
