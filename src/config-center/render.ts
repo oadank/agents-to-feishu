@@ -28,12 +28,13 @@ export const VISION_DEGRADE_PROMPT =
   '你看图优先用自身视觉直接看；look_image/看图 MCP 仅在需要逐字提取、长图放大、像素级反推或你自看不准时作为兜底工具。';
 
 /**
- * 工具路权令（老大 2026-09-19 裁定，同车 A 段）：配置不许摘 comfy/vision MCP，
- * 但 prompt 层强制内建底座优先；旧通道仅备胎。前科：临时文件被清导致自动发图落空
- * （2026-09-19 09:0x dsh 丢图实锤）。无条件注入，与 visionCapable 共用同一注入点。
+ * 工具路权令（老大 2026-09-19 裁定两轮合并）：默认内建底座（生图=agnes 快路）；
+ * 用户点名高质量/XDN/本地生图 → 走 comfy MCP（8090 控制服务→XDN 高质量产线）。
+ * comfy 其余场景禁首选（临时文件被清导致自动发图落空前科，09-19 09:0x dsh 丢图实锤）。
+ * 无条件注入，与 visionCapable 共用同一注入点。配置层 comfy/vision 挂载永不摘（老大亲裁）。
  */
 export const TOOL_ROUTE_PROMPT =
-  '生图/看图/反推一律优先内建底座（generate_image/look_image/reverse_prompt）；comfy/vision MCP 旧通道仅作备胎禁止首选（旧通道有临时文件被清导致自动发图落空的前科，禁止把首选让给它）。';
+  '生图/看图/反推一律优先内建底座（generate_image/look_image/reverse_prompt，生图默认走 agnes 快路）；vision MCP 旧通道仅作备胎禁止首选。例外（老大裁定 2026-09-19）：用户明确要求「高质量/精致/4K/高清」生图，或点名「XDN生图/本地生图/ComfyUI/Z-IMAGE」时，改用 comfy MCP 的 generate_image（本机 8090 控制服务→XDN 高质量产线）；除此之外 comfy 生图工具仍禁止首选——旧路有临时文件被清导致自动发图落空的前科。';
 
 /** 缺省视为支持看图（老大口径：现在都支持；纯文本模型在 store 里显式 false） */
 export function resolveVisionCapable(model?: ModelDef): boolean {
