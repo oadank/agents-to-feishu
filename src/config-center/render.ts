@@ -87,12 +87,15 @@ function skillDescription(md: string): string {
   return (ln || '').slice(0, 80);
 }
 
-/** 扫描 skills/ 目录 + store.skills.enabled 白名单（与 cordis 挂载同口径，两个分发面永远一致） */
+/** 全员默认技能（老大 2026-09-19 §8 拍板：起步三件）；store.skills.enabled 未配置时生效 */
+const DEFAULT_SKILLS = ['memory-ops', 'feishu-bridge', 'all-platform-video-extract'];
+
+/** 扫描 skills/ 目录 + 白名单（显式配置优先，缺省=默认三件；与 cordis 挂载同口径，两个分发面永远一致） */
 export function resolveMountedSkills(store: ConfigStore): SkillIndexEntry[] {
   const out: SkillIndexEntry[] = [];
   try {
     if (!fs.existsSync(PROJECT_SKILLS_DIR)) return out;
-    const enabled = store.skills?.enabled;
+    const enabled = Array.isArray(store.skills?.enabled) ? store.skills!.enabled : DEFAULT_SKILLS;
     for (const ent of fs.readdirSync(PROJECT_SKILLS_DIR, { withFileTypes: true })) {
       if (!ent.isDirectory()) continue;
       const skillMd = path.join(PROJECT_SKILLS_DIR, ent.name, 'SKILL.md');
@@ -515,8 +518,8 @@ export function renderCordisYml(store: ConfigStore, agent: AgentDef): string {
   L.push('');
 
   // 内建技能库（项目自带 skills/ 目录，可分发，不依赖 dsh）
-  // 挂载白名单语义：
-  //   skills 字段未配置(undefined) → 挂全部（默认向后兼容）
+  // 挂载白名单语义（2026-09-19 §8 对齐注入面：缺省=默认三件，不再挂全部）：
+  //   skills 字段未配置(undefined) → 默认三件（DEFAULT_SKILLS）
   //   skills.enabled 存在（含空数组）→ 严格按白名单过滤，空数组 = 全部停用（不挂）
   const skillNames: string[] = [];
   try {
@@ -527,7 +530,7 @@ export function renderCordisYml(store: ConfigStore, agent: AgentDef): string {
     }
   } catch { /* 忽略 */ }
   const hasSkillCfg = store.skills !== undefined && Array.isArray(store.skills.enabled);
-  const enabledList = hasSkillCfg ? store.skills!.enabled.slice() : skillNames.slice();
+  const enabledList = hasSkillCfg ? store.skills!.enabled.slice() : skillNames.filter((n) => DEFAULT_SKILLS.includes(n));
   const mounted = skillNames.filter((n) => enabledList.includes(n));
   L.push(`# Skills 挂载：项目内建 skills/（${PROJECT_SKILLS_DIR.replace(/\\/g, '/')}）`);
   L.push(`# 启用 ${mounted.length}/${skillNames.length} 个技能：${mounted.length ? mounted.join(', ') : '(无)'}`);
