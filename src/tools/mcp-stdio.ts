@@ -17,13 +17,17 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { buildBuiltinTools } from './registry.js';
 import { buildLarkTools } from './lark-tools.js';
+import { buildSkillTools } from './skills.js';
 
-const EXPOSE = new Set(['look_image', 'generate_image', 'reverse_prompt', 'transcribe']);
+// 技能读取件 skill_index/skill_read 与 look/gen 同批暴露（registry 生图看图路本身未改）
+const EXPOSE = new Set(['look_image', 'generate_image', 'reverse_prompt', 'transcribe', 'skill_index', 'skill_read']);
 
 const server = new McpServer({ name: 'cti-builtin', version: '1.0.0' });
 
 // 工具来源①：视觉/生图/转写（registry 同源）
 const tools = buildBuiltinTools({});
+// 工具来源①b：技能读取件（skills.ts，配套 workbuddy Phase 1）
+const skillTools = buildSkillTools();
 // 工具来源②：飞书原生能力（2026-08-30 内置化：通讯录/群/发消息/聊天记录）
 const botId = process.env.CTI_BOT || '';
 const larkCaps = (process.env[`CTI_BOT_${(process.env.CTI_BOT || '').toUpperCase()}_LARK_TOOLS`] || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -43,7 +47,7 @@ const register = (name: string, description: string, schema: unknown, handler: (
     },
   );
 };
-for (const t of tools) {
+for (const t of [...tools, ...skillTools]) {
   if (!EXPOSE.has(t.name)) continue;
   register(t.name, t.description, t.schema, async (args) => {
     const out = await t.execute(args, { deps: {} });
@@ -56,4 +60,4 @@ for (const t of larkTools) {
 
 await server.connect(new StdioServerTransport());
 // stderr 仅调试用（stdio 协议下 stdout 是协议通道，禁止 console.log）
-console.error(`[cti-builtin-mcp] ready, tools=${[...tools.filter((t) => EXPOSE.has(t.name)).map((t) => t.name), ...larkTools.map((t) => t.name)].join(',')}`);
+console.error(`[cti-builtin-mcp] ready, tools=${[...[...tools, ...skillTools].filter((t) => EXPOSE.has(t.name)).map((t) => t.name), ...larkTools.map((t) => t.name)].join(',')}`);

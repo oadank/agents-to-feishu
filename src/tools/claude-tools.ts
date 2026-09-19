@@ -11,6 +11,7 @@ import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-
 import { buildBuiltinTools } from './registry.js';
 import type { BuiltinToolContext, BridgeToolDeps } from './registry.js';
 import { buildLarkTools } from './lark-tools.js';
+import { buildSkillTools } from './skills.js';
 
 /** 当前轮次的会话 chatId（streamChat 进入时设置，结束清空）——send_voice 等会话敏感工具用 */
 let currentChatId: string | null = null;
@@ -26,10 +27,12 @@ export interface ClaudeBuiltinServer {
 
 /**
  * 构建进程内工具 server。deps 变化（attachBridgeTools 重新接线）时由调用方重建。
+ * 2026-09-19：并入 skill_index/skill_read（skills.ts），与 mcp-stdio 同源。
  */
 export function buildClaudeBuiltinServer(deps: BridgeToolDeps): ClaudeBuiltinServer {
   const ctx: BuiltinToolContext = { chatId: null, deps };
-  const tools = buildBuiltinTools(deps).map((t) =>
+  const registryTools = [...buildBuiltinTools(deps), ...buildSkillTools()];
+  const tools = registryTools.map((t) =>
     tool(
       t.name,
       t.description,
