@@ -36,8 +36,7 @@ function resolveWbCli(): string {
   return 'C:\\Program Files\\WorkBuddy\\resources\\app.asar.unpacked\\cli\\dist\\codebuddy.js';
 }
 
-/** 人设单点：spawn 时经 --append-system-prompt 全局注入一次（桥 systemPrompt 含配置中心段）。 */
-let lastPersona = '';
+/** 人设交付：新会话首条消息前置 systemPrompt（对齐 12 家老法，不碰 spawn 参数）。 */
 
 function resolveApiKey(): string {
   if (process.env.CODEBUDDY_API_KEY) return process.env.CODEBUDDY_API_KEY;
@@ -166,19 +165,25 @@ export function createWorkBuddyProvider(): RuntimeProvider {
       // 🔴 老大令 09-19 三治之二（工具风暴/慢）：--tools 砍内置工具面（46 件套=作恶入口，MCP 池不受限）；
       // --max-turns 防失控兜底；--effort medium 砍掉高推理（闲聊 4225 字内心戏的油门）。
       const cliArgs = [resolveWbCli(), '--acp', '--tools', 'Bash,Read,Write,Edit,Grep,Glob', '--max-turns', '40', '--effort', 'medium'];
-      if (lastPersona) cliArgs.push('--append-system-prompt', lastPersona);
-      child = spawn(process.execPath, cliArgs, { cwd: cwdOf(), env: buildSpawnEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+      const proc = spawn(process.execPath, cliArgs, { cwd: cwdOf(), env: buildSpawnEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+      child = proc;
       let buf = '';
-      child.stdout!.setEncoding('utf8');
-      child.stdout!.on('data', (d: string) => {
+      proc.stdout!.setEncoding('utf8');
+      proc.stdout!.on('data', (d: string) => {
         buf += d;
         let i: number;
         while ((i = buf.indexOf('\n')) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1); if (l.trim()) onLine(l.trim()); }
       });
       let stderr = '';
-      child.stderr!.setEncoding('utf8');
-      child.stderr!.on('data', (d: string) => { stderr = (stderr + d).slice(-4000); });
-      child.on('exit', (code) => { rtLog(`[wb-acp] 子进程退出 code=${code} stderr尾=${stderr.slice(-200)}`); child = null; startPromise = null; });
+      proc.stderr!.setEncoding('utf8');
+      proc.stderr!.on('data', (d: string) => { stderr = (stderr + d).slice(-4000); });
+      // 🔴 09-19 事故根因（老大当面骂出来的）：老一代进程的 exit 回调晚到，执行 child=null
+      // 把刚接手的新一代引用清空 ⇒ 卡上"WB ACP 子进程不在"+ 每轮重生堆积（3 代同堂）。
+      // 铁律：只允许清自己那一代（按进程实例判等）。
+      proc.on('exit', (code) => {
+        rtLog(`[wb-acp] 子进程退出 code=${code} stderr尾=${stderr.slice(-200)}`);
+        if (child === proc) { child = null; startPromise = null; }
+      });
       const r = await rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
       if (!r.result) throw new Error('WB ACP initialize 失败');
       rtLog('[wb-acp] initialize OK');
@@ -205,15 +210,6 @@ export function createWorkBuddyProvider(): RuntimeProvider {
       await ensureChild();
     },
     async *streamChat(params: StreamChatParams): AsyncGenerator<StreamEvent> {
-      // 人设变更（配置中心改了）→ 重启子进程一次注入；会话记忆由 load 路径兜底
-      if (params.systemPrompt && params.systemPrompt !== lastPersona) {
-        lastPersona = params.systemPrompt;
-        if (child) {
-          rtLog('[wb-acp] 人设变更 → 重启 ACP 子进程（--append-system-prompt 只在 spawn 生效）');
-          hardKill(child);
-          child = null; startPromise = null;
-        }
-      }
       const workdir = cwdOf(params.workdir);
       await ensureChild();
       // 09-19 晚间纠错：codebuddy 有真记忆系统（~/.codebuddy/projects/*/memory/MEMORY.md + 词文件），
@@ -232,13 +228,12 @@ export function createWorkBuddyProvider(): RuntimeProvider {
           rtLog(`[wb-acp] load 真失败 key=${params.sessionKey.slice(0, 10)} → 弹卡+新建`);
         }
       }
-      if (!sid) {
-        sid = await newSession(workdir);
-        // 🔴 会话身份只建一次：人设（桥 systemPrompt + 配置中心段）走 --append-system-prompt
-        // 在进程 spawn 时全局注入一次；此前"每条首消息拼人设"的做法会让长会话每轮重放
-        // 纪律、被模型当新指令解读（09-19 验收发现，禁止）。
-      }
-      const promptText = params.text;
+      if (!sid) sid = await newSession(workdir);
+      // 人设交付：新建会话的首条消息前置 systemPrompt（load 恢复成功的老会话不重复灌，
+      // 防止长会话每轮重放纪律被当新指令）。
+      const promptText = (!wantSid && params.systemPrompt)
+        ? `${params.systemPrompt}\n\n${params.text}`
+        : params.text;
       if (!sid) throw new Error('WB ACP 无法建立会话');
       sessions.set(params.sessionKey, { sid, model: resolveModel() });
       saveMap();
