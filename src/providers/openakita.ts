@@ -98,7 +98,9 @@ export class OpenAkitaProvider implements RuntimeProvider {
 
   private static IDLE_TIMEOUT_MS = parseInt(process.env.CTI_OPENAKITA_IDLE_TIMEOUT_MS || '1800000', 10);
   private static MAX_SESSIONS = parseInt(process.env.CTI_OPENAKITA_MAX_SESSIONS || '20', 10);
-  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_OPENAKITA_TIMEOUT_MS || '300000', 10);
+  // 2026-09-19 复盘：QW3.8F 思考模型×20 轮历史注入×编译器预处理，单轮合法耗时 5-8 分钟；
+  // 300s 看门狗把没死的回合掐成"卡死"报错卡（10:23/11:13 两轮引擎实际均完成作答）。升至 900s。
+  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_OPENAKITA_TIMEOUT_MS || '900000', 10);
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   async prepare(): Promise<void> {
