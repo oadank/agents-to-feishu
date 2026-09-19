@@ -1,40 +1,44 @@
 ---
 name: lark-ops
-description: 飞书消息/群/身份操作规范：bot 与 user 身份铁律、lark-cli 命令速查、open_id 隔离
+description: 飞书消息机制：@ 格式、发送通道、身份铁律、通讯录、常见坑。涉及飞书发消息/@/私聊/群聊时使用。（自 dsh-ops 私产收编 2026-09-19）
 ---
 
-# 技能：飞书操作规范（lark-ops）
+# 飞书机制速查（2026-09-17 全量校正：通道已换成服务注入的原生 `lark_*` 工具）
 
-发消息、查群、@人、跨 bot 传话前先读本技能，防身份错位与报错循环。
+> 🔴 **本技能旧版整篇作废**。以下写法实测已死，**任何情况下不要再执行**：
+> `POST http://127.0.0.1:135xx/api/send`（13578-13589 全部无监听，端点随 agents-to-im 一起下线）、
+> `lark-cli im +messages-send` / `lark-cli im images create` / `lark-cli --as user`、
+> `node C:\D\opt\agents-to-im\scripts\send-feishu.cjs`（**目录和脚本都不存在**）、
+> `send-feishu-voice.ps1`（语音现由桥接层自动合成）、以及任何手写脚本 / curl 直调飞书开放 API。
+> 项目真名已是 `agents-to-feishu`（源码 `C:\D\opt\agents-to-feishu\`）。
 
-## 身份铁律（选错=对方永远收不到）
+## 工具清单（参数名照抄）
+`lark_list_chats()` · `lark_send_text(receive_id, receive_id_type, text)` · `lark_send_image(chat_id, path)` ·
+`lark_send_post(...)` · `lark_send_as_user(to, text)` · `lark_chat_members(chat_id)` · `lark_bot_directory()` ·
+`lark_create_doc` / `lark_get_doc_text` · `lark_chat_history(chat_id)`
 
-| 场景 | 用什么 | 身份 |
-|---|---|---|
-| 回复当前对话 | 不用工具，桥接自动 | bot |
-| 主动给用户/群展示 | `lark_send_text/image/post` | bot |
-| 给其他 bot 派活/传话 | `lark_send_as_user(to=<对方agentId>)` | **user**（bot 身份发→对方 inbound-handler 直接吞掉） |
-| 群里 @ 人/@ bot | `lark_chat_members` 查 id → `lark_send_as_user` | user（bot 身份无法正确 @ 其他 bot） |
+## 发消息身份铁律（判断骨架与旧版一致，执行层换了）
+- 给**用户 / 群里展示**（回复、发图、汇报）→ **自己 bot 身份**：`lark_send_text` / `lark_send_image` / `lark_send_post`，**无需 [前缀]**，飞书自动显示你的 bot 名。
+- 给**其他 bot**（派活、委托、传话）→ **user 身份**：`lark_send_as_user(to="<对方agentId>", text="[你的身份名] …")`。`to` 直接填 agentId，**系统自动定位与该 bot 的私聊，不用手工找任何 id**。原因不变：桥接对 `sender_type=app` 直接 return，bot 身份发的消息其他 bot 收不到。
+- **收到别的 bot 派来的活 → 直接正常文字回复**，桥接会自动转达发起方。**再手工调 `lark_send_as_user` 回执 = 对方收到两条重复消息**（错误）。
+- 发消息前自问一句：**这条给谁看？**（人 → bot 身份；bot → user 身份）
 
-## lark-cli 命令速查
+## @ 人
+- **群消息 @ 人 / @ bot**：先 `lark_chat_members(chat_id)` 查 id，再用 **`lark_send_as_user`** 群发（bot 身份发消息无法正确 @ 其他 bot）。
+- **富文本 @**：`lark_send_post` 正文里写 `<at user_id="<查到的 id>"></at>`。text 类消息不支持 @（`<at>` 会被当纯文本显示）。post 结构里 at 元素**必须带 user_name**，@ 与正文各占一行。
+- 别只在文本里写 "@某某"，要真正 @ 到人。
 
-- 读聊天记录：`lark-cli im +chat-messages-list --chat-id <id> --as user --order desc --page-size 10`（🔴 没有 `+messages-list` 这个子命令）
-- 发消息：`lark-cli im +messages-send --chat-id <id> --text "..." --as user --idempotency-key <唯一key>`
-- 列私聊：`lark-cli im +chat-list --types=p2p --page-size=100 --as user`（必须翻全页）
-- 查群成员：`lark-cli im +chat-members-list --chat-id <id> --as user`
+## 通讯录（团队群 chat_id：`oc_b598b5209ec736d96c53e4b5b3cad491`）
+- 🔴 **禁止背 open_id**：open_id 按 **app 视角隔离**，拿别的 app 视角查到的 id 去 `lark_send_text(receive_id_type="open_id")` → 直接报 `99992361 open_id cross app`（2026-09-12 实测）。旧技能里那张 9 bot open_id + app_id 表已整体撤下，别再抄回去。
+- 现行取 id 姿势：`lark_bot_directory()` 拿全部 bot 的 open_id 与各家视角 p2p chat_id；`lark_list_chats()` 拿自己所在会话的 chat_id（**chat_id 全局唯一，不受 app 视角影响**）；要 @ 群成员用 `lark_chat_members(chat_id)`。
+- 给用户（陈丹）发：① **回复当前对话是自动的**（桥接层发，不用调工具）；② 主动发要用**你自己视角**的 open_id（只能从收到的消息事件里拿），或干脆 `lark_send_as_user`。
+- ⚠️ appId `cli_aad3d4bbaaf8dbb3`（"陈丹的飞书 CLI"机器人）的私聊**已接入 DeepTutor** —— 发它 = 给 DeepTutor 留言，不是团队智能体。只发到：团队群 / 用户真实私聊 / 其他 bot 的私聊。
 
-## 隔离与红线
-
-- `open_id` 每个 app 视角隔离：拿别家视角 id 直发必报 `99992361 open_id cross app`。**现查不硬编码**：用自己视角 `lark_list_chats`。
-- 群 `chat_id` 全局唯一，是 bot 间互通主通道。
-- lark-cli 前先过 api-gate：`openmem mh_tool(name="飞书操作规范")`。
-- 已作废再见即错：`POST /api/send`（agents-to-im 时代端点）、手写 Python 直调 open API、人设里存 app_secret 明文。
-
-## 报错对照
-
-| 报错 | 修法 |
-|---|---|
-| `unknown subcommand` | 子命令名抄错，读记录用 `+chat-messages-list` |
-| `99992361 open_id cross app` | 换自己视角现查 chat_id/open_id |
-| `230072` | 流式更新只能走卡片，text 有编辑次数上限 |
-| SDK 返回 code=0 但没生效 | 假成功，卡片更新走 `PATCH /im/v1/messages/{id}` HTTP 直调 |
+## 常见坑
+- **人设 / 注入改了不生效**：`lark_*` 注入文本来自配置中心 `config-store.json → injection.global`，渲染进 `config.<bot>.env` 的 `CTI_SYSTEM_PROMPT_GLOBAL`，bot 进程**启动时**读 → 改完要 `nssm restart <bot短名>`，且会话要 `/new` 重建才吃到新人设（见 `dsh-ops-pm2-nssm` 与 openmem 的 `be861a5c`）。
+- **/new 命令**：私聊发 `/new`（不带 bot 名字）让 bot 重建会话；`/new:claude` 这种写法无效。
+- **botOpenId 命名空间**（机制仍成立，历史背景）：`/open-apis/bot/v3/info` 返回的 open_id 与群 mentions 事件里的 open_id 不同命名空间，不匹配会导致群 @ 永远收不到；当年靠 env `CTI_BOT_<NAME>_BOT_OPEN_ID=<user 视角 open_id>` 修正（现由配置中心渲染，别再手改旧 ecosystem）。
+- **看历史消息**：用 `lark_chat_history(chat_id)`，不要再用 lark-cli 拉。
+- **语音**：桥接层**自动收发**。用户发语音 / 要求语音 → 你正常文字回答，并在正文之外另起一段写 `【语音】口语内容` 供合成；**禁止再手动跑任何 TTS 脚本**（手动发 = 重复回复 = 错误）。
+- **中文**：工具参数直接传字符串（内部 UTF-8），不需要再绕 python/node。
+- 发送后确认成功即结束，**不要重复发**；任务做完一定回复当前对话（失败也报原因），不要沉默。

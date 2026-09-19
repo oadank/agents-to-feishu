@@ -1,11 +1,14 @@
-# 技能：openmem 统一记忆中枢（路标）
+---
+name: memory-ops
+description: dsh 的记忆与知识管理机制：openmem 唯一记忆工具（mh_* 工具）、知识循环、写入姿势、记忆 vs 人设分层、常见坑。涉及写记忆/搜经验/沉淀知识时使用。（自 dsh-ops 私产收编 2026-09-19）
+---
 
-当涉及 openmem 记忆读写、经验沉淀、项目知识检索时使用本技能。
+# openmem —— 路标（真源就是本文件）
 
 > ⚠️ 本文件是 agent 自动加载的**唯一**说明。**没有第二份手册**（MANUAL.md 已于 2026-09-18 删除：
 > 能塞进技能文件的塞进来，塞不进的一律不留）。
-> 要改这条知识 → **只改本文件**，三份副本同步：`agents-to-feishu/skills-market/memory-ops`、
-> `~/.dsh/skills/dsh-ops-memory`、`~/.workbuddy/skills/openmem-memory`。
+> 要改这条知识 → **只改本文件**，三份副本同步：`~/.dsh/skills/dsh-ops-memory`、
+> `~/.workbuddy/skills/openmem-memory`、`agents-to-feishu/skills-market/memory-ops`。
 
 ## 最小骨架（够你起步）
 
@@ -52,7 +55,8 @@
 | MCP 响应乱码 | 显式 `r.content.decode('utf-8')`，别用 `r.text` |
 | 直连 PG 查 uuid 列表 | 要写 `::uuid[]` 转型，否则 `uuid = text` 不存在 |
 
-## 两条额外提醒
+## dsh 侧说明
 
-- 台账类内容（`source=agent-matrix/services`）默认被排除，要查需显式指定 source。
-- **openmem 自己的记录也要当场验证再用**（曾把测试期已删的组件记成"已装"）；改完环境要回头刷条目 + 刷成品答案缓存。
+- `~/.dsh/bot-memory.md` 现在**只是铁律 + 路标**（2026-09-12 从 826 行 / 132KB 瘦到 47 行），**不再是知识库**，别再往里堆细节。
+- DSH 平台机制 / 语音链路 / ComfyUI / 米家 / Session 1 桌面控制等细节已提炼进 openmem，用 `mh_search` 查。
+- `persona`（`~/.dsh/global-persona.md`）仍是每次会话注入的常驻认知；记忆 vs 人设的分层原则用 `mh_search("记忆 vs 人设 分层")` 查条目。
