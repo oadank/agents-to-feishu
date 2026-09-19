@@ -11,3 +11,5 @@ logs/
 nssm-backups/
 _removed-overview-backup/
 .mimocode/
+
+inbox/
