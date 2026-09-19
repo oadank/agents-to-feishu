@@ -72,9 +72,11 @@ export function buildAgentGlobalInject(store: ConfigStore, model?: ModelDef): st
 
 export interface SkillIndexEntry { name: string; description: string; dirPath: string; skillMd: string; }
 
-/** 技能清单注入标题（同时是幂等锚点：统一注入里已含【技能目录】则不重复拼） */
+/** 技能清单注入标题（同时是幂等锚点：统一注入里已含【技能目录】则不重复拼）
+ *  2026-09-19 老大 A 案：尾句统一口径——本目录只是中央默认件，私产库（如 dsh 的 ~/.dsh/skills、
+ *  各家挂载面）以 skill_index 合并清单为准，避免"注入 3 条 vs 原生 38 条"口径打架。 */
 const SKILL_INDEX_HEADING =
-  '【技能目录】任务命中下列技能时，先读该路径 SKILL.md 全文再行动（也可调 skill_index/skill_read 工具查询）：';
+  '【技能目录】任务命中下列技能时，先读该路径 SKILL.md 全文再行动（也可调 skill_index/skill_read 工具查询）；你家另有原生/私产技能（如 ~/.dsh/skills 挂载、CTI_SKILLS_DIRS 扩展）的，以 skill_index 合并清单为准，同样按需读全文：';
 
 /** 从 SKILL.md 抽一句话描述：frontmatter description 优先，否则首个非标题非空行（≤80字） */
 function skillDescription(md: string): string {
@@ -281,6 +283,11 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   lines.push(`# visionCapable=${resolveVisionCapable(model)}；toolRoute=always`);
   lines.push(`CTI_SYSTEM_PROMPT_GLOBAL=${JSON.stringify(globalInject)}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_SYSTEM_PROMPT=${JSON.stringify(agent.systemPrompt ?? '')}`);
+  if (agent.runtime === 'dsh') {
+    // 老大 A 案·双库合并（2026-09-19）：dsh 家的 skill_index 同时扫中央 skills/ 与
+    // 私产原生库 ~/.dsh/skills（skills.ts listSkills 同名去重、中央根优先）。
+    lines.push('CTI_SKILLS_DIRS=C:\\Users\\oadan\\.dsh\\skills');
+  }
   lines.push('');
   lines.push(`CTI_DEFAULT_WORKDIR=${workdir}`);
   if (agent.runtime === 'claude') {
