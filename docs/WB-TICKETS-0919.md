@@ -47,7 +47,21 @@
 
 ## 问题单（拿不准的，列出来不猜）
 
-1. **「13 户齐」与名册 12 户对不上**：config-store 名册（也是 lark_bot_directory 的 12 bot 花名册）就是 12 户，实跑补齐 12/12。若"第 13 户"另有所指（如老大视角里那个不属于名册的「陈丹的智能伙伴」bot 会话，或即将新建的 bot），说一声，新 bot 上线后跑一次本通道即可自动入账。
-2. **config-center 端点生效时机**：新端点写进了代码，但运行中的 config-center 服务没重启，要下次重启才带上。本次验收走 CLI 同码路完成，未碰服务（按规矩不出变更单不重启）；要立即生效说一声，我出变更单重启。
+1. ~~**「13 户齐」与名册 12 户对不上**~~：config-store 名册（也是 lark_bot_directory 的 12 bot 花名册）就是 12 户，实跑补齐 12/12。若"第 13 户"另有所指…说一声，新 bot 上线后跑一次本通道即可自动入账。
+
+   **2026-09-19 深夜销案（题面已定性）**：第 13 户 = 当天上线并入账的 **WorkBuddy**。现拉名册与账双向核对：名册 `config-store.json` 的 `agents` **13 户**，`logs/chats-map.json` **13 个 key**，**精确双射、零缺零多**（claude / codex / mimo / gemini / hermes / openakita / reasonix / openclaw / opencode / dsh / deeptutor / zcode / workbuddy，两边同名同数）。
+   ⚠️ 但**票面要求的 chats-map-scan 全量对账本轮没能跑成**（阻塞与根因见问题 5）。上面这句是「名册 ↔ 账」的双向核验，**不是**扫描给出的 `added=0/kept=13/mismatch=0` 实测值 —— 原始口径的复跑待通道修好后补一次坐实。
+2. ~~**config-center 端点生效时机**~~ → **2026-09-19 22:54 已生效**。变更单：`nssm restart config-center`（**只此一个服务**）。重启前后逐家核对 13 家 bot + config-center 的 nssm 状态，14/14 SERVICE_RUNNING，**未动其他任何服务**；新进程起始 **22:54:46**（晚于 09bec00 提交 ⇒ 端点所在的新代码确已在运行）。实调 `POST http://127.0.0.1:13600/api/tools/chats-map-scan` → **HTTP 200（端点已注册生效）**，138ms 返回 `ok:false`，失败点与 CLI **同一处**（那行 `im +chat-list --types=p2p --page-size=100 --as user`）—— 端点本身通了，扫描被问题 5 挡住。
 3. **补投递只认图**：票面产物范围是 pendingImageIds/pendingGenFiles（图）。send_voice 语音、deeptutor 媒体件没纳入断头轮台账（语音重复发送比丢失更招人烦，保守处理）；要扩再说。
 4. **mismatch 的处置**：本次实跑零 mismatch。将来出现（bot 改名/换号）通道只报不改，等老大裁决。
+5. 【新增·**阻塞**·根因已定性】**chats-map-scan 在 zcode 家跑不起来：lark-cli 用户身份（陈丹）凭据不可达**。三连实测（真调，无 curl）：
+   - `npx tsx src/config-center/chats-map-scan.ts` → **第一步即死**：`need_user_authorization (user: ou_a1dec4c18c6ce9030d6330e2dce78949)`，hint 要求重新走设备码登录；
+   - `lark-cli auth status --json` → `user.status = missing`，`"no token in keychain for ou_a1dec4c…"`；`auth list --json` → 该用户 `tokenStatus: "no_token"`（**应用与用户登记都还在，缺的是凭据本身**）；
+   - 端点侧（同为 LocalSystem）报得更前一层：`config / not_configured`（连 `~/.lark-cli/config.json` 都没找到，因为 SYSTEM 的 HOME 不是 `C:\Users\oadan`）。
+
+   **根因（已定位到账号层）**：`zcode` 服务的登录账号是 **LocalSystem**（`sc qc zcode` → `SERVICE_START_NAME : LocalSystem`），而其余各家是 `.\oadan`（实测 claude/codex/mimo/gemini/hermes/openakita/openclaw/opencode/reasonix/dsh/deeptutor-bot **全是 `.\oadan`**）。lark-cli 的用户凭据落在 **OS keychain（Windows 账号级）**，SYSTEM 与 oadan 各看各的 ⇒ SYSTEM 上下文的 zcode 天然读不到 oadan 的 token。
+   **旁证**：① dsh（`.\oadan`）今晚 21:36 用 `lark_send_as_user` 派发了本票，我收到的消息带 `(from-bot:dsh …)` 标记，而该标记只由 `sendAsUserToBot()`（`src/tools/lark-tools.ts:400`）拼接 ⇒ user 身份在 oadan 侧**是好的**；② 同机、同 CLI、同 appId，唯一变量是账号 ⇒ 差异只能来自 keychain 归属。
+
+   **影响面（不止本票）**：zcode 家一切 `--as user` 操作全废 —— chats-map-scan、`lark_send_as_user`（bot 间派活）、`lark_chat_members`（@ 人要用），以及 **bot 派活自动回执转发**（`src/index.ts:257` → `sendAsUserToBot`，**与 `lark_send_as_user` 同一函数**）。本条已实测坐实：本轮真调 `lark_send_as_user(to="dsh")` 报同一个 `token_missing` ⇒ **本票回执送不到 dsh**。
+   **团队群兜底同样不通**（已核查，勿再试）：群里 bot 间通讯本就靠 user 身份发 + `@`（dsh 日志里 WorkBuddy 的战报即此形态，`sender=ou_888b9…`＝陈丹在 dsh 视角的 open_id），而 bot 身份发的群消息既 @ 不到 dsh（飞书限制），又会被各家「群消息必须 @ 本 bot」闸门 SKIP（该 SKIP 日志全仓 **69 条**）⇒ 本票交付只能落在 openmem 条目 + 本文件，dsh 侧需人工取件。
+6. 【新增·**待批**·未擅自执行】**修法（属服务/环境配置变更，需老大或总控批）**：把 `zcode` 服务账号改成 `.\oadan`，与其余 12 家一致 —— `nssm set zcode ObjectName ".\oadan"` + 重启 `zcode` 服务（**会打断我自己的会话**，按规矩不自行动宿主），改完用 `lark-cli auth list --json` 复核 `tokenStatus` 应恢复有效。备选：在 SYSTEM 上下文重走一次设备码登录（需老大点授权 URL，夜里不动）。**两条均未执行**，只报方案。附带提醒：`workbuddy` 服务同样是 LocalSystem，若它也要用 user 身份（@ 人 / 派活），可一并收口。
