@@ -73,21 +73,11 @@ export async function handleCommand(
       break;
     }
     case '/compact': {
-      const session = sessions.get(chatId);
-      if (!session || session.context.length === 0) {
-        await engine.sendCommandCard(chatId, '当前会话没有可压缩的上下文。');
-        break;
-      }
-      // 桥接层级压缩：把历史上下文汇总成摘要，注入下一条消息
-      const rawCount = session.context.length;
-      const summary = session.context
-        .map((m) => `${m.role === 'user' ? '用户' : '助手'}: ${m.content.slice(0, 500)}`)
-        .join('\n');
-      session.context = [{ role: 'user', content: `[会话已压缩]\n\n${summary}` }];
-      // 必须标记 fresh：engine 只在 fresh 轮次把 history 传给 provider，
-      // 少了这一步摘要就永远停在内存里发不出去（2026-08-29 修复）。
-      session.pendingFresh = true;
-      await engine.sendCommandCard(chatId, `✅ 上下文已压缩（${rawCount} 段 → 1 段摘要）。下一条消息将开新会话并携带摘要继续。`);
+      // 🔴 老大令 2026-09-19：桥接不负责压缩，只负责传递 —— 把 "/compact" 原文灌进
+      // 正常轮次管道（handleText 不再经过命令拦截，无回环），各家引擎用自己的原生
+      // 压缩策略（claude-code 的 /compact、mimocode/codex 各家定义）；引擎不认就如实回。
+      // 旧版桥自压（截500字拼摘要注入）已废：那是桥替引擎做梦，压缩质量与策略必须归引擎。
+      await engine.handleText(chatId, raw.trim());
       break;
     }
     case '/model': {
