@@ -73,12 +73,15 @@ async function comfyPost(path: string, body: Record<string, unknown>, timeoutMs:
  * [2026-09-19 老大放行·封顶] generate_image 后端序：
  * 1) N5105 agnes POST /v1/images/generations（b64_json → 落盘 runs/img，source=agnes）
  * 2) 120s 无果 / 5xx / 无 b64 → 回落本机 8090→XDN comfy（source=comfy-xdn）
- * 自动发图/mtime 兜底不改，照吃落盘文件。template=显式 comfy 时仍先 agnes，回落带 template。
+ * 自动发图/mtime 兜底不改，照吃落盘文件。**2026-09-19 v4 修正：显式 template(≠agnes) = 用户点名
+ * 高质量/XDN，直接走 8090→XDN，不再被 agnes 抢跑**（旧序"显式仍先 agnes"= reasonix 三模板全漂 agnes 的根因）。
  */
 export async function runGenerateImage(body: Record<string, unknown>): Promise<string> {
   const prompt = String(body.prompt ?? '');
   const w = Number(body.width) || 512;
   const h = Number(body.height) || 512;
+  const explicitTemplate = typeof body.template === 'string'
+    && body.template.trim() !== '' && body.template.trim().toLowerCase() !== 'agnes';
   const agnesBody: Record<string, unknown> = {
     prompt,
     n: 1,
@@ -87,6 +90,8 @@ export async function runGenerateImage(body: Record<string, unknown>): Promise<s
   };
   if (body.image || body.image_name) {
     // 图生图 agnes 未必支持；仍先试纯文生图会错图 → 直接走 comfy 回落路径更稳
+  } else if (explicitTemplate) {
+    // 🔴 路权根治（老大规则"要高质量就本地生图"）：显式 template 跳过 agnes，直发 8090→XDN。
   } else {
     try {
       const r = await fetch(AGNES_URL, {
@@ -184,7 +189,7 @@ export function buildBuiltinTools(deps: BridgeToolDeps): BuiltinTool[] {
         + '【服务侧已写死】成功后桥接会自动把本地图发到当前飞书会话，不必再自己 send_image。',
       schema: {
         prompt: z.string().describe('生图提示词'),
-        template: z.string().optional().describe('工作流模板名；省略=agnes 优先；显式 comfy/Krea2 则回落时用'),
+        template: z.string().optional().describe('工作流模板名；省略=agnes 快路；显式(如 Krea2 Turbo-文生图.json/comfy)=直走 8090→XDN 高质量产线，不再先试 agnes'),
         width: z.number().optional(),
         height: z.number().optional(),
         seed: z.number().optional(),

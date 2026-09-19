@@ -34,7 +34,7 @@ export const VISION_DEGRADE_PROMPT =
  * 无条件注入，与 visionCapable 共用同一注入点。配置层 comfy/vision 挂载永不摘（老大亲裁）。
  */
 export const TOOL_ROUTE_PROMPT =
-  '生图/看图/反推一律优先内建工具（generate_image/look_image/reverse_prompt）：默认 agnes 快引擎，失败自动回落 8090→XDN，文件名由桥统一 Agnes-*，回合末自动发图。仅当用户点名「高质量/精致/4K/高清」或「XDN生图/本地生图/Z-IMAGE/工作流模板」→ 改用 comfy MCP 的 generate_image（唯一能直连 8090 强制指定模板走 XDN 产线的入口；注意：此入口文件名跟随工作流且偶发 temp 临时名，回合末必须自己把图片路径讲清楚或手动发图，勿依赖自动发图）。vision MCP 永不首选（与内建同一条看图链）。后端只有一套：agnes(N5105) + 8090调度台→XDN真引擎，两入口共用图库 runs\\img，区别仅在谁定文件名。';
+  '生图/看图/反推一律优先内建工具（generate_image/look_image/reverse_prompt）：不点名模板时默认 agnes 快引擎，失败自动回落 8090→XDN，文件名由桥统一 Agnes-*，回合末自动发图。用户点名「高质量/精致/4K/高清」或「XDN生图/本地生图/Z-IMAGE/工作流模板」→ 内建 generate_image **直接传 template（即直连 XDN 产线，v4 起不再先试 agnes）**；或走 comfy MCP generate_image（该入口文件名跟随工作流且偶发 temp 临时名，回合末自己把图片路径讲清或手动发图，勿依赖自动发图）。点名高质量就一锤子下单，禁止先搜索/读文档再权衡。vision MCP 永不首选（与内建同一条看图链）。后端只有一套：agnes(N5105) + 8090调度台→XDN真引擎，两入口共用图库 runs\\img，区别仅在谁定文件名。';
 
 /** 缺省视为支持看图（老大口径：现在都支持；纯文本模型在 store 里显式 false） */
 export function resolveVisionCapable(model?: ModelDef): boolean {
