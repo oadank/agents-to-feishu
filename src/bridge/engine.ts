@@ -933,6 +933,12 @@ export class MessageEngine {
         // 语音：只取 agent 专门写的【语音】… 口语文本生成语音（不转整段回复），并把该块从卡片/历史移除
         voiceText = extractVoiceBlock(layers.text);
         if (voiceText) layers.text = stripVoiceBlock(layers.text);
+        // 🔴 老大准 09-19（mimo跑野不收尾案）：正文承诺了交付文件却没落盘 → 卡尾自动挂警告
+        try {
+          const claims = [...layers.text.matchAll(/([A-Za-z]:[\\/][^\s"'、。，；)]{0,200}?\.(?:md|txt|json|csv))/gi)];
+          const missing = [...new Set(claims.map((cm) => cm[1]).filter((p) => { try { return !fs.existsSync(p); } catch { return false; } }))];
+          if (missing.length > 0) { layers.text += `\n\n⚠️ 报告未落盘：${missing.slice(0, 3).join(' ; ')}`; console.log(`[engine] 产物警告 chat=${chatId.slice(0, 12)} missing=${missing.length}`); }
+        } catch { /* 警告失败绝不拦正文 */ }
         const finalText = buildFinalMarkdown(layers);
         console.log(`[engine] FINAL text.len=${layers.text.length} thinking.len=${layers.thinking.length} tools=${layers.toolLines.length} finalText.len=${finalText.length}`);
         const ok = await render(finalText, true);

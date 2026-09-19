@@ -253,18 +253,39 @@ const singleLine = (s: string): string => s.replace(/\s+/g, ' ').trim();
 
 /** 工具起始行："tool — 输入预览"（≤120 字符，对齐旧实现 1874 行） */
 export function toolStartLine(tool: string, input?: string): string {
-  const preview = input ? singleLine(input).slice(0, 120) : '';
+  // 🔴 老大准 09-19（mimo乱码卡案）：反引号全消毒——命令生肉含 ``` 会提前打穿工具块围栏，思考/正文漏进代码块成乱码
+  const preview = input ? singleLine(input).replace(/\x60+/g, '´').slice(0, 120) : '';
   return preview ? `${tool} — ${preview}` : tool;
+}
+
+/** 🔴 老大准 09-19：同名工具 >5 次折叠计数（mimo 审计任务 415 行糊卡案）——保留首条+末2条+计数行 */
+function foldToolLines(lines: string[]): string[] {
+  if (lines.length <= 12) return lines;
+  const groups = new Map<string, string[]>();
+  const order: string[] = [];
+  for (const l of lines) {
+    const name = l.replace(/^(?:[✅❌⏳]s*)*/, '').split(' — ')[0].trim().slice(0, 40) || l.slice(0, 24);
+    if (!groups.has(name)) { groups.set(name, []); order.push(name); }
+    groups.get(name)!.push(l);
+  }
+  const out: string[] = [];
+  for (const name of order) {
+    const g = groups.get(name)!;
+    if (g.length <= 5) { out.push(...g); continue; }
+    out.push(g[0], `↳ ${name} ×${g.length}（折叠，含末2条）`, ...g.slice(-2));
+  }
+  return out;
 }
 
 /** 工具代码块：流式期标题带执行状态，最终态固定"🔧 工具执行" */
 function toolsBlock(toolLines: string[], streaming: boolean): string {
+  const folded = foldToolLines(toolLines);
   if (streaming) {
     const hasRunning = toolLines.some((l) => !l.startsWith('✅') && !l.startsWith('❌'));
     const title = hasRunning ? '🔧 执行中' : '🔧 已完成';
-    return '```\n' + title + '\n' + toolLines.join('\n') + '\n```';
+    return '```\n' + title + '\n' + folded.join('\n') + '\n```';
   }
-  return '```\n🔧 工具执行\n' + toolLines.join('\n') + '\n```';
+  return '```\n🔧 工具执行\n' + folded.join('\n') + '\n```';
 }
 
 /** 思考 blockquote：💭 标题 + 每行 ">" 前缀（左侧竖线、自动换行），按窗口截尾。
