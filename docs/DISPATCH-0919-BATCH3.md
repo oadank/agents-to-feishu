@@ -29,6 +29,15 @@
 
 纪律：不发飞书测试消息；不动任何服务；git 点名 add。
 
+### wb-1 增补：dsh 取证交接（2026-09-19 23:3x，应 reasonix 转报）
+
+reasonix 实测其 exec 沙箱整轮不可用（所有 bash 10s 超时，报 `session temp overlaps writable root "C:\"`），今天靠桌面助手绕行完成了 dsh 服务代重启。dsh 已做完边界取证（openmem `8c539271`），**桥侧无罪，雷在引擎配置侧**，直接并入你 wb-1① 调查范围：
+
+1. 桥侧排除项：nssm reasonix AppDirectory=C:\D\opt\agents-to-feishu；providers/reasonix.ts spawn cwd=CTI_DEFAULT_WORKDIR||process.cwd()，该 env 未设；dsh 自家 bash 同窗自检正常——盘根不是桥传进去的。
+2. config.toml（%APPDATA%\reasonix）两处盘根疑点：`[[bot.routes]].workspace_root = "C:\\"`（272 行；[bot] enabled=false，网关是死的，疑历史遗留但引擎解析未必跳过）；`[[remote.hosts]]` XDN `workspace = "C:\\"`（354 行）。另 `[sandbox] allow_write = ["C:\\D"]`（231 行）整个 D 盘写根，workspace_root 未显式设（默认=cwd）。
+3. 引擎侧痕迹：`Roaming\reasonix\windows-sandbox-capabilities-v1\*.json` 23:24 仍 `status:"preparing"`、`canonicalPath:"C:\D"`、ownerPid=36024——沙箱 ACL 准备疑似永不收敛。
+4. 你的方案书 A/B 口径可据此校准：候选修复=收窄 allow_write 至 C:\D\opt、清 bot.routes 的 C:\ 遗留、或 session temp 挪出 C:\ 卷——全在 config.toml/引擎侧，**红线不变：不擅动，方案书待批**。
+
 ---
 
 ## 【mimo｜票 mm-1：票B 弹头收尾 + usage 审计修复票 + 入库收尾】
