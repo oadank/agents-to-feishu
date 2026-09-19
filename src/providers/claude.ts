@@ -67,6 +67,26 @@ function clearSavedSessionId(): void {
   try { fs.rmSync(claudeSessionFile(), { force: true }); } catch { /* 忽略 */ }
 }
 
+/** [2026-09-19 票B实弹] saved 会话 id 的 jsonl 是否仍在引擎历史库（~/.claude/projects/**）。
+ *  resume 被清库的会话时 SDK 只报 result(error_during_execution)，抛错文本又不过 NON_RETRYABLE_RE——
+ *  用文件存在性兜底识别「引擎历史库被清」。projects 根读不到时保守当"在"，维持旧行为不误伤。 */
+function savedSessionFileExists(id: string): boolean {
+  const roots = [
+    process.env.CLAUDE_CONFIG_DIR ? path.join(process.env.CLAUDE_CONFIG_DIR, 'projects') : '',
+    path.join(process.env.CTI_USER_HOME || os.homedir(), '.claude', 'projects'),
+  ].filter(Boolean);
+  let anyRootReadable = false;
+  for (const root of roots) {
+    try {
+      for (const dir of fs.readdirSync(root)) {
+        anyRootReadable = true;
+        if (fs.existsSync(path.join(root, dir, `${id}.jsonl`))) return true;
+      }
+    } catch { /* 根不存在/不可读：试下一个 */ }
+  }
+  return !anyRootReadable;
+}
+
 // usage 落盘统一由 bridge 层承担（engine.ts 消费 {type:'usage'} 事件 → src/bridge/stats.ts recordStats），
 // 此处不再 provider 内落盘（否则双写）。状态条缓存命中率/上下文数据源：~/.dsh/claude-bot/stats/。
 
@@ -534,10 +554,12 @@ export class ClaudeProvider implements RuntimeProvider {
       }
       // P1 修复：resume 的持久化会话报不可重试错误（损坏/超窗/被清理）→ 清除记录自愈，
       // 否则此后每条消息都 resume 同一坏会话，bot 变砖直到手动 /new
-      if (doneErr && NON_RETRYABLE_RE.test(doneErr) && readSavedSessionId()) {
+      const savedResumeId = readSavedSessionId();
+      const sessionFileGone = !!savedResumeId && !savedSessionFileExists(savedResumeId);
+      if (doneErr && (NON_RETRYABLE_RE.test(doneErr) || sessionFileGone) && savedResumeId) {
         clearSavedSessionId();
         params.onSessionLost?.(); // 老大令 09-19：引擎历史不可恢复=自动 /new（桥清影子+告知），不回灌
-        rtLog(`[claude] resume 会话不可恢复（${doneErr.slice(0, 120)}），已清除 session_id，下条消息开新会话`);
+        rtLog(`[claude] resume 会话不可恢复（${doneErr.slice(0, 120)}${sessionFileGone ? '；历史库 jsonl 已缺失' : ''}），已清除 session_id，下条消息开新会话`);
       }
       // 不可重试 / 重试耗尽：明确回报，绝不静默半截
       if (doneErr) yield { type: 'error', message: doneErr };
