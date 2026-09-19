@@ -208,9 +208,9 @@
             props.mcps.length === 0 ? h("span", { class: "dim" }, "暂无 MCP（去「总配置 · MCP」新增）") :
               props.mcps.map(function (m) {
                 if (m.id === "cti-builtin") {
-                  return h("label", { key: m.id, class: "dim", title: "内置工具包全部 agent 自动挂载（claude 走引擎内注入故其数组里不出现，属正常），不可取消；这个勾代表恒挂" },
-                    h("input", { type: "checkbox", checked: true, disabled: true }),
-                    m.displayName + "（内建底座 · 不可拆）",
+                  return h("label", { key: m.id, title: "内置工具包全部 agent 自动挂载（claude 走引擎进程内注入，故其数据数组里不出现，属正常），不可取消" },
+                    h("span", { style: { color: "#2e7d32", fontWeight: "bold", marginRight: "4px" } }, "✓"),
+                    m.displayName + "（内建底座 · 恒挂 · 不可拆）",
                   );
                 }
                 var legacy = m.id === "comfy" || m.id === "vision";
