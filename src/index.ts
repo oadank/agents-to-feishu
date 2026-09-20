@@ -31,6 +31,7 @@ import { DEFAULT_SPEECH, readStore } from './config-center/store.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { sendAsUserToBot } from './tools/lark-tools.js';
 import { registerPending, consumePending, manualReceiptRecent } from './bridge/auto-receipt.js';
 
@@ -194,6 +195,19 @@ async function main(): Promise<void> {
   for (const [k, v] of Object.entries(global)) {
     if (k === 'CTI_SYSTEM_PROMPT_GLOBAL' || /^CTI_BOT_.*_SYSTEM_PROMPT$/.test(k)) continue;
     if (process.env[k] === undefined) process.env[k] = v;
+  }
+  // 🔴 票 claude-2 件2（2026-09-20）：CTI_RT_LOG 代码兜底。查证结论——这键从来没有下发路径：
+  // 配置中心 render.ts 不生成它（patch-apply.ts 的 /^CTI_RT_LOG$/ 只是日志脱敏名单，非模板登记），
+  // 现状全靠 nssm 各服务 AppEnvironmentExtra 手工逐个设。实测 dsh/reasonix/mimo/openakita/opencode/
+  // gemini/zcode/deeptutor-bot 有、claude/codex/hermes/deeptutor 没有（openclaw 靠手工塞进 config.env）
+  // ⇒ claude-rt.log 自 08-29 起零写入。别指望手工了：上面两级（nssm 注册表 → config.<bot>.env）注入
+  // 完之后仍空，就按 bot 名兜底 <repo>/logs/<bot>-rt.log；已有值一律不覆盖，dsh/reasonix 等现状不变。
+  if (!process.env.CTI_RT_LOG) {
+    // index.ts 位于 src/ 直下：src/../logs = <repo>/logs（别学 patch-apply 跳两级，那文件在 src/config-center/）
+    const logsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'logs');
+    try { fs.mkdirSync(logsDir, { recursive: true }); } catch { /* 建不出目录就算了，rtLog 内部自带静默 */ }
+    process.env.CTI_RT_LOG = path.join(logsDir, `${botName}-rt.log`);
+    console.log(`[agents-to-feishu] CTI_RT_LOG 未配置，按票 claude-2 兜底: ${process.env.CTI_RT_LOG}`);
   }
   // USERPROFILE 兜底：nssm 以 LocalSystem 跑时 os.homedir() 指向 systemprofile
   if (process.env.USERPROFILE === undefined || process.env.USERPROFILE?.includes('systemprofile')) {
