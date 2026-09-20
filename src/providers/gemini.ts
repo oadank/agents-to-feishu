@@ -403,6 +403,13 @@ export class GeminiProvider implements RuntimeProvider {
 
     // 🔴 票 hand-2（C 项）：阈值只算一次并复用，旧文案把"600s"写死在字符串里，env 一改就是谎话。
     const PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_GEMINI_PROMPT_TIMEOUT_MS || '600000', 10);
+    // 票 T-0003②（照 caf59ff 样板 60s 口径）：两级阈值分家 —— 零回包 = 疑引擎进程/网关不在，
+    // 首包阈值到点就定性（下面 catch 按 firstPktInS===null 复位 + 弃用假死进程）；
+    // 已经回过包 = 长任务在跑，给足 PROMPT_TIMEOUT_MS。旧写法零回包也要干等满整轮阈值。
+    const STALL_FIRST_MS = Math.min(
+      Math.max(parseInt(process.env.CTI_GEMINI_STALL_FIRST_MS || '60000', 10), 1000),
+      PROMPT_TIMEOUT_MS,
+    );
 
     // 发送 prompt（后台任务：gemini 的 session/prompt 响应只在 turn 结束返回，绝不能 await 它——
     // 否则流式事件（thought/tool/text）全堵死到 turn 结束才一次性吐出，卡片全程卡"思考中"、
@@ -414,11 +421,14 @@ export class GeminiProvider implements RuntimeProvider {
           sessionId,
           prompt: [{ type: 'text', text: fullPrompt }],
         }),
-        new Promise<never>((_, reject) => setTimeout(
+        new Promise<never>((_, reject) => {
           // 定性交给下面的 catch：这里只说"没等到 turn 结束信号"，不预设"无响应"这种结论
-          () => reject(new Error('[gemini] session/prompt 到点未收到 turn 结束信号（已释放队列）')),
-          PROMPT_TIMEOUT_MS,
-        )),
+          const fail = (): void => reject(new Error('[gemini] session/prompt 到点未收到 turn 结束信号（已释放队列）'));
+          setTimeout(() => {
+            if (firstEventAt === null) { fail(); return; } // 首包阈值到点仍零回包 ⇒ 当场定性，不再干等
+            setTimeout(fail, Math.max(0, PROMPT_TIMEOUT_MS - STALL_FIRST_MS)); // 已回包 ⇒ 续到整轮阈值
+          }, STALL_FIRST_MS);
+        }),
       ]);
       const usage = result._meta?.quota?.token_count;
       if (usage) {

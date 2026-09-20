@@ -208,6 +208,25 @@ function acpGatewayBaseUrl(agentId: string): string {
 }
 
 /**
+ * 票 T-0003②（照 caf59ff 样板 60s 口径）：首包阈值分家。
+ *
+ * "连首包都没到"与"吐到一半断流"是两件事：前者多半是引擎进程/网关压根不在，60s 就该定性并复位；
+ * 后者是长任务在跑（工具执行期间本来就不出流事件），给足各自的长阈值。caf59ff 先在 claude 上
+ * 立了这个口径（CTI_CLAUDE_STALL_FIRST_MS），这里把同族五家的键统一由配置中心渲染进
+ * config.<bot>.env —— 代码化下发，不在 provider 里写死单个数字（provider 侧仍留兜底默认值）。
+ *
+ * 键名 = CTI_<RUNTIME 大写>_STALL_FIRST_MS，与 provider 读的 process.env 同名。
+ * 运行时页的"启动环境覆盖"优先级更高（server.ts applyAgentArtifacts 把 runtimeEnv 合成进 globalExtra）。
+ */
+const STALL_FIRST_MS_BY_RUNTIME: Record<string, string> = {
+  claude: '60000',
+  codex: '60000',
+  zcode: '60000',
+  gemini: '60000',
+  hermes: '60000',
+};
+
+/**
  * 生成一个 agent 的 config.env 文本。
  * 包含：飞书凭证、runtime=dsh、显示名、model/provider 展示标签、MCP URL 全局键、harness/ACP 落点、端口。
  */
@@ -258,6 +277,14 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   {
     const realKey = (prov?.apiKeyEnv ? (readCredentialKey(prov.apiKeyEnv) || readOldEnvKey(prov.apiKeyEnv)) : '') || '';
     lines.push(`CTI_BOT_${agent.id.toUpperCase()}_API_KEY=${realKey}`);
+  }
+  // 首包阈值（票 T-0003②）：只给需要它的五家（claude/codex/zcode/gemini/hermes）下发，
+  // 其余 runtime 不写这行（键不存在 = provider 用自家兜底默认值）。
+  {
+    const stallFirst = STALL_FIRST_MS_BY_RUNTIME[agent.runtime || ''];
+    if (stallFirst) {
+      lines.push(`CTI_${(agent.runtime as string).toUpperCase()}_STALL_FIRST_MS=${stallFirst}`);
+    }
   }
   // MCP 穿透（2026-09-10 从 zcode 专属升为全 runtime 统一）：勾选的 MCP 池渲染成 JSON，
   // 各 provider 负责映射为各自 CLI 的 mcpServers/配置文件

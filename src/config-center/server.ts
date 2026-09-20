@@ -313,10 +313,16 @@ export function createConfigServer(opts: ConfigServerOptions) {
       'ANTHROPIC_PERMISSION_MODE': 'bypassPermissions',   // 全能力、最全权限、自动审批（不弹确认）
       'CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT': '1', // 消第三方模型不识别告警
       'CLAUDE_CODE_MAX_CONTEXT_TOKENS': '1000000', // 第三方 1M 上下文
+      'CTI_CLAUDE_STALL_FIRST_MS': '60000', // 首包阈值（毫秒）：本轮连首包都没到即判引擎不在（T-0003②，样板 caf59ff）
+    },
+    codex: {
+      // codex 的 model/端点由配置中心 syncModelToCli 自动写 config.toml，这里只放看门狗阈值
+      'CTI_CODEX_STALL_FIRST_MS': '60000', // 首包阈值（毫秒）：本轮连首包都没到即判引擎不在（T-0003②，样板 caf59ff）
     },
     zcode: {
       'CTI_ZCODE_CLI': '',                 // zcode.cjs 路径（默认留空 → 探测 Program Files 标准安装位）
       'CTI_ZCODE_STALL_MS': '300000',      // 流空闲看门狗：5min 零事件判卡死（长任务可调大）
+      'CTI_ZCODE_STALL_FIRST_MS': '60000', // 首包阈值（毫秒）：本轮连首包都没到即判引擎不在（T-0003②，样板 caf59ff）
       'CTI_ZCODE_THINK_HEAD': '400',       // 流式思考转发上限：防💭滑动窗口高频全换（闪烁根因）
     },
     opencode: {
@@ -329,6 +335,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
       'CTI_GEMINI_BASE_URL': '',           // 默认留空 → 用所选 provider 网关
       'CTI_GEMINI_API_KEY': '',            // 默认留空 → 凭证层读取
       'CTI_GEMINI_PROMPT_TIMEOUT_MS': '',  // 留空 → provider 内部默认
+      'CTI_GEMINI_STALL_FIRST_MS': '60000', // 首包阈值（毫秒）：本轮连首包都没到即判引擎不在（T-0003②，样板 caf59ff）
     },
     openakita: {
       'CTI_OPENAKITA_SERVER': '',          // ACP server 脚本（默认留空 → 项目 scripts/ 相对路径）
@@ -347,6 +354,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
     },
     hermes: {
       'CTI_HERMES_CLI_PATH': '',           // hermes CLI 路径（默认留空 → PATH 查找）
+      'CTI_HERMES_STALL_FIRST_MS': '60000', // 首包阈值（毫秒）：本轮连首包都没到即判引擎不在（T-0003②，样板 caf59ff）
     },
     dsh: {
       'CTI_DSH_HARNESS_PATH': '',          // DeepSeek Harness 根目录（默认留空 → 探测/运行时页手填）
@@ -367,8 +375,11 @@ export function createConfigServer(opts: ConfigServerOptions) {
     'ANTHROPIC_PERMISSION_MODE': '自动跳过审批 / 最大权限运行',
     'CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT': '消除未知模型告警',
     'CLAUDE_CODE_MAX_CONTEXT_TOKENS': '最大上下文 tokens',
+    'CTI_CLAUDE_STALL_FIRST_MS': '首包阈值（毫秒）：连首包都没到即判引擎不在',
+    'CTI_CODEX_STALL_FIRST_MS': '首包阈值（毫秒）：连首包都没到即判引擎不在',
     'CTI_ZCODE_CLI': 'zcode.cjs 路径（留空=自动探测）',
     'CTI_ZCODE_STALL_MS': '流空闲看门狗（毫秒）',
+    'CTI_ZCODE_STALL_FIRST_MS': '首包阈值（毫秒）：连首包都没到即判引擎不在',
     'CTI_ZCODE_THINK_HEAD': '流式思考转发上限（字符）',
     'CTI_OPENCODE_EXEC': 'opencode.exe 路径（留空=自动探测）',
     'CTI_OPENCODE_TIMEOUT_MS': '单轮卡死看门狗（毫秒）',
@@ -377,6 +388,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
     'CTI_GEMINI_BASE_URL': '网关 URL（留空=用所选 provider）',
     'CTI_GEMINI_API_KEY': 'API key（留空=凭证层读取）',
     'CTI_GEMINI_PROMPT_TIMEOUT_MS': 'prompt 超时（毫秒，留空=默认）',
+    'CTI_GEMINI_STALL_FIRST_MS': '首包阈值（毫秒）：连首包都没到即判引擎不在',
     'CTI_OPENAKITA_SERVER': 'ACP server 脚本路径',
     'CTI_OPENAKITA_WORKSPACE': '工作空间目录（留空=默认）',
     'CTI_OPENCLAW_EXEC': 'openclaw.exe 路径（留空=自动探测）',
@@ -385,6 +397,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
     'CTI_REASONIX_EXEC': 'reasonix-cli.exe 路径（留空=自动探测）',
     'CTI_REASONIX_TIMEOUT_MS': 'prompt 超时（毫秒，留空=默认）',
     'CTI_HERMES_CLI_PATH': 'hermes CLI 路径（留空=PATH 查找）',
+    'CTI_HERMES_STALL_FIRST_MS': '首包阈值（毫秒）：连首包都没到即判引擎不在',
     'CTI_DSH_HARNESS_PATH': 'DeepSeek Harness 根目录',
     'CTI_DEEPTUTOR_TOKEN': 'Bearer Token（多用户鉴权部署才填）',
   };
@@ -787,11 +800,13 @@ export function createConfigServer(opts: ConfigServerOptions) {
               pushMeta('ANTHROPIC_PERMISSION_MODE', 'bypassPermissions');
               pushMeta('CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT', '1');
               pushMeta('CLAUDE_CODE_MAX_CONTEXT_TOKENS', '1000000');
+              pushMeta('CTI_CLAUDE_STALL_FIRST_MS', '60000');
               break;
             case 'zcode':
               pushMeta('CTI_ZCODE_CLI', resolvedPath, { note: '留空=自动探测桌面版内置 CLI' });
               pushMeta('CTI_ZCODE_STALL_MS', '300000');
               pushMeta('CTI_ZCODE_THINK_HEAD', '400');
+              pushMeta('CTI_ZCODE_STALL_FIRST_MS', '60000');
               break;
             case 'opencode':
               pushMeta('CTI_OPENCODE_EXEC', resolvedPath, { note: '留空=自动探测 npm 全局位置' });
@@ -803,6 +818,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
               pushMeta('CTI_GEMINI_BASE_URL', rtProv?.baseURL || 'http://127.0.0.1:4000', { note: '留空=跟随 Agent 所选 Provider' });
               pushMeta('CTI_GEMINI_API_KEY', maskKey(readCredentialKey(rtProv?.apiKeyEnv || 'LITELLM_API_KEY') || readOldEnvKey(rtProv?.apiKeyEnv || 'LITELLM_API_KEY')), { secret: true, note: '留空=凭证层自动读取' });
               pushMeta('CTI_GEMINI_PROMPT_TIMEOUT_MS', '600000');
+              pushMeta('CTI_GEMINI_STALL_FIRST_MS', '60000');
               break;
             case 'openakita':
               pushMeta('CTI_OPENAKITA_SERVER', resolvedPath, { note: '留空=项目 scripts/ 内置脚本' });
@@ -821,6 +837,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
               break;
             case 'hermes':
               pushMeta('CTI_HERMES_CLI_PATH', resolvedPath, { note: '留空=PATH 查找' });
+              pushMeta('CTI_HERMES_STALL_FIRST_MS', '60000');
               break;
             case 'dsh':
               pushMeta('CTI_DSH_HARNESS_PATH', resolvedPath.replace(/\\packages\\examples\\acp-demo\\src\\bin\.ts$/, ''), { note: 'DeepSeek Harness 根目录' });
@@ -839,6 +856,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
               pushMeta('codex.model_reasoning_effort', tomlVal('model_reasoning_effort') || '（未生成）', { readonly: true, note: '思考强度随 Agent「思考深度」设置（关闭=minimal）' });
               pushMeta('codex.model_max_output_tokens', tomlVal('model_max_output_tokens') || '（未生成）', { readonly: true, note: '最大输出 tokens' });
             } catch { pushMeta('codex.model', '（未安装 codex）', { readonly: true }); }
+            pushMeta('CTI_CODEX_STALL_FIRST_MS', '60000');
             break;
           }
           case 'deeptutor':

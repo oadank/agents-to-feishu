@@ -254,6 +254,8 @@ interface TurnSink {
   sessionId: string;
   emit: (ev: StreamEvent) => void;
   lastEventAt: number;
+  /** 票 T-0003②：本轮是否收到过任何引擎事件（首包到没到 ⇒ 看门狗用 FIRST 还是长阈值） */
+  gotEvent: boolean;
   /** 本轮是否已发过 usage（telemetry usage.delta 先到则 turn.completed 不重复发） */
   usageSent: boolean;
   /** 思考流策略（2026-09-05 二次修复）：GLM 工具循环每轮都出新思考，💭尾部滑动窗口会整窗
@@ -290,6 +292,9 @@ export class ZcodeProvider implements RuntimeProvider {
   private spawnPromise: Promise<ChildProcess> | null = null;
 
   private static STALL_MS = parseInt(process.env.CTI_ZCODE_STALL_MS || '300000', 10);
+  /** 票 T-0003②（照 caf59ff 样板 60s 口径）：本轮连首包都没到就只等这个 —— 疑引擎进程/网关不在；
+   *  已收到过引擎事件则按 STALL_MS 长阈值放行（工具执行期间本来就不出流事件，别误杀长任务）。 */
+  private static STALL_FIRST_MS = parseInt(process.env.CTI_ZCODE_STALL_FIRST_MS || '60000', 10);
 
   async prepare(): Promise<void> {
     try { await this.ensureProcess(); }
@@ -524,6 +529,7 @@ export class ZcodeProvider implements RuntimeProvider {
     const sink = this.turns.get(sessionId);
     if (!sink) return; // 非活跃轮（历史/其他会话）忽略
     sink.lastEventAt = Date.now();
+    sink.gotEvent = true; // 票 T-0003②：引擎说话了 ⇒ 看门狗切长阈值
     const type = String(env.type || '');
     const payload = env.payload ?? {};
 
@@ -627,6 +633,7 @@ export class ZcodeProvider implements RuntimeProvider {
     const sink = this.turns.get(sessionId);
     if (!sink) return;
     sink.lastEventAt = Date.now();
+    sink.gotEvent = true; // 票 T-0003②：引擎说话了 ⇒ 看门狗切长阈值
     const input = Number(params.inputTokens ?? 0);
     const output = Number(params.outputTokens ?? 0);
     if (input <= 0 && output <= 0) return;
@@ -801,6 +808,7 @@ export class ZcodeProvider implements RuntimeProvider {
       sessionId: session.sessionId,
       emit: (ev) => { queue.push(ev); poke(); },
       lastEventAt: Date.now(),
+      gotEvent: false,
       usageSent: false,
       reasoningBuf: '',
       reasoningFull: '',
@@ -815,13 +823,17 @@ export class ZcodeProvider implements RuntimeProvider {
     };
     this.turns.set(session.sessionId, sink);
 
-    // 空闲看门狗：STALL_MS 内零事件 → session/stop + 报错收尾（活跃生成/工具事件持续刷新 lastEventAt，不误杀长任务）
+    // 空闲看门狗（票 T-0003② 两级阈值）：零事件满 STALL_FIRST_MS 即判"首包未到，疑进程/网关不在"，
+    // 已收到过引擎事件则按 STALL_MS 长阈值放行（活跃生成/工具事件持续刷新 lastEventAt，不误杀长任务）。
     const watchdog = setInterval(() => {
       if (settled) { clearInterval(watchdog); return; }
-      if (Date.now() - sink.lastEventAt > ZcodeProvider.STALL_MS) {
+      const limit = sink.gotEvent ? ZcodeProvider.STALL_MS : ZcodeProvider.STALL_FIRST_MS;
+      if (Date.now() - sink.lastEventAt > limit) {
         clearInterval(watchdog);
         try { this.request('session/stop', { sessionId: session.sessionId }, 8000).catch(() => {}); } catch { /* 忽略 */ }
-        sink.settle(`ZCode 连续 ${Math.round(ZcodeProvider.STALL_MS / 1000)}s 无事件，已中断本轮`);
+        sink.settle(sink.gotEvent
+          ? `ZCode 连续 ${Math.round(limit / 1000)}s 无事件，已中断本轮`
+          : `ZCode 本轮 ${Math.round(limit / 1000)}s 连首包都没到（疑引擎进程/网关不在），已中断本轮；下条消息会自动重建`);
         this.turns.delete(session.sessionId);
       }
     }, 15_000);
