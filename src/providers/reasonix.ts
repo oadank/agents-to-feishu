@@ -466,7 +466,7 @@ export class ReasonixProvider implements RuntimeProvider {
           poke();
         }
       },
-      onDone: (err?: string) => { if (err) settleErr = err; settled = true; resolveSettled(); },
+      onDone: (err?: string) => { if (settled) return; /* 票 hand-3：首个终态为准（否则收口唤醒会被迟到事件盖成假错误） */ if (err) settleErr = err; settled = true; resolveSettled(); },
     };
     this.activePrompt = promptHandler;
 
@@ -485,9 +485,12 @@ export class ReasonixProvider implements RuntimeProvider {
         if (msg.error) promptHandler.onDone(msg.error.message || JSON.stringify(msg.error));
         else promptHandler.onDone();
       },
-      () => {
+      (err: unknown) => {
         if (this.activePrompt === promptHandler) this.activePrompt = null;
-        promptHandler.onDone('ACP prompt 响应超时');
+        // 票 hand-3④：原因说实话。原先不分起因一律写"ACP prompt 响应超时"，
+        // 进程丢失/管道报错都被这句盖成谎话（老大 09-20 令：文案要说实话）。
+        const em = err instanceof Error ? err.message : "";
+        promptHandler.onDone(/timeout/i.test(em) ? "Reasonix 引擎本轮未回 prompt 响应（请求超时）" : (em || "Reasonix ACP prompt 响应异常"));
       },
     );
 

@@ -480,7 +480,7 @@ export class OpenClawProvider implements RuntimeProvider {
           rtLog(`[openclaw] session/update 未处理类型: ${update.sessionUpdate}`);
         }
       },
-      onDone: (err?: string) => { if (err) settleErr = err; settled = true; resolveSettled(); },
+      onDone: (err?: string) => { if (settled) return; /* 票 hand-3：首个终态为准（否则收口唤醒会被迟到事件盖成假错误） */ if (err) settleErr = err; settled = true; resolveSettled(); },
     };
     this.activePrompt = promptHandler;
 
@@ -499,9 +499,12 @@ export class OpenClawProvider implements RuntimeProvider {
         if (msg.error) promptHandler.onDone(msg.error.message || JSON.stringify(msg.error));
         else promptHandler.onDone();
       },
-      () => {
+      (err: unknown) => {
         if (this.activePrompt === promptHandler) this.activePrompt = null;
-        promptHandler.onDone('ACP prompt 响应超时');
+        // 票 hand-3④：原因说实话。原先不分起因一律写"ACP prompt 响应超时"，
+        // 进程丢失/管道报错都被这句盖成谎话（老大 09-20 令：文案要说实话）。
+        const em = err instanceof Error ? err.message : "";
+        promptHandler.onDone(/timeout/i.test(em) ? "OpenClaw 引擎本轮未回 prompt 响应（请求超时）" : (em || "OpenClaw ACP prompt 响应异常"));
       },
     );
 
@@ -528,7 +531,9 @@ export class OpenClawProvider implements RuntimeProvider {
         // 2026-08-30 加固：首 token 死线——gateway 失败时不回 ACP 响应 ⇒ 静默；
         // 与其傻等 300s，快速失败并指路 gateway 日志
         clearInterval(watchdog);
-        promptHandler.onDone(`OpenClaw ACP 无输出（${OpenClawProvider.FIRST_OUTPUT_TIMEOUT_MS / 1000}s 零响应，疑似模型调用失败，详见 ~/.openclaw/logs/gateway.stderr.log）`);
+        // 票 hand-3⑤：原文案"疑似模型调用失败，详见 gateway.stderr.log"把自家 ACP 静默
+        // 推给 gateway，这几天每次卡死都被这行字引去查网关。改成实话 + 讲清已自愈。
+        promptHandler.onDone(`OpenClaw 引擎本轮无响应（发出 prompt 后 ${OpenClawProvider.FIRST_OUTPUT_TIMEOUT_MS / 1000}s 零输出）—— 已复位常驻把手，下一条消息会自动重建引擎`);
         rtLog(`[openclaw] first-output deadline promptId=${promptId}`);
       }
     }, 15_000);
