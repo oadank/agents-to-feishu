@@ -257,7 +257,8 @@ export function claimTask(id: string, input: { by?: string; baseRev?: number; ta
     }
     t.status = 'doing';
     t.rev += 1;
-    if (t.owner === 'unassigned' || !t.owner) t.owner = by;
+    // [09-20 看板缺陷根治] 建账占位历来是中文'待领'，旧判定只认 'unassigned' ⇒ claim 永不落名。
+    if (!t.owner || t.owner === 'unassigned' || t.owner === '待领') t.owner = by;
     touch(b, t, { by, action: 'claim', from, to: 'doing' });
     saveBoard(b);
     return { ok: true, globalRev: b.globalRev, task: t };
