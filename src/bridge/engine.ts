@@ -132,8 +132,10 @@ function extractGeneratedImagePaths(output: string): string[] {
 }
 
 /** 从 ~/.dsh/<bot>/stats/YYYY-MM-DD.jsonl 读缓存命中率与上下文用量。
- *  传入 sessionId 时只统计该对话的累计（按当前对话算），否则全量统计（按天）。 */
-function readCacheStats(contextLimitTokens: number, sessionId?: string): { lastRate: number; avgRate: number; contextPercent: number; contextUsed: number; contextLimit: number } | null {
+ *  传入 sessionId 时只统计该对话的累计（按当前对话算），否则全量统计（按天）。
+ *  [票mm-1·09-19 审计] lastRate/avgRate 可为 null = 本会话所有 usage 记录都没有缓存拆分
+ *  （引擎未上报 cache 字段），调用方应显示 N/A 而非 0%；整体返回 null = 完全无源（照旧隐藏该段）。 */
+export function readCacheStats(contextLimitTokens: number, sessionId?: string): { lastRate: number | null; avgRate: number | null; contextPercent: number; contextUsed: number; contextLimit: number } | null {
   try {
     // stats 目录：优先用 CTI_BOT 确定（对所有 runtime 通用，claude/codex 等非 dsh 也读自己的 stats）；
     // 兜底再走 CTI_DSH_ACP_CONFIG 解析（老 dsh 逻辑），最后 fallback dsh-bot。
@@ -157,6 +159,7 @@ function readCacheStats(contextLimitTokens: number, sessionId?: string): { lastR
     let sumHit = 0;
     let sumMiss = 0;
     let lastPromptTokens: number | null = null;
+    let matched = 0;
     const CONTEXT_LIMIT_TOKENS = contextLimitTokens > 0 ? contextLimitTokens : 1_000_000;
     const lines = fs.readFileSync(file, 'utf-8').split('\n');
     for (const line of lines) {
@@ -166,19 +169,25 @@ function readCacheStats(contextLimitTokens: number, sessionId?: string): { lastR
       if (rec.source !== 'cli') continue;
       // 按当前对话统计：指定了 sessionId 就只算该对话的记录
       if (sessionId && rec.session !== sessionId) continue;
+      matched++;
       const hit = Number(rec.cache_hit ?? 0);
       const miss = Number(rec.cache_miss ?? 0);
-      if (hit + miss <= 0) continue;
+      // [票mm-1] 📚上下文计数与命中率解耦：无缓存拆分的记录（hit=miss=0）照常参与上下文统计
+      if (rec.prompt != null && Number(rec.prompt) > 0) lastPromptTokens = Number(rec.prompt);
+      if (hit + miss <= 0) continue; // 分母判 0：无拆分记录不进命中率
       lastRate = (hit / (hit + miss)) * 100;
       sumHit += hit;
       sumMiss += miss;
-      if (rec.prompt != null && Number(rec.prompt) > 0) lastPromptTokens = Number(rec.prompt);
     }
-    if (lastRate == null || sumHit + sumMiss <= 0) return null;
-    const avgRate = (sumHit / (sumHit + sumMiss)) * 100;
     const contextPercent = lastPromptTokens != null
       ? Math.min(100, (lastPromptTokens / CONTEXT_LIMIT_TOKENS) * 100)
       : 0;
+    if (lastRate == null) {
+      // [票mm-1] 有记录但全都没缓存拆分 → 返回 null 率（卡尾显示 N/A）；完全无源 → null（照旧隐藏）
+      if (matched <= 0) return null;
+      return { lastRate: null, avgRate: null, contextPercent, contextUsed: lastPromptTokens ?? 0, contextLimit: CONTEXT_LIMIT_TOKENS };
+    }
+    const avgRate = (sumHit / (sumHit + sumMiss)) * 100;
     return { lastRate, avgRate, contextPercent, contextUsed: lastPromptTokens ?? 0, contextLimit: CONTEXT_LIMIT_TOKENS };
   } catch {
     return null;

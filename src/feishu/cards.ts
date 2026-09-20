@@ -50,8 +50,9 @@ export interface DividerInfo {
   dir?: string;
   /** 状态栏样式（2026-08-30 二选一）：icon=每段只图标 | text=每段只文字 */
   dividerMode?: 'full' | 'icon' | 'text' | 'value';
-  cacheHitRate?: number;
-  cacheAvgRate?: number;
+  /** [票mm-1·09-19 审计] null=引擎未上报缓存拆分（卡尾该段显示 N/A，不是 0%）；undefined=无源照旧 */
+  cacheHitRate?: number | null;
+  cacheAvgRate?: number | null;
   /** 上下文占用（百分比 + 已用/上限 tokens） */
   contextPercent?: number;
   contextUsed?: number;
@@ -89,6 +90,9 @@ export function buildDividerText(info: DividerInfo): string {
   };
   const usageStr = (): string | null =>
     info.usage && info.usage.length ? info.usage.map((u) => `${u.label}${u.pct}%`).join(' ') : null;
+  // [票mm-1] 命中率统一出口：number→x.xx% ｜ null（引擎无缓存拆分）→N/A ｜ undefined（无源）→隐藏该段
+  const rateOrNA = (v: number | null | undefined): string | null =>
+    v === undefined ? null : v === null ? 'N/A' : `${v.toFixed(2)}%`;
 
   if (textMode) {
     // 文字版：每段带状态说明前缀
@@ -96,8 +100,8 @@ export function buildDividerText(info: DividerInfo): string {
     if (show('model') && info.model) parts.push(`Model: ${info.model}`);
     if (show('provider') && info.provider) parts.push(`Provider: ${info.provider}`);
     if (show('session') && info.session) parts.push(`Session: ${info.session}`);
-    if (show('cache') && info.cacheHitRate != null) parts.push(`Cache: ${info.cacheHitRate.toFixed(2)}%`);
-    if (show('avg') && info.cacheAvgRate != null) parts.push(`平均: ${info.cacheAvgRate.toFixed(2)}%`);
+    if (show('cache')) { const s = rateOrNA(info.cacheHitRate); if (s) parts.push(`Cache: ${s}`); }
+    if (show('avg')) { const s = rateOrNA(info.cacheAvgRate); if (s) parts.push(`平均: ${s}`); }
     const u = usageStr(); if (show('usage') && u) parts.push(`Usage: ${u}`);
     const b = balanceStr(); if (show('balance') && b) parts.push(`Balance: ${b}`);
   } else if (valueMode) {
@@ -106,8 +110,8 @@ export function buildDividerText(info: DividerInfo): string {
     if (show('model') && info.model) parts.push(info.model);
     if (show('provider') && info.provider) parts.push(info.provider);
     if (show('session') && info.session) parts.push(info.session);
-    if (show('cache') && info.cacheHitRate != null) parts.push(`${info.cacheHitRate.toFixed(2)}%`);
-    if (show('avg') && info.cacheAvgRate != null) parts.push(`${info.cacheAvgRate.toFixed(2)}%`);
+    if (show('cache')) { const s = rateOrNA(info.cacheHitRate); if (s) parts.push(s); }
+    if (show('avg')) { const s = rateOrNA(info.cacheAvgRate); if (s) parts.push(s); }
     const u = usageStr(); if (show('usage') && u) parts.push(`⏱️ ${u}`);
     const b = balanceStr(); if (show('balance') && b) parts.push(b);
   } else {
@@ -121,8 +125,9 @@ export function buildDividerText(info: DividerInfo): string {
     push('provider', DIV_IC.provider, info.provider);
     push('dir', DIV_IC.dir, info.dir);
     push('session', DIV_IC.session, info.session);
-    push('cache', DIV_IC.cache, info.cacheHitRate != null ? info.cacheHitRate.toFixed(2) + '%' : null);
-    push('avg', DIV_IC.avg, info.cacheAvgRate != null ? info.cacheAvgRate.toFixed(2) + '%' : null);
+    // [票mm-1] null=无缓存拆分→"N/A"；undefined=无源→只剩图标（旧行为）
+    push('cache', DIV_IC.cache, rateOrNA(info.cacheHitRate));
+    push('avg', DIV_IC.avg, rateOrNA(info.cacheAvgRate));
     if (show('context') && info.contextPercent != null) {
       const used = info.contextUsed ?? 0;
       const limit = info.contextLimit ?? 0;

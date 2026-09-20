@@ -58,13 +58,13 @@ export function recordStats(
     let miss = cacheWrite;
     let input = Number(usage.inputTokens ?? 0);
     if (hit + miss <= 0) {
-      // 2026-08-30 兜底：后端不报缓存拆分（只有 input）时按全 miss 记账——
-      // 保证状态条 🎯/🟰 有基线显示（真实命中率需后端上报缓存字段才有意义）
+      // [票mm-1·09-19 审计] 撤销 2026-08-30"不报缓存拆分按全 miss 记账"兜底：
+      // 该写法让 QW3.8F 等 litellm 中转家卡尾恒显 0.00%，被误读为"零命中=不省"。
+      // 真无拆分数据就不该有命中率——记 hit=0/miss=0（分母 0），读侧（readCacheStats）
+      // 跳过命中率统计、📚上下文照常计数，卡尾该段显示 N/A。
       if (input <= 0) return;
-      miss = input;
-      input = 0; // 已计入 miss，不再重复
     }
-    if (hit + miss <= 0) return;
+    if (hit + miss + input <= 0) return;
     const completion = Number(usage.outputTokens ?? 0);
 
     const statsDir = resolveStatsDir();
