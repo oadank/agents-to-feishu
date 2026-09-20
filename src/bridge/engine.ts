@@ -793,7 +793,7 @@ export class MessageEngine {
       // 老会话不知道【语音】块约定 ⇒ TTS 对老会话失效，实测 claude/dsh 语音回复=0）
       const VOICE_RULE_TURN = '\n\n[回复格式提醒] 若用户发来的是语音、或明确要求语音回复（如"用语音回答"）：在回复末尾追加一个【语音】块——单独一行"【语音】"，下一行写口语文本（禁 markdown/代码/表格）；未被要求时不写该块。';
       const turnStartTs = Date.now(); // litellm 中转 bot 补拉用量用（按时间窗过滤记账库）
-      let gotRealUsage = false; // 只有"非全 0"的 usage 事件才算真实（gemini CLI 恒发 0 值事件）
+      let gotRealUsage = false; // [票mm-1] 判据=usage 事件输入侧有量（能落盘 stats）才算真实；gemini 恒 input=0 → 放行补拉
       for await (const ev of provider.streamChat({
         text: `${text}${provider.name === 'deeptutor' ? '' : VOICE_RULE_TURN}`,
         // [2026-09-03] deeptutor 语音标记：attachments 带 audio 项 = 本轮来自语音
@@ -926,7 +926,12 @@ export class MessageEngine {
             console.log(`[engine] deeptutor 成品待投递: ${ev.filename} (${ev.mime_type})`);
             break;
           case 'usage':
-            if (ev.usage.inputTokens + ev.usage.outputTokens + (ev.usage.cacheReadTokens ?? 0) > 0) gotRealUsage = true;
+            // [票mm-1·USAGE-AUDIT-0919 附注2] "真实"判据=事件能否落盘 stats：recordStats 需要 input 侧
+            // 有量（hit=cacheRead / miss=cacheWrite / input 至少其一 >0）才写得出记录。gemini 的
+            // _meta.quota 只报 output（input 恒 0，09-19 案 acpSessionId=9f71fae1：事件置了 divider
+            // 过滤 id 却写不进任何记录，补拉又被旧判据的 output>0 掐掉 → 卡尾恒空白）。
+            // 故只按输入侧计真实；纯 output 事件放行 litellm 补拉兜底。
+            if ((ev.usage.inputTokens ?? 0) + (ev.usage.cacheReadTokens ?? 0) + (ev.usage.cacheWriteTokens ?? 0) > 0) gotRealUsage = true;
             if (ev.sessionId) { acpSessionId = ev.sessionId; console.log(`[engine][usage] sessionId=${ev.sessionId.slice(0,8)} hit=${ev.usage.cacheReadTokens} input=${ev.usage.inputTokens}`); }
             this.opts.sessions.recordUsage(session, ev.usage);
             // 统一落盘 stats：所有 provider 只要发 usage 事件就写 ~/.dsh/<bot>-bot/stats/*.jsonl，
