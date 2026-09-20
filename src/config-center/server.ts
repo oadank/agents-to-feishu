@@ -40,6 +40,8 @@ import { scanChatsMap } from './chats-map-scan.js';
 import { buildAgentRuntimeState, type AgentRuntimeState } from './runtime.js';
 // 团队任务账（2026-09-20）：一本账 + 版本号 + 状态机，见 taskboard.ts。独立落盘，不碰 config-store。
 import { createTask, claimTask, updateTask, listTasks, getTask, boardSummary } from './taskboard.js';
+// 派活闸门计数与档位（桥侧强制执行，中心只管看总账和切档）
+import { readAllGateStats, currentMode, type GateMode } from '../bridge/task-gate.js';
 import { lookImage } from '../vision/look.js';
 import {
   synthesize, synthesizeVoiceClone, AUDIO8_DIR, AUDIO8_VOICES_DIR, AUDIO8_PY, type TtsConfig,
@@ -651,6 +653,22 @@ export function createConfigServer(opts: ConfigServerOptions) {
       }
       if (p === '/api/tasks/board' && method === 'GET') {
         return json(res, 200, boardSummary());
+      }
+      // 派活闸门：读总账（聚合各家计数）+ 切档（enforce/observe/off，存 settings.taskGate）
+      if (p === '/api/tasks/gate' && method === 'GET') {
+        return json(res, 200, { ok: true, mode: currentMode(), ...readAllGateStats() });
+      }
+      if (p === '/api/tasks/gate' && method === 'PUT') {
+        const body = JSON.parse((await readBody(req)) || '{}') as { mode?: string };
+        const raw = String(body.mode ?? '').toLowerCase();
+        if (raw !== 'enforce' && raw !== 'observe' && raw !== 'off') {
+          return json(res, 200, { ok: false, error: '档位只认 enforce / observe / off' });
+        }
+        const store = load();
+        store.settings = { ...(store.settings ?? {}), taskGate: raw as GateMode };
+        save(store);
+        log(`任务账闸门档位 → ${raw}`);
+        return json(res, 200, { ok: true, mode: raw });
       }
       if (p === '/api/tasks' && method === 'POST') {
         const body = JSON.parse((await readBody(req)) || '{}');

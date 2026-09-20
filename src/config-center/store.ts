@@ -188,7 +188,11 @@ export interface AgentDef {
 /** 顶层 config-store.json */
 export interface ConfigStore {
   /** 全局开关（2026-08-31）：群聊仅 @ 本 bot 才回复（默认 true） */
-  settings?: { groupMentionOnly?: boolean };
+  settings?: {
+    groupMentionOnly?: boolean;
+    /** 派活闸门档位（2026-09-20）：enforce=拦（默认）| observe=只记账 | off=全放 */
+    taskGate?: 'enforce' | 'observe' | 'off';
+  };
   version: number;
   providers: ProviderDef[];
   mcps: McpDef[];

@@ -135,6 +135,10 @@ export interface LarkBuiltinTool {
 }
 
 
+/** 派活闸门（2026-09-20）：bot→bot 唯一派活通道上的强制点，见 src/bridge/task-gate.ts 注释。
+ *  放在这里而不是各处发消息函数：人类聊天/群里 @ 人都不走这条分支，误伤面最小。 */
+import { gateBotDispatch } from '../bridge/task-gate.js';
+
 /** 2026-08-31 自动回执：以用户身份给指定 agent 发文本（tool 与桥接自动转发共用）。
  *  text 由调用方组装；本函数负责 agentId→私聊 chat_id 解析（翻全页）+ 发送。 */
 export async function sendAsUserToBot(to: string, text: string): Promise<void> {
@@ -396,6 +400,9 @@ export function buildLarkTools(ctx: LarkToolCtx): LarkBuiltinTool[] {
           // 2026-08-31 自动回执：bot 间消息附标记，接收方桥接检测后自动把其回复转发回来（模型零纪律）
           const to = String(args.to);
           const fromBot = process.env.CTI_BOT || 'unknown';
+          // 闸门：像派活却没任务号 → 直接拒发（enforce），并把过法回给 bot。观察/关闭档只记账。
+          const gate = gateBotDispatch({ to, text, fromBot });
+          if (!gate.allow) throw new Error(gate.reason);
           markManualReceipt(); // 本 bot 主动用工具发消息 → onReplySent 跳过自动转发（防双份）
           const marked = `${text}\n\n(from-bot:${fromBot} · 直接回复本消息即可，桥接自动转达，勿调 send_as_user)`;
           await sendAsUserToBot(to, marked);
