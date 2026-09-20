@@ -354,6 +354,43 @@ export class ReasonixProvider implements RuntimeProvider {
     if (!sessionId) throw new Error('Reasonix ACP session/new: missing sessionId');
 
     rtLog(`[reasonix] session/new OK: ${sessionId.slice(0, 8)}`);
+
+    // 票 rx-4（老大 09-20 令：「reasonix 必须用 danger-full-access，不然我就删掉它」）
+    // 背景：Windows 上 ACP 新会话默认权限档 = workspace-write（session/new 的 configOptions
+    // 里 currentValue 实证），其受限令牌沙箱后端在本机起不来 —— 实测 ACP 路径 bash 恒
+    // `exit 126` / `preflight >10s 超时`，High/Medium IL 双挂；删 pwsh 的 RUNASADMIN 层
+    // 亦无效（已实验证伪并原样撤回）。结果＝reasonix 在飞书侧完全不能跑命令。
+    // 引擎不在 ACP 协商 permission-presets-v1，但 configOptions 暴露了 tool_approval 这个
+    // select ⇒ 用标准 ACP 方法按会话切档（preset 是 per-session，故放在建会话里，天然覆盖
+    // 进程重启 / LRU 回收后重建的每一次）。
+    // 代价（写明白）：这一家 bot 的 bash 以当前 OS 用户裸跑、无文件系统/网络 OS 隔离。
+    // 回退：环境变量 CTI_REASONIX_PERMISSION_MODE=off（或换 workspace-write / read-only）。
+    const wantMode = (process.env.CTI_REASONIX_PERMISSION_MODE || 'danger-full-access').trim();
+    if (wantMode && wantMode !== 'off') {
+      const cfgOpts = (msg.result as { configOptions?: Array<{ id?: string }> } | undefined)?.configOptions;
+      if (cfgOpts?.some((o) => o?.id === 'tool_approval')) {
+        const cfgId = this.nextId++;
+        if (this.writeStdin(child, {
+          jsonrpc: '2.0', id: cfgId, method: 'session/set_config_option',
+          params: { sessionId, configId: 'tool_approval', value: wantMode },
+        }, 'session/set_config_option')) {
+          try {
+            const cm = await this.waitResponse(cfgId, 10_000);
+            const now = ((cm.result as { configOptions?: Array<{ id?: string; currentValue?: string }> })?.configOptions || [])
+              .find((o) => o?.id === 'tool_approval')?.currentValue;
+            rtLog(`[reasonix] tool_approval -> ${wantMode} (now=${now ?? 'unknown'})`);
+            if (now !== wantMode) console.warn(`[engine][reasonix] 权限档未生效：期望 ${wantMode} 实际 ${now ?? 'unknown'}，bash 可能仍被沙箱拦下`);
+          } catch (e) {
+            rtLog(`[reasonix] set_config_option 无回音，暂用默认档: ${e instanceof Error ? e.message : e}`);
+            console.warn('[engine][reasonix] set_config_option 超时，bash 可能仍 126');
+          }
+        }
+      } else {
+        rtLog('[reasonix] session/new 未回 configOptions.tool_approval —— 无法切权限档');
+        console.warn('[engine][reasonix] configOptions 里没有 tool_approval，权限档未发');
+      }
+    }
+
     this.pruneOldSessions();
     return { sessionId, cwd, lastUsed: Date.now(), personaInjected: false };
   }
