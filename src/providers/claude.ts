@@ -105,7 +105,12 @@ function savedSessionFileExists(id: string): boolean {
  *   zcode-provider.ts:543-565 的 pendingRetryPrompt 重投模式），指数退避 1s/2s/4s，最多 MAX_RETRIES 次。
  */
 const MAX_RETRIES = Number(process.env.CTI_CLAUDE_MAX_RETRIES ?? 3);
-const STALL_MS = Number(process.env.CTI_CLAUDE_STALL_MS ?? 300_000); // 5min 零事件 → 判定卡死
+const STALL_MS = Number(process.env.CTI_CLAUDE_STALL_MS ?? 300_000); // 5min 零事件 → 判定卡死（已开吐字的长任务）
+// 票 claude-1（2026-09-20 老大令"根治 claude"）：首包阈值与进程丢失识别。
+// 原设计无论有没有开始吐字一律死等 300s，且重试只重投 prompt 不重建进程 ⇒
+// 引擎子进程静默退出后，用户要等 15 分钟才看到"网关约 300s 无响应"（还是口甩锅文案）。
+const STALL_FIRST_MS = Number(process.env.CTI_CLAUDE_STALL_FIRST_MS ?? 60_000); // 60s 连首包都没有 → 疑进程不在
+const PROCESS_LOST_RE = /引擎进程已退出|引擎本轮无响应|Claude 进程已释放/;
 /** 瞬态、可重试的错误特征（出现在 error 事件 message 里：gateway/SDK 原始细节） */
 const RETRYABLE_RE = /502|503|504|429|backend request failed|ECONNRESET|ETIMEDOUT|timed out|socket hang up|network error|gateway|rate.?limit/i;
 /** 永久、不可重试的错误（重试纯浪费）：鉴权/权限/上下文超长/内容策略 */
@@ -425,7 +430,32 @@ export class ClaudeProvider implements RuntimeProvider {
           this.reassignActiveChat();
         }
       }
+      // 2026-09-20 票 claude-1 根治（老大令"必须找到根源"）：for-await【正常结束】= 引擎子进程安静退出了
+      // （SDK 迭代器不抛错，只是没得读了）。原先这里什么都不做 ⇒ 两个后果：
+      //   ① 在途 sink 永远等不到 done/error ⇒ streamChat 的 `for await (const ev of out)` 永久挂起，
+      //      只能等 300s 空闲看门狗兜，且看门狗只重投 prompt 不重建进程；
+      //   ② this.q 仍非空 ⇒ ensureProcess() 的 `if (this.q) return` 永不重建 ⇒
+      //      **claude 死一次就彻底不回话，直到人工 restart**。
+      // 实锤现场：09-20 11:20 老大「测试」那一轮，桥 node(31012) 子进程只剩 esbuild，引擎进程根本不在。
+      await this.handleProcessLost('Claude 引擎进程已退出（事件流结束）');
     })();
+  }
+
+  /**
+   * 2026-09-20 票 claude-1：引擎进程丢失的统一收口。
+   * 复位常驻把手（下一条消息必然重建进程）+ 唤醒所有在途轮次（不再让 for await 永挂）。
+   * 与 dispose() 的区别：dispose 会给 sink 发"进程已释放"（那是 /new 的正常路径），
+   * 这里要发的是"进程没了，正在重建"，所以先把 sink 摘干再交给 dispose 收尾。
+   */
+  private async handleProcessLost(reason: string): Promise<void> {
+    if (!this.q && !this.queue) return; // 已复位过，别重复报
+    rtLog(`[claude] ⚠️ ${reason} —— 复位常驻把手，下一条消息将重建引擎进程`);
+    const stranded = this.sinks.splice(0, this.sinks.length);
+    for (const s of stranded) {
+      try { s.emit({ type: 'error', message: `⚠️ ${reason}` }); } catch { /* 单条唤醒失败不阻塞收口 */ }
+    }
+    this.reassignActiveChat();
+    await this.dispose();
   }
 
   async prepare(): Promise<void> {
@@ -506,20 +536,33 @@ export class ClaudeProvider implements RuntimeProvider {
       let stalled = false;
       // 空闲看门狗：每 10s 检查，若 STALL_MS 内零事件 ⇒ 判定流卡死，close 唤醒消费者。
       // 活跃生成（持续吐字）/ 工具事件（持续到达）都会刷新 lastEventAt，绝不误杀长任务。
+      let gotEvent = false; // 本轮是否收到过任何引擎事件（用于区分"首包就没来"与"吐到一半断了"）
+      // 票 claude-1：首包阈值单独设（默认 60s）。原先无论有没有开始吐字都死等 STALL_MS=300s
+      // ⇒ 引擎进程已死时用户要干等 5 分钟才见到一个字，三次重试 = 15 分钟。
+      const stallLimit = () => (gotEvent ? STALL_MS : STALL_FIRST_MS);
       const stallTimer = setInterval(() => {
-        if (Date.now() - lastEventAt >= STALL_MS) {
+        if (Date.now() - lastEventAt >= stallLimit()) {
           stalled = true;
-          rtLog(`[claude] 空闲 ${Math.round(STALL_MS / 1000)}s 零事件，判定流卡死，准备重试/放弃 attempt=${attempt}`);
+          rtLog(`[claude] 空闲 ${Math.round(stallLimit() / 1000)}s 零事件${gotEvent ? '（吐到一半断流）' : '（首包未到，疑引擎进程不在）'}，判定流卡死 attempt=${attempt}`);
           out.close(); // PushQueue.close 会唤醒正在 await 的消费者
         }
       }, 10_000);
       // 注册 sink 与投递 prompt 必须连续同步执行（中间不能有 await）：
       // 常驻进程按 prompt 投递顺序串行处理，事件按同序返回，两者顺序必须一致。
-      const sink: RoundSink = { chatId: params.sessionKey, emit: (ev) => { lastEventAt = Date.now(); out.push(ev); } };
+      const sink: RoundSink = { chatId: params.sessionKey, emit: (ev) => { lastEventAt = Date.now(); gotEvent = true; out.push(ev); } };
       this.sinks.push(sink);
       // 成为队首 = claude 将立即处理本 prompt ⇒ 会话敏感工具（send_voice 等）此刻起归属本 chat
       if (this.sinks.length === 1) setCurrentChatId(params.sessionKey);
-      queue.push({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: fullPrompt }] }, parent_tool_use_id: null, shouldQuery: true });
+      // 票 claude-1：投递前确认常驻把手仍在（上一轮若已因进程退出/卡死复位，这里就是重建点）。
+      // 原实现在循环外一次性捕获 queue，进程死了后续 attempt 全往同一个死队列塞 ⇒ 注定全失败，
+      // 且万一进程后来被别的路径救活，同一条 prompt 会被执行 3 遍。
+      try { this.ensureProcess(params.workdir); } catch (e) {
+        yield { type: 'error', message: `Claude 引擎重建失败: ${e instanceof Error ? e.message : String(e)}` };
+        yield { type: 'done' };
+        return;
+      }
+      const liveQueue = this.queue ?? queue;
+      liveQueue.push({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: fullPrompt }] }, parent_tool_use_id: null, shouldQuery: true });
 
       let doneErr: string | null = null;
       try {
@@ -544,11 +587,20 @@ export class ClaudeProvider implements RuntimeProvider {
       }
 
       // ── 本轮以 error 或 stall 结束：判断是否可重试 ──
-      const retryable = stalled || (!!doneErr && RETRYABLE_RE.test(doneErr) && !NON_RETRYABLE_RE.test(doneErr));
+      // 票 claude-1：进程丢失（pump 已结束并复位把手）也算可重试 —— 此刻 attempt 2 的 ensureProcess
+      // 会拉起【新进程】，这是真正能救回来的一次；不重试就得用户手敲 /new。
+      const processLost = !!doneErr && PROCESS_LOST_RE.test(doneErr);
+      const retryable = stalled || processLost || (!!doneErr && RETRYABLE_RE.test(doneErr) && !NON_RETRYABLE_RE.test(doneErr));
       if (retryable && attempt < MAX_RETRIES) {
-        const delay = Math.min(1000 * 2 ** (attempt - 1), 8000); // 退避 1s/2s（attempt 只取 1、2：下方要求 attempt < MAX_RETRIES，4s 分支不可达）
-        rtLog(`[claude] 瞬态故障，第 ${attempt} 次重试（${delay}ms 后）: ${doneErr ?? (stalled ? '(stall)' : '')}`);
-        yield { type: 'text', text: `\n⚠️ 网关瞬态故障，自动重试中（${attempt}/${MAX_RETRIES}）…` };
+        const delay = Math.min(1000 * 2 ** (attempt - 1), 8000);
+        // 票 claude-1：stall（首包没来 / 半截断流）极可能是常驻进程已经没了 ——
+        // 先复位把手，下一次 attempt 的 ensureProcess 就会拉起新进程；否则重投就是投进死队列。
+        if (stalled) await this.handleProcessLost('Claude 引擎本轮无响应，重建进程后重试');
+        rtLog(`[claude] ${processLost ? '引擎进程丢失' : stalled ? '引擎无响应' : '瞬态故障'}，第 ${attempt} 次重试（${delay}ms 后）: ${doneErr ?? '(stall)'}`);
+        // 票 claude-1：文案说实话。原先一律写"网关瞬态故障"，把自家进程死亡甩锅给 GW，
+        // 这几天每次卡死都被这行字引去查网关，白烧两小时。
+        const lostTag = processLost || stalled;
+        yield { type: 'text', text: lostTag ? `\n⚠️ 引擎进程已重建，重试 ${attempt}/${MAX_RETRIES}…` : `\n⚠️ 网关瞬态故障，自动重试中（${attempt}/${MAX_RETRIES}）…` };
         await sleep(delay);
         continue; // 下一轮 attempt 重新注册 sink + 重投 prompt
       }
