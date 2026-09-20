@@ -197,6 +197,13 @@ export class ClaudeProvider implements RuntimeProvider {
    */
   private sinks: RoundSink[] = [];
 
+  /** 🔴 票 claude-2 件3（死因必须留痕，不靠 rt 管子）：引擎最近一次 is_error result 的原始文本。
+   *  起新进程即清零；pump 结束 / handleProcessLost / dispose 留痕时带上它。 */
+  private lastEngineError: string | null = null;
+  /** 票 claude-2：true=桥在主动释放进程（dispose 路径，如 /new、切 cwd）。
+   *  pump 结束日志据此区分"主动关"与"引擎静默死"，不写谎报现场。 */
+  private intentionalStop = false;
+
   /** 桥接内置工具（Phase 1）：工具依赖 + 进程内工具 server。attachBridgeTools 接线，ensureProcess 注入 */
   private toolDeps: BridgeToolDeps = {};
   private sdkMcp: ClaudeBuiltinServer | null = null;
@@ -352,6 +359,8 @@ export class ClaudeProvider implements RuntimeProvider {
       });
       this.q = q;
       this.queue = queue;
+      this.lastEngineError = null; // 票 claude-2：新进程不背旧进程的死因
+      this.intentionalStop = false;
       this.startPump(q);
       rtLog(`[claude] ensureProcess: 已起重进程 cwd=${this.cwd}`);
     } catch (e) {
@@ -423,6 +432,7 @@ export class ClaudeProvider implements RuntimeProvider {
                 const rawErrors = Array.isArray(r.errors) ? r.errors.map((x) => String(x)).filter((s) => s.trim()) : [];
                 const detail = [r.subtype, ...rawErrors, typeof r.result === 'string' ? r.result : ''].filter(Boolean).join(' | ').slice(0, 800);
                 errMsg = detail ? `Claude 会话非正常结束：${detail}` : `Claude 会话非正常结束（subtype=${r.subtype ?? 'unknown'}）`;
+                if (detail) this.lastEngineError = detail; // 票 claude-2 件3：真因先攥手里，进程死了随死因一起留痕
               }
               sink.emit(r.is_error ? { type: 'error', message: errMsg } : { type: 'done' });
               // 本轮终态：立即出队，后续事件归属下一个轮次（否则下一轮事件会错发到本轮）
@@ -432,6 +442,8 @@ export class ClaudeProvider implements RuntimeProvider {
           }
         }
       } catch (e) {
+        // 🔴 票 claude-2 件3：SDK 原始异常（含消息与栈）进 claude-out.log——不靠 rt 管子。
+        console.log(`[claude] ⚰️ pump 捕获 SDK 异常: ${e instanceof Error ? `${e.message}\n${e.stack ?? '(无栈)'}` : String(e)}`);
         const sink = this.activeSink();
         if (sink) {
           sink.emit({ type: 'error', message: `Claude SDK 泵停止: ${e instanceof Error ? e.message : String(e)}` });
@@ -446,6 +458,15 @@ export class ClaudeProvider implements RuntimeProvider {
       //   ② this.q 仍非空 ⇒ ensureProcess() 的 `if (this.q) return` 永不重建 ⇒
       //      **claude 死一次就彻底不回话，直到人工 restart**。
       // 实锤现场：09-20 11:20 老大「测试」那一轮，桥 node(31012) 子进程只剩 esbuild，引擎进程根本不在。
+      // 🔴 票 claude-2 件3：死因留痕（console → claude-out.log）。退出码为【结构性不可得】——
+      // SDK Query 接口（sdk.d.ts L2425-2739）只有 close()/interrupt()，没有 exitCode；
+      // exitCode/signalCode/kill() 在 SpawnedProcess 接口（L7956-L8003），须 options.spawnClaudeCodeProcess
+      // 自带自定义 spawner 才可达，本桥用 SDK 默认 spawn ⇒ 如实记"SDK 未暴露退出码+位置"，不装。
+      console.log(`[claude] ⚰️ pump 结束 ${new Date().toISOString()}：${this.intentionalStop
+        ? '桥主动释放进程（dispose 路径，如 /new、切 cwd），非引擎静默死'
+        : `引擎事件流终止（for-await 正常返回=子进程静默退出），在途 sinks=${this.sinks.length}`}${
+        this.lastEngineError ? `；退出前最后引擎错误原文：${this.lastEngineError}` : '；退出前无错误 result'
+      }；退出码：SDK 未暴露（Query 无 exitCode，sdk.d.ts L2425-2739）`);
       await this.handleProcessLost('Claude 引擎进程已退出（事件流结束）');
     })();
   }
@@ -458,6 +479,8 @@ export class ClaudeProvider implements RuntimeProvider {
    */
   private async handleProcessLost(reason: string): Promise<void> {
     if (!this.q && !this.queue) return; // 已复位过，别重复报
+    // 🔴 票 claude-2 件3：进程丢失死因进 claude-out.log（带 SDK 错误原文；退出码不可得，见 startPump 结束注释）。
+    console.log(`[claude] ⚠️ handleProcessLost: ${reason}${this.lastEngineError ? `；最后引擎错误原文：${this.lastEngineError}` : '；无错误 result'}；退出码：SDK 未暴露`);
     rtLog(`[claude] ⚠️ ${reason} —— 复位常驻把手，下一条消息将重建引擎进程`);
     const stranded = this.sinks.splice(0, this.sinks.length);
     for (const s of stranded) {
@@ -507,6 +530,10 @@ export class ClaudeProvider implements RuntimeProvider {
   }
 
   async dispose(): Promise<void> {
+    // 🔴 票 claude-2 件3：主动关进程也留痕。SDK Query.close() 不返回退出码
+    //（exitCode/kill() 在 SpawnedProcess 接口，sdk.d.ts L7956-L8003，须自带 spawner 才可达）。
+    console.log(`[claude] dispose: 关常驻进程（q.close()，桥主动发起）；本进程错误原文：${this.lastEngineError ?? '无'}`);
+    this.intentionalStop = true; // 放日志后：本进程 pump 结束日志按"主动释放"记，不冤枉引擎
     try { this.queue?.close(); this.q?.close(); } catch {}
     // 唤醒所有仍在等待的轮次，避免调用方永久挂起（原先只置空 sink，等待方会一直卡在 for await）
     for (const s of this.sinks) {
@@ -632,8 +659,19 @@ export class ClaudeProvider implements RuntimeProvider {
         rtLog(`[claude] resume 会话不可恢复（reason=${lostReason}；${doneErr.slice(0, 120)}），已清除 session_id，下条消息开新会话`);
       }
       // 不可重试 / 重试耗尽：明确回报，绝不静默半截
-      if (doneErr) yield { type: 'error', message: doneErr };
-      else if (stalled) yield { type: 'error', message: `⚠️ 回复中断：网关约 ${Math.round(STALL_MS / 1000)}s 无响应，已放弃重试。可重发本条消息。` };
+      // 🔴 票 claude-2 件3追加（老大 09-20 令）：旧句不分青红皂白骂网关——零事件 stall 多是自家常驻进程没了。
+      // 规矩：doneErr 直通其原文（只有它命中 RETRYABLE/NON_RETRYABLE 网关特征时原文里才会出现网关字样，
+      // 那是 SDK/网关原始文本，不是桥编的锅）；零事件 stall 按 gotEvent 分两种实话——
+      // ① 首包未到 ⇒ 先当场复位把手（下条消息必然重建），文案说"已复位"就必须真复位；
+      // ② 吐过字才断 ⇒ 报"回复中断+已重试次数"，不赖网关。
+      if (doneErr) {
+        yield { type: 'error', message: doneErr };
+      } else if (stalled && !gotEvent) {
+        await this.handleProcessLost('Claude 引擎本轮无响应（首包未到），复位待重建');
+        yield { type: 'error', message: `⚠️ 引擎进程本轮无响应（${Math.round(STALL_FIRST_MS / 1000)}s 零事件，已复位，下条消息自动重建），已尝试 ${MAX_RETRIES} 次。可重发本条消息。` };
+      } else if (stalled) {
+        yield { type: 'error', message: `⚠️ 引擎回复中断（已吐字后 ${Math.round(STALL_MS / 1000)}s 无新事件，已重试 ${Math.max(MAX_RETRIES - 1, 1)} 次）。可重发本条消息。` };
+      }
       yield { type: 'done' };
       return;
     }
