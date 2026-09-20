@@ -150,6 +150,15 @@ export class HermesAppServerClient {
   private nextId = 1;
   private pending = new Map<JsonRpcId, PendingCall>();
   private listeners = new Set<(message: HermesServerMessage) => void>();
+  /**
+   * 🔴 票 hand-2（2026-09-20）：进程丢失事件出口。
+   * 此前 exit/error 只做 failAllPending，**从不告诉 provider** ⇒ provider 的 sessions map
+   * 里的 sessionId 指向一个已经不存在的引擎进程，之后每条消息都打在死会话上，只能人工 /new
+   * （claude 案同款病，样板见 claude.ts handleProcessLost / commit caf59ff）。
+   */
+  private processLostListeners = new Set<(reason: string) => void>();
+  /** 本 client 最近一次 spawn 的引擎 pid（判"换代"的硬证据，不被 pid 文件误伤） */
+  private spawnedPid: number | null = null;
   private startPromise: Promise<void> | null = null;
 
   constructor(
@@ -162,6 +171,27 @@ export class HermesAppServerClient {
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  /**
+   * 🔴 票 hand-2：订阅"引擎进程没了"。回调在 exit/error 事件里同步触发，
+   * provider 必须在此把 sessions map 里指向该引擎的会话全部作废（自愈，不等人工 /new）。
+   */
+  onProcessLost(listener: (reason: string) => void): () => void {
+    this.processLostListeners.add(listener);
+    return () => {
+      this.processLostListeners.delete(listener);
+    };
+  }
+
+  private notifyProcessLost(reason: string): void {
+    for (const listener of this.processLostListeners) {
+      try {
+        listener(reason);
+      } catch (e) {
+        console.warn(`[hermes-app-server] onProcessLost 回调异常（不阻塞收口）: ${e}`);
+      }
+    }
   }
 
   async prepare(): Promise<void> {
@@ -179,17 +209,35 @@ export class HermesAppServerClient {
 
   /**
    * 检查是否需要清空 Hermes thread id（因为 Hermes 进程重启了）
+   *
+   * 🔴 票 hand-2（2026-09-20）：这条线此前**全仓零调用**（死线），现由 provider 在每次
+   * 请求前、`prepare()` 之前调用（codex 原注释就写着"在 prepare() 之前调用"——先 prepare
+   * 会重起引擎并改写 pid 文件，事后再问永远"没换过"）。
+   *
+   * 判据只认硬证据，宁漏不误杀（原实现把"pid 文件读不到"当重启证据，会误清正常会话、
+   * 凭空触发自动 /new；pid 文件又落在共享的 CTI_HOME 下，同机多 bot 时可能被别家改写）：
+   *   ① 本 client 手里还有活着的子进程 ⇒ false（我们的会话没作废）；
+   *   ② 子进程已不在 ⇒ 看 pid 文件留底的 pid 还活不活，不活 ⇒ true（会话全废）；
+   *   ③ 连一次都没 spawn 过 ⇒ false（没有在存会话可作废，此时 map 必为空）。
    */
   checkPidChanged(): boolean {
+    if (this.proc?.pid) return false;
     const savedPid = readSavedPid();
-    if (!savedPid) {
-      console.log('[hermes-app-server] No saved PID found, will clear stale thread IDs');
-      return true;
+    if (savedPid !== null) {
+      if (!isProcessRunning(savedPid)) {
+        console.log(`[hermes-app-server] Previous PID ${savedPid} not running, Hermes process restarted`);
+        return true;
+      }
+      return false;
     }
-    if (!isProcessRunning(savedPid)) {
-      console.log(`[hermes-app-server] Previous PID ${savedPid} not running, Hermes process restarted`);
-      return true;
+    if (this.spawnedPid !== null) {
+      if (!isProcessRunning(this.spawnedPid)) {
+        console.log(`[hermes-app-server] Spawned PID ${this.spawnedPid} not running and no PID file left, Hermes process restarted`);
+        return true;
+      }
+      return false;
     }
+    // 本机从没起过引擎 ⇒ 没有在存 thread/sessionId 可作废，不能因此判"换代"
     return false;
   }
 
@@ -286,10 +334,16 @@ export class HermesAppServerClient {
     });
     rtLog(`[hermes-app-server] spawned HERMES_HOME=${resolveHermesHome()} OPENAI_BASE_URL=...:4000`);
     this.proc = proc;
+    this.spawnedPid = proc.pid ?? null;
 
     proc.once('error', (error) => {
-      rtLog(`[hermes-app-server] spawn ERROR: ${error.message}`);
+      const msg = error instanceof Error ? error.message : String(error);
+      rtLog(`[hermes-app-server] spawn ERROR: ${msg}`);
       this.failAllPending(error instanceof Error ? error : new Error(String(error)));
+      // 🔴 票 hand-2（2026-09-20）：告诉 provider「引擎没了」，让它作废 sessions map。
+      // 此前这里只 failAllPending，map 里的旧 sessionId 无人清 ⇒ 之后每条消息都打在已不存在的
+      // 会话上，永久报 "Hermes prompt 失败"，只能人工 /new（claude 案同款病，样板 caf59ff）。
+      this.notifyProcessLost(`spawn error: ${msg}`);
     });
     proc.once('exit', (code, signal) => {
       const suffix = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`;
@@ -297,6 +351,8 @@ export class HermesAppServerClient {
       this.failAllPending(new Error(`[hermes-app-server] Process exited with ${suffix}`));
       this.proc = null;
       this.startPromise = null;
+      // 🔴 票 hand-2：进程丢失出口（failAllPending 之后再通知：在途轮次先醒，provider 后复位）
+      this.notifyProcessLost(`process exited (${suffix})`);
     });
 
     // 捕获原始 stdout 输出到日志（排查 buffering 问题）

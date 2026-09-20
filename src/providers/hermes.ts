@@ -59,12 +59,48 @@ export class HermesProvider implements RuntimeProvider {
     this.acpArgs = base;
   }
 
+  /**
+   * 🔴 票 hand-2（2026-09-20）：会话丢失原因暂存，供下一轮 onSessionLost 报给桥
+   * （engine.ts:814 按原因出文案：restart=温和一句，unknown=重警告卡）。
+   */
+  private pendingLostReason: 'idle' | 'interrupt' | 'restart' | 'unknown' | null = null;
+
+  /**
+   * 🔴 票 hand-2 根治（老大 09-20 令，样板 claude.ts handleProcessLost / commit caf59ff）：
+   * 引擎进程丢失/换代的**唯一收口**。本家的"常驻把手" = client + sessions map；引擎静默退出后
+   * 若无人复位 map，之后每条 session/prompt 都打在已不存在的会话上 ⇒ 永久报 "Hermes prompt 失败"，
+   * 只能人工 /new（claude 案同款病）。
+   * 复位后 !session 成立 ⇒ injectHistory 门控自然成立 ⇒ onSessionLost 触发 ⇒ 桥自动 /new。
+   * @param killEngine 引擎假死（进程在水不吐字）时连进程一起弃用；**不置空 this.client**，
+   *                   否则在途轮次的 notify 会在被弃用对象上重起一个没人管的引擎（进程泄漏）。
+   */
+  private handleProcessLost(reason: string, opts: { killEngine?: boolean } = {}): void {
+    const n = this.sessions.size;
+    this.sessions.clear();
+    this.pendingLostReason = 'restart';
+    // 本家 provider 级 rtLog 过去没有 CTI_RT_LOG（实测注册表漏配 hermes），故关键痕迹走
+    // console.warn 进 nssm 捕获的 logs/hermes-err.log；两路都写，换机也不哑。
+    console.warn(`[hermes] ⚠️ ${reason} —— 复位会话映射（清 ${n} 条），下一条消息自动重建，无需人工 /new`);
+    rtLog(`[hermes] handleProcessLost: cleared ${n} sessions | reason=${reason} | killEngine=${opts.killEngine ? 'yes' : 'no'}`);
+    if (opts.killEngine) {
+      void this.client?.close().catch(() => {});
+    }
+  }
+
   private async ensureClient(): Promise<HermesAppServerClient> {
     if (this.client) {
+      // 🔴 票 hand-2：接上 checkPidChanged 这条断线（此前全仓零调用）。必须问在 prepare() **之前**：
+      // prepare 会重起引擎并改写 pid 文件，事后再问永远得到"没换过"。
+      if (this.client.checkPidChanged()) {
+        this.handleProcessLost('检测到 Hermes 引擎进程已换代（pid 与在存会话不再匹配）');
+      }
       await this.client.prepare();
       return this.client;
     }
     const client = new HermesAppServerClient(this.cliPath, this.acpArgs);
+    // 🔴 票 hand-2 主修：订阅引擎进程丢失 —— client 的 exit/error 过去只 failAllPending，
+    // 从不通知 provider ⇒ sessions map 无人清 ⇒ 死会话一路用到人工 /new。
+    client.onProcessLost((why) => this.handleProcessLost(`Hermes 引擎进程已退出（${why}）`));
     await client.prepare();
     this.client = client;
     return client;
@@ -100,6 +136,11 @@ export class HermesProvider implements RuntimeProvider {
   async *streamChat(params: StreamChatParams): AsyncGenerator<StreamEvent> {
     const client = await this.ensureClient();
     let unsubscribe: (() => void) | null = null;
+
+    // 🔴 票 hand-2（C 项）：超时文案要说实话 —— "首包未到"（疑引擎进程不在）与
+    // "已吐字只是没等到结束信号"是两种病，旧文案一律写"app-server 无响应"，长任务被误杀。
+    const startedAt = Date.now();
+    let firstEventAt: number | null = null; // 引擎任意一次回包（思考/工具/正文/server request 都算）
 
     // 事件队列 + 唤醒（对齐 opencode.ts 流式消费）
     const queue: StreamEvent[] = [];
@@ -143,14 +184,21 @@ export class HermesProvider implements RuntimeProvider {
             mcpServers: readSessionMcpServers('hermes', 'stdioOnly'),
           }),
           new Promise<never>((_, reject) => setTimeout(
-            () => reject(new Error('session/new 超时 120s（app-server 无响应）')),
+            // 🔴 票 hand-2（C 项）：此处必然零回包（会话还没建成），是真"无响应"，口径给准。
+            () => reject(new Error('session/new 超时 120s：引擎侧未响应会话创建请求（首包未到）')),
             120_000,
           )),
         ]);
         session = { sessionId: newSession.sessionId, lastUsed: Date.now(), personaInjected: false };
         this.sessions.set(sessionKey, session);
       } catch (e) {
-        yield { type: 'error', message: `Hermes session/new 失败: ${e instanceof Error ? e.message : String(e)}` };
+        const msg = e instanceof Error ? e.message : String(e);
+        // 🔴 票 hand-2 的克制面：只在"无回包/进程没了"时复位把手。hermes 的 session/new 对
+        // 非法 mcpServers 会回 -32602 Invalid params —— 那种参数错绝不能清 map，否则会把别的
+        // chat 好端端的会话一起作废、凭空触发自动 /new（复位过头等于自己造新故障）。
+        const lost = /超时|无回包|exited|not running/i.test(msg);
+        if (lost) this.handleProcessLost(`Hermes session/new 失败（${msg}）`, { killEngine: true });
+        yield { type: 'error', message: `Hermes session/new 失败: ${msg}${lost ? '（会话已复位，下条消息自动重建引擎与新会话，无需人工 /new）' : ''}` };
         yield { type: 'done' };
         return;
       }
@@ -163,8 +211,10 @@ export class HermesProvider implements RuntimeProvider {
     // 人设：仅新会话首条消息注入；[2026-09-17] history 仅新建会话时注入（engine 恒传，靠 injectHistory 门控）。
     // 🔴 老大令 2026-09-19：非 /new 的丢失性新建 → 自动 /new（回调桥清 shadow 并告知），影子回灌废除
     if (injectHistory && !params.freshSession && params.history && params.history.length > 0) {
-      rtLog(`[hermes] engine session lost (shadow ${params.history.length}) → auto /new`);
-      params.onSessionLost?.();
+      const why = this.pendingLostReason ?? 'unknown'; // 报原因：restart=桥出温和文案，unknown=重警告
+      this.pendingLostReason = null;
+      rtLog(`[hermes] engine session lost (shadow ${params.history.length}) → auto /new (${why})`);
+      params.onSessionLost?.(why);
     }
     const historyText = injectHistory && params.freshSession && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
@@ -205,6 +255,8 @@ export class HermesProvider implements RuntimeProvider {
     // 订阅 server notifications → push 事件
     unsubscribe = client.subscribe((message) => {
       if (extractSessionId(message) !== sessionId) return;
+      // 🔴 票 hand-2：任意一次回包（含引擎发来的 server request）都算"首包已到"，超时定性靠它。
+      if (firstEventAt === null) firstEventAt = Date.now();
 
       // server request：处理 fs/read_text_file
       if (message.kind === 'request') {
@@ -256,7 +308,10 @@ export class HermesProvider implements RuntimeProvider {
               poke();
             } else {
               thinkingBuffer = '';
-              queue.push({ type: 'text', text });
+              // 🔴 票 hand-2（B 项）：过去这条纯文本分支漏标 gotText（gemini.ts 同位置有）
+              // ⇒ 下面"正文已完整流出按正常完成处理"永远走不到，正常答完也要 600s 后
+              // 弹一句 "Hermes prompt 失败: 超时"。一个词的贱病，就是这个词。
+              queue.push({ type: 'text', text }); gotText = true;
               poke();
             }
           }
@@ -286,6 +341,8 @@ export class HermesProvider implements RuntimeProvider {
 
     // 发送 prompt（后台任务：hermes 的 prompt 响应只在 turn 结束返回，绝不能 await 它——
     // 否则流式事件全堵死。详见下方消费循环注释）
+    // 🔴 票 hand-2（C 项）：阈值只算一次并复用 —— 旧文案把"600s"写死在字符串里，env 一改就是谎话。
+    const PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_HERMES_PROMPT_TIMEOUT_MS || '600000', 10);
     const promptTask = (async (): Promise<void> => {
     try {
       // 2026-08-30 修复：prompt 加超时（与 gemini 同病——无超时挂起会卡死该 chat 队列，
@@ -299,8 +356,9 @@ export class HermesProvider implements RuntimeProvider {
           prompt: [{ type: 'text', text: fullPrompt }],
         }),
         new Promise<never>((_, reject) => setTimeout(
-          () => reject(new Error('[hermes] session/prompt 超时 600s（app-server 无响应，已释放队列）')),
-          parseInt(process.env.CTI_HERMES_PROMPT_TIMEOUT_MS || '600000', 10),
+          // 定性交给下面的 catch：这里只说"没等到 turn 结束信号"，不预设"无响应"这种结论
+          () => reject(new Error('[hermes] session/prompt 到点未收到 turn 结束信号（已释放队列）')),
+          PROMPT_TIMEOUT_MS,
         )),
       ]);
       const usg = result.usage;
@@ -318,9 +376,26 @@ export class HermesProvider implements RuntimeProvider {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (/超时/.test(msg) && gotText) {
-        // 2026-08-30：正文已完整流出但结束信号超时——按正常完成处理，不报错
-        console.warn('[hermes] 结束信号超时，但正文已完整流出——按正常完成处理');
+      const secs = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+      const firstPktInS = firstEventAt === null ? null : Math.max(0, Math.round((firstEventAt - startedAt) / 1000));
+      if (/Process exited|Process not running|not running/i.test(msg)) {
+        // 引擎进程本轮中途没了：client 的 exit 回调已复位 map，这里只把话讲实在
+        settleErr = 'Hermes 引擎进程本轮中途退出，回答被截断——会话已复位，下一条消息自动重建，无需人工 /new';
+      } else if (/超时|未收到 turn 结束信号/.test(msg)) {
+        if (gotText) {
+          // 2026-08-30：正文已完整流出但结束信号超时——按正常完成处理，不报错
+          // （🔴 票 hand-2：这条分支过去因漏标 gotText 而永远进不来，见上方 agent_message_chunk）
+          console.warn('[hermes] 结束信号超时，但正文已完整流出——按正常完成处理');
+        } else if (firstPktInS !== null) {
+          // 实话：引擎一直在回包（💭/工具都在流），只是本轮没在阈值内收尾 —— 长任务被截断，不是"无响应"
+          settleErr = `Hermes 本轮未在 ${secs}s 内收尾：首包第 ${firstPktInS}s 就到、引擎持续在回包（非无响应），`
+            + `系 ${Math.round(PROMPT_TIMEOUT_MS / 1000)}s 阈值把长任务截断了。会话保留，可直接追问；要跑更久调 CTI_HERMES_PROMPT_TIMEOUT_MS`;
+        } else {
+          // 实话：整轮零回包 —— 这才是真"无响应"。按引擎假死复位 + 弃用进程，下条消息必然重建（自愈）
+          this.handleProcessLost(`Hermes 本轮 ${secs}s 零回包（首包未到，疑引擎进程假死/已不在）`, { killEngine: true });
+          settleErr = `Hermes 本轮失败：${secs}s 内引擎一个字都没回（首包未到，不是长任务）。`
+            + '已复位会话并弃用假死引擎进程，下一条消息自动重建，无需人工 /new';
+        }
       } else {
         settleErr = `Hermes prompt 失败: ${msg}`;
       }
