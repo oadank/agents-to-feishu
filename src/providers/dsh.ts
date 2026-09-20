@@ -1094,8 +1094,12 @@ export class DshProvider implements RuntimeProvider {
     };
     this.activePrompt = promptHandler;
 
-    // 请求-响应：prompt 完成
-    this.waitResponse(promptId).then(
+    // [票 T-0005 假死熔丝 09-20] 原 waitResponse(promptId) 无时限：上游掐线（网关日志实锤
+    // MidStreamFallbackError/502，且"备用名单=空"）时引擎永不回包，队列卡成雕像（老大亲测 5h+）。
+    // 熔丝：15 分钟无回音 → 本条诚实报错唤醒队列 + 掐死引擎进程（close 回调自动清 sessions/
+    // wakePending，下条消息走档案恢复重建）。env CTI_DSH_PROMPT_FUSE_MS 可调，0=禁用。
+    const FUSE_MS = parseInt(process.env.CTI_DSH_PROMPT_FUSE_MS || '900000', 10);
+    this.waitResponse(promptId, FUSE_MS > 0 ? FUSE_MS : undefined).then(
       (msg) => {
         if (this.activePrompt === promptHandler) this.activePrompt = null;
         if (msg.error) promptHandler.onDone(msg.error.message || JSON.stringify(msg.error));
@@ -1106,17 +1110,26 @@ export class DshProvider implements RuntimeProvider {
         // 票 hand-3④：原因说实话。原先不分起因一律写"ACP prompt 响应超时"，
         // 进程丢失/管道报错都被这句盖成谎话（老大 09-20 令：文案要说实话）。
         const em = err instanceof Error ? err.message : "";
-        promptHandler.onDone(/timeout/i.test(em) ? "DSH 引擎本轮未回 prompt 响应（请求超时）" : (em || "DSH ACP prompt 响应异常"));
+        if (/timeout/i.test(em)) {
+          rtLog(`[dsh] ⛔ 熔丝爆断 promptId=${promptId}: ${Math.round(FUSE_MS / 60000)}min 无回音，杀引擎换人`);
+          promptHandler.onDone(`本轮等了 ${Math.round(FUSE_MS / 60000)} 分钟模型没回音（上游多半掐线了）。我已把引擎复位，请把这条消息重发一次。`);
+          try { child.kill('SIGTERM'); } catch { /* 进程已没就不补刀 */ }
+        } else {
+          promptHandler.onDone(em || "DSH ACP prompt 响应异常");
+        }
       },
     );
 
     // 卡死看门狗：连续无输出判定卡死
+    // [票 T-0005 补刀] 旧版只 onDone 收口不换人：引擎成僵尸后下条消息还发给它，条条超时循环，
+    // 这就是 09-20 卡 5 小时没人发现的真相。现在超时=当场拔电源，close 回调重建健康进程。
     const watchdog = setInterval(() => {
       if (settled) { clearInterval(watchdog); return; }
       if (Date.now() - lastOutput > DshProvider.PROMPT_TIMEOUT_MS) {
         clearInterval(watchdog);
-        promptHandler.onDone(`DSH ACP 卡死：连续 ${DshProvider.PROMPT_TIMEOUT_MS / 1000}s 无输出，已中断`);
-        rtLog(`[dsh] watchdog timeout promptId=${promptId}`);
+        promptHandler.onDone(`DSH ACP 卡死：连续 ${DshProvider.PROMPT_TIMEOUT_MS / 1000}s 无输出，已中断并复位引擎，本条请重发`);
+        rtLog(`[dsh] watchdog timeout promptId=${promptId} → 杀僵尸引擎`);
+        try { child.kill('SIGTERM'); } catch { /* ignore */ }
       }
     }, 30_000);
 

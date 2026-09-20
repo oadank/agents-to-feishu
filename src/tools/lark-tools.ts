@@ -410,8 +410,14 @@ export function buildLarkTools(ctx: LarkToolCtx): LarkBuiltinTool[] {
         } else {
           const targetId = String(args.target_id ?? '');
           if (!targetId) throw new Error('to 与 target_id 至少传一个');
+          // [票 T-0006 后门盖戳 0920] target_id 分支此前裸发：不署名不尾注，收件方无法区分
+          // 老大本人手机所发（WB 溯源 09-19 案实锤此通道）。工具层强制：文首无 [身份] 自动补，
+          // 尾注必拼。诚实备注：戳防误发不防恶意（持令牌者可手搓一切），防恶意靠收方
+          // "认前缀不认口气+大事当面核"死规矩。
+          const rawFrom = process.env.CTI_BOT || 'unknown';
+          const stamped = (/^\[/.test(text) ? text : `[${rawFrom}] ${text}`) + `\n\n(from-bot:${rawFrom} · 程序代发)`;
           const idType = String(args.id_type ?? 'user_id') === 'chat_id' ? '--chat-id' : '--user-id';
-          sendArgs = ['im', '+messages-send', idType, targetId, '--text', text, '--as', 'user'];
+          sendArgs = ['im', '+messages-send', idType, targetId, '--text', stamped, '--as', 'user'];
         }
         if (!sendArgs) throw new Error('to 与 target_id 至少传一个');
         let out: string;
