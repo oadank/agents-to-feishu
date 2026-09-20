@@ -150,7 +150,7 @@ export class OpencodeProvider implements RuntimeProvider {
   }
 
   private killProcess(): void {
-    if (this.child && !this.child.killed) { try { this.child.kill('SIGTERM'); } catch {} }
+    if (this.child && this.child.exitCode === null && this.child.signalCode === null) { try { this.child.kill('SIGTERM'); } catch {} }
     this.child = null;
     this.spawnPromise = null;
     this.sessions.clear();
@@ -194,7 +194,7 @@ export class OpencodeProvider implements RuntimeProvider {
   }
 
   private ensureProcess(): Promise<ChildProcess> {
-    if (this.child && !this.child.killed) return Promise.resolve(this.child);
+    if (this.child && this.child.exitCode === null && this.child.signalCode === null) return Promise.resolve(this.child);
     if (this.spawnPromise) return this.spawnPromise;
 
     let rejectSpawn: (e: Error) => void = () => {};
@@ -212,6 +212,20 @@ export class OpencodeProvider implements RuntimeProvider {
         rtLog(`[opencode] SPAWN ERROR: ${err.message}`);
         if (this.child === child) { this.child = null; this.spawnPromise = null; }
         reject(err);
+      });
+      // 票 hand-3（老大 09-20 令"别靠监控垃圾维持稳定，把代码写对"）：判活兜底复位。
+      // 'close' 要等所有 stdio 句柄关闭才发 —— 只要有一个孙进程占着管道，它就永远不来；
+      // 于是「进程已死 + 把手还在」= 下一条消息继续投给死进程（claude 案同款残留）。
+      // 'exit' 由进程本身触发、不等管道 ⇒ 这里就把常驻把手复位掉（随后的 close 因把手已空自动 no-op）。
+      child.on('exit', (code, signal) => {
+        rtLog(`[opencode] ACP exit code=${code} signal=${signal}（进程已退出，复位常驻把手，不等 stdio 关闭）`);
+        if (this.child === child) {
+          this.child = null; this.spawnPromise = null;
+          this.sessions.clear(); this.pending.clear(); this.activePrompt = null; this.lineBuf = '';
+        } else if (this.spawnPromise) {
+          this.spawnPromise = null;
+          rejectSpawn(new Error(`OpenCode ACP exited before initialize (code=${code})`));
+        }
       });
       child.on('close', (code) => {
         rtLog(`[opencode] ACP exited code=${code}`);
