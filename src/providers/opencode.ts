@@ -87,7 +87,7 @@ export class OpencodeProvider implements RuntimeProvider {
   private sessions = new Map<string, AcpSession>();
   private spawnPromise: Promise<ChildProcess> | null = null;
 
-  private static IDLE_TIMEOUT_MS = parseInt(process.env.CTI_OPENCODE_IDLE_TIMEOUT_MS || '43200000', 10); // 09-20：30min 会话回收对聊天 bot 太狠（🆕卡风暴主犯），对齐 dsh 家法 12h
+  private static IDLE_TIMEOUT_MS = parseInt(process.env.CTI_OPENCODE_IDLE_TIMEOUT_MS || '0', 10); // 🔴 09-20 老大令：默认永不回收（不主动/new 不许断），env CTI_OPENCODE_IDLE_TIMEOUT_MS 可覆盖
   private static MAX_SESSIONS = parseInt(process.env.CTI_OPENCODE_MAX_SESSIONS || '20', 10);
   private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_OPENCODE_TIMEOUT_MS || '300000', 10);
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
@@ -141,7 +141,7 @@ export class OpencodeProvider implements RuntimeProvider {
     this.cleanupTimer = setInterval(() => {
       const now = Date.now();
       for (const [key, s] of this.sessions) {
-        if (now - s.lastUsed > OpencodeProvider.IDLE_TIMEOUT_MS) {
+        if (OpencodeProvider.IDLE_TIMEOUT_MS > 0 && now - s.lastUsed > OpencodeProvider.IDLE_TIMEOUT_MS) {
           this.sessions.delete(key);
           rtLog(`[opencode] idle cleanup session ${s.sessionId.slice(0, 8)}`);
         }

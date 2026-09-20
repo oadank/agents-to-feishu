@@ -96,7 +96,7 @@ export class OpenAkitaProvider implements RuntimeProvider {
   private sessions = new Map<string, AcpSession>();
   private spawnPromise: Promise<ChildProcess> | null = null;
 
-  private static IDLE_TIMEOUT_MS = parseInt(process.env.CTI_OPENAKITA_IDLE_TIMEOUT_MS || '43200000', 10); // 09-20：30min 会话回收对聊天 bot 太狠（🆕卡风暴主犯），对齐 dsh 家法 12h
+  private static IDLE_TIMEOUT_MS = parseInt(process.env.CTI_OPENAKITA_IDLE_TIMEOUT_MS || '0', 10); // 🔴 09-20 老大令：默认永不回收（不主动/new 不许断），env CTI_OPENAKITA_IDLE_TIMEOUT_MS 可覆盖
   private static MAX_SESSIONS = parseInt(process.env.CTI_OPENAKITA_MAX_SESSIONS || '20', 10);
   // 2026-09-19 复盘：QW3.8F 思考模型×20 轮历史注入×编译器预处理，单轮合法耗时 5-8 分钟；
   // 300s 看门狗把没死的回合掐成"卡死"报错卡（10:23/11:13 两轮引擎实际均完成作答）。升至 900s。
@@ -152,7 +152,7 @@ export class OpenAkitaProvider implements RuntimeProvider {
     this.cleanupTimer = setInterval(() => {
       const now = Date.now();
       for (const [key, s] of this.sessions) {
-        if (now - s.lastUsed > OpenAkitaProvider.IDLE_TIMEOUT_MS) {
+        if (OpenAkitaProvider.IDLE_TIMEOUT_MS > 0 && now - s.lastUsed > OpenAkitaProvider.IDLE_TIMEOUT_MS) {
           this.sessions.delete(key);
           rtLog(`[openakita] idle cleanup session ${s.sessionId.slice(0, 8)}`);
         }
