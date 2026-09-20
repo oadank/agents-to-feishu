@@ -467,7 +467,9 @@ async function handleIncoming(
 
   // 命令消息豁免去重：命令幂等（重复执行无害），必须保证不被 SDK 重复 dispatch 在首次执行前判重跳过
   // （否则 /new 等边命令可能"被吞"）。普通消息仍正常去重。先 trim 防前导空格/不可见字符。
-  const isCommand = text.trim().startsWith('/');
+  // [2026-09-21] ⚡ 优化触发（/p 等）虽以 / 开头但不是命令、不幂等（重复=双份优化+双份喂稿+
+  // 插队卡幽灵），不得豁免去重——老大实测"优化后弹插队卡"即 SDK 重复投递的第二份绕过判重所致。
+  const isCommand = text.trim().startsWith('/') && !engine.isOptimizeTrigger(text);
   if (fullId && processedMessageIds.has(fullId) && !isCommand) {
     rtLog(`[handleIncoming] SKIP duplicate mid=${fullId.slice(0, 24)}`);
     return;
