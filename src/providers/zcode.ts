@@ -10,8 +10,14 @@
  *   时下发给 app-server。网页切模型 → apply → 下条消息即生效，不改任何 CLI 配置文件。
  *
  * 协议（实测 zcode 0.16.5，换行分隔 JSON，非 JSON-RPC 2.0）：
- *   session/create {workspace:{workspaceKey,workspacePath}, runtimeModel} → result.session.sessionId
- *   session/resume {sessionId, workspace?, runtimeModel?}                  → 恢复持久会话
+ *   session/create {workspace:{workspaceKey,workspacePath}, mode?, persistence?, thoughtLevel?,
+ *                   titleGenerationEnabled?, mcpServers?}                       → result.session.sessionId
+ *   session/resume {sessionId, workspace?, thoughtLevel?, mcpServers?, toolAllowlist?,
+ *                   toolDenylist?, offPeakToolEnabled?}   ← 🔴 入参集合与 create **不同**：
+ *                   这里**没有 mode / runtimeModel / titleGenerationEnabled**（两条 schema 都是
+ *                   zod .strict()，多一个键就 -32602 Unrecognized key；票 zcode-r 实测 +
+ *                   zcode.cjs 里 hKe/gKe 定义为准）。恢复持久会话续上下文。
+ *   session/setMode {sessionId, mode:"plan"|"build"|"edit"|"yolo"|"auto"}      → 换 mode 的正道
  *   session/subscribe {sessionId, deliveryKind:"desktop-continuous"}       → 订阅 session/event
  *   session/send {sessionId, content}                                      → 一轮对话
  *   session/stop {sessionId}                                               → 中断当前轮
@@ -38,6 +44,43 @@ function rtLog(msg: string): void {
   const file = process.env.CTI_RT_LOG || '';
   if (!file) return;
   try { fs.appendFileSync(file, `[${new Date().toISOString()}] ${msg}\n`, 'utf-8'); } catch {}
+}
+
+/**
+ * 票 zcode-r 一次性线上证迹探针（**env 门控，默认完全不开**）。
+ *
+ * 为什么留：本 provider 与 app-server 之间的 schema 是无文档的、且随 ZCode 客户端版本变
+ * （09-18 那次 runtimeModel 被拒、09-20 这次 resume 的 mode 被拒，两次都是靠错误文案反推
+ * 入参哪里不对）。出问题时"到底发出去了什么"必须在 rt.log 里看得见，否则只能靠读代码猜。
+ *
+ * 怎么开：给桥进程 env 加 `CTI_ZCODE_PROBE=1`（配置中心 config.zcode.env 里写一行即可），
+ *        且必须同时有 CTI_RT_LOG，否则无处可写（本函数直接 return，不会 console 刷屏）。
+ * 怎么关：删掉/改成 `CTI_ZCODE_PROBE=0` 再 apply —— 默认态就是不写。
+ * 只探 create/resume 两条低频会话帧（一次引擎换代各一条）；**绝不探 session/send**：那里
+ * 头一回就是整段人设 + 历史（实测 12546 字），会把 rt.log 灌爆；也不写别的方法免得噪音。
+ * 脱敏：mcpServers 的 env[]/headers[] 条目 value 与任何 apiKey 一律打码 —— 配置中心穿透
+ *       下来的 MCP env 里可能带凭据，原始 params 不能整份进日志。
+ */
+function probeLog(method: string, params: unknown): void {
+  if (process.env.CTI_ZCODE_PROBE !== '1') return;
+  try {
+    const mask = (v: unknown): unknown => {
+      if (Array.isArray(v)) return v.map(mask);
+      if (v && typeof v === 'object') {
+        const o: Record<string, unknown> = {};
+        for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+          // 打码面只覆盖真凭据：MCP env/headers 条目是 {name,value} 形态（value 命中），
+          // 外加 apiKey/token/secret。别用裸 /key/ —— 实测它会把 workspaceKey（就是个 cwd
+          // 路径，不是凭据）一起打码，正是要看的东西反而糊了。
+          if ((k === 'value' || k === 'apiKey' || /token|secret|api_?key/i.test(k)) && typeof val === 'string') o[k] = `***(len=${val.length})`;
+          else o[k] = mask(val);
+        }
+        return o;
+      }
+      return v;
+    };
+    rtLog(`[zcode] WIRE ${method} → ${JSON.stringify(mask(params)).slice(0, 3000)}`);
+  } catch { /* 探针本身不许影响主流程 */ }
 }
 
 /** 定位 zcode.cjs（ZCode 桌面版内置 CLI）。CTI_ZCODE_CLI 可覆盖。 */
@@ -277,7 +320,12 @@ export class ZcodeProvider implements RuntimeProvider {
   }
 
   async dispose(): Promise<void> {
-    if (this.child && !this.child.killed) { try { this.child.kill('SIGTERM'); } catch { /* 忽略 */ } }
+    // 票 zcode-r：判活换双尺（对齐 hand-3 commit 0317046 的六家写法）。Windows 下
+    // child.kill()（TerminateProcess）式死亡的 exitCode 恒为 null、只有 signalCode 置位，
+    // 旧的 !child.killed 只表示"我调过 kill"，自然退出的进程恒 false ⇒ 该杀的不杀。
+    if (this.child && this.child.exitCode === null && this.child.signalCode === null) {
+      try { this.child.kill('SIGTERM'); } catch { /* 忽略 */ }
+    }
     this.child = null;
     this.spawnPromise = null;
     this.sessions.clear();
@@ -293,14 +341,20 @@ export class ZcodeProvider implements RuntimeProvider {
   // ── 进程与协议 ──
 
   private ensureProcess(): Promise<ChildProcess> {
-    if (this.child && this.child.exitCode === null) return Promise.resolve(this.child);
+    // 票 zcode-r：判活换双尺。Windows 下 child.kill()（TerminateProcess）式死亡的进程
+    // exitCode 恒为 null、只有 signalCode 置位 —— 单尺 exitCode===null 对"被杀型死"**整体失明**
+    // ⇒ 死把手被当活的复返，新消息全投给一个不存在的 stdin，每条白等一次超时。
+    // 依据：另一路代理微实验 + hand-3（commit 0317046）已给 ACP 六家换双尺，zcode 是漏网的第七家。
+    if (this.child && this.child.exitCode === null && this.child.signalCode === null) return Promise.resolve(this.child);
     // 票 hand-1b：child 已 exit（exitCode 置位）但 close 回调迟到（如孙进程占住 stdio 管道不关）时，
     // 旧 spawnPromise 还挂在账上，下一行 `return this.spawnPromise` 会把死 child 原样复返 ⇒ 新消息
     // 每条白等一次 request 超时才拿得到错误（claude 案同款：把手背后的东西没了没人复位）。
-    // 判据与上一行同一把尺子（exitCode !== null ⇒ 死，不引入 !killed）；摘把后落到下面真 spawn。
-    // close 后到时旧回调的 `this.child === child` 守卫不成立，不会把新把手误当死把手复位。
-    if (this.child && this.child.exitCode !== null) {
-      rtLog('[zcode] ensureProcess: 把手指向已 exit 的 child（close 未到），复位双把手强制真 spawn（hand-1b）');
+    // 票 zcode-r：判据跟着上一行同步换成双尺的取反（**死 = exitCode!==null || signalCode!==null**）；
+    // 上一行加了尺子而这一行不改，"被杀型死"照样摘不掉把手，等于白改。
+    // 摘把后落到下面真 spawn；close 后到时旧回调的 `this.child === child` 守卫不成立，
+    // 不会把新把手误当死把手复位。
+    if (this.child && (this.child.exitCode !== null || this.child.signalCode !== null)) {
+      rtLog('[zcode] ensureProcess: 把手指向已 exit/signal 的 child（close 未到），复位双把手强制真 spawn（hand-1b + zcode-r 双尺）');
       this.child = null; this.spawnPromise = null;
     }
     if (this.spawnPromise) return this.spawnPromise;
@@ -621,15 +675,40 @@ export class ZcodeProvider implements RuntimeProvider {
     // 断线续接：桥接重启后从落盘映射 resume（服务端会话持久化），失败回退 create
     const savedId = !params.freshSession && !existing ? loadPersistedSessionId(sessionKey) : null;
     if (savedId) {
+      // 🔴 票 zcode-r：resume 的入参 schema（zcode.cjs `gKe`，dispatch 见 A8n→eo(gKe,t)）是
+      // m.object({sessionId, workspace?, thoughtLevel?, mcpServers?, toolAllowlist?,
+      //           toolDenylist?, offPeakToolEnabled?}).strict()  —— **没有 mode 这个键**。
+      // 而 session/create 的 schema（`hKe`）**有** mode:vw.optional()，所以 09-20 12:36 实测
+      // 才会"resume 必挂、紧接着 create 成功"。带着 mode ⇒ .strict() 直接 -32602
+      // Unrecognized key: "mode" ⇒ 每次引擎换代/重启必然赎回失败 ⇒ 上下文整段丢失。
+      // mode 挪不进任何子对象（workspace 的 Wi 也 .strict()）⇒ 只能删。
+      // 引擎侧 mode 自愈：y9t() 里 mode 由 m1s(persistedMessages) 从落盘历史反查最后一条
+      // assistant 消息的 info.mode 得到，不需要客户端传。
+      const resumeParams: Record<string, unknown> = { sessionId: savedId, workspace };
+      if (mcpServers) resumeParams.mcpServers = mcpServers;
+      probeLog('session/resume', resumeParams);
       try {
-        const r = await this.request('session/resume', {
-          sessionId: savedId,
-          workspace,
-          mode: 'yolo',
-          ...(mcpServers ? { mcpServers } : {}),
-        }, 30000);
+        const r = await this.request('session/resume', resumeParams, 30000);
         sessionId = String(r?.session?.sessionId || r?.sessionId || savedId);
-        rtLog(`[zcode] session resumed: ${sessionId.slice(0, 8)} (session=${sessionKey.slice(0, 12)})`);
+        // mode 判据：**用 settings.mode.current，不要用 session.mode**。实测 create 带
+        // mode:'yolo' 成功时，快照里 session.mode 回的是 "build"（yme(): projection?.mode ??
+        // app.getMode?.() ?? "build"，projection 在首轮前不刷新），而 settings.mode.current
+        // 与 settings.permission.mode 才是 app 的真值 —— 拿 session.mode 判会每次误伤。
+        const modeNow = String(r?.settings?.mode?.current ?? r?.session?.mode ?? '');
+        rtLog(`[zcode] session resumed: ${sessionId.slice(0, 8)} (session=${sessionKey.slice(0, 12)}) mode=${modeNow || '?'} (session.mode=${String(r?.session?.mode ?? '-')} settings.mode.current=${String(r?.settings?.mode?.current ?? '-')} permission.mode=${String(r?.settings?.permission?.mode ?? '-')})`);
+        // 无头 bot 必须 yolo：落到 build 时一切工具调用被 "Permission request failed" 拦
+        // （09-05 立 mode:'yolo' 的原始理由）。赎回路径以前靠入参带 mode，现改走引擎正道
+        // session/setMode（`DKe` = {sessionId, mode:vw, expectedRevision?}）。
+        // 🔴 失败不抛：会话已经赎回成功了，别为一发纠正请求把它再弄挂。
+        if (modeNow && modeNow !== 'yolo' && modeNow !== 'auto') {
+          try {
+            const sm = await this.request('session/setMode', { sessionId, mode: 'yolo' }, 15000);
+            rtLog(`[zcode] resume 后 mode=${modeNow} → setMode(yolo) 已发，回=${JSON.stringify(sm ?? null).slice(0, 160)}`);
+          } catch (e) {
+            console.warn(`[zcode] resume 后 setMode(yolo) 失败（不致命，会话已赎回）: ${e instanceof Error ? e.message : String(e)}`);
+            rtLog(`[zcode] resume 后 setMode(yolo) 失败（不致命，会话已赎回）: ${e instanceof Error ? e.message : String(e).slice(0, 120)}`);
+          }
+        }
       } catch (e) {
         rtLog(`[zcode] resume 失败，回退新建: ${e instanceof Error ? e.message : String(e).slice(0, 120)}`);
         // 🔴 老大令 09-19（票 hand-1 补接线）：resume 失败 = 引擎历史不可恢复 → 自动 /new
@@ -641,12 +720,14 @@ export class ZcodeProvider implements RuntimeProvider {
       }
     }
     if (!sessionId) {
-      const r = await this.request('session/create', {
+      const createParams: Record<string, unknown> = {
         workspace,
         mode: 'yolo', // 交互会话默认 build=全审批；无头 bot 必须显式 yolo，否则一切工具调用被 "Permission request failed" 拦截
         ...(mcpServers ? { mcpServers } : {}),
         titleGenerationEnabled: false, // bot 会话无需自动标题，省一次 LLM 调用
-      }, 60000);
+      };
+      probeLog('session/create', createParams); // 票 zcode-r：create 的 schema（hKe）认 mode，这里照旧带
+      const r = await this.request('session/create', createParams, 60000);
       sessionId = String(r?.session?.sessionId || r?.sessionId || '');
       if (!sessionId) throw new Error('session/create 未返回 sessionId');
       rtLog(`[zcode] session created: ${sessionId.slice(0, 8)} (session=${sessionKey.slice(0, 12)})`);
