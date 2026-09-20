@@ -228,7 +228,8 @@ async function main(): Promise<void> {
     persistFile: path.join(process.env.CTI_USER_HOME || os.homedir(), '.agents-to-feishu', 'runtime', `sessions-${process.env.CTI_BOT || 'default'}.json`),
     // 2026-08-29 修复：把 chatId 透传给 provider.resetSession —— 此前丢弃导致
     // in-process 组（dsh 等 6 个）的 map 条目从不删除，只能靠空闲回收/LRU 兜底。
-    onSessionReset: async (chatId: string) => { await provider.resetSession(chatId); },
+    // 2026-09-20 孤儿档案修：同时透传重置前的旧 sessionKey（=streamChat 存档案用的那把尺子）。
+    onSessionReset: async (chatId: string, oldSessionKey?: string) => { await provider.resetSession(chatId, oldSessionKey); },
   });
   sessions.restore();
   const engine = new MessageEngine({

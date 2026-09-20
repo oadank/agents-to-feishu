@@ -431,15 +431,25 @@ export class DshProvider implements RuntimeProvider {
 
   /**
    * /new：清掉该 key 的旧会话绑定，下一条消息在进程内开新 session（不杀进程）。
+   * [09-20 孤儿档案修] 桥第一参数历来传 chatId，而 sessions/savedSids 的键是 streamChat
+   * 的 sessionKey（=session.id，UUID）——两把尺子，删除历来打不中→/new 后档案留孤儿。
+   * 现接第二参数 oldSessionKey（桥 reset 前留底的旧 key），删档与存档对齐同一把尺子；
+   * 另按 chat_id 包含匹配扫一遍档案键（若键形含 chatId 成分一并删，防御未来键制变化）。
    */
-  async resetSession(sessionKey?: string): Promise<void> {
-    if (sessionKey) {
-      // 用户显式 /new：档案号一并作废（下条不赎回，新建后写新号）
-      this.sessions.delete(sessionKey);
-      this.savedSids.delete(sessionKey);
-      this.saveSids();
-      rtLog(`[dsh] resetSession key=${sessionKey.slice(0, 8)}`);
+  async resetSession(sessionKey?: string, oldSessionKey?: string): Promise<void> {
+    if (!sessionKey && !oldSessionKey) return;
+    const canon = oldSessionKey || sessionKey!; // 存档用的那把尺子优先
+    this.sessions.delete(canon);
+    if (sessionKey && sessionKey !== canon) this.sessions.delete(sessionKey);
+    let swept = 0;
+    for (const k of [...this.savedSids.keys()]) {
+      if (k === canon || k === sessionKey || (sessionKey && k.includes(sessionKey))) {
+        this.savedSids.delete(k);
+        swept++;
+      }
     }
+    this.saveSids();
+    rtLog(`[dsh] resetSession key=${(sessionKey || '').slice(0, 8)} old=${(oldSessionKey || '').slice(0, 8)} 清档案 ${swept} 条`);
   }
 
   async interrupt(): Promise<void> {

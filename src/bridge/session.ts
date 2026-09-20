@@ -54,7 +54,9 @@ export interface SessionManagerOptions {
   /** 会话持久化文件（2026-08-31 重启保记忆）：设置后自动恢复+变更落盘 */
   persistFile?: string;
   defaultWorkdir: string;
-  onSessionReset?: (chatId: string) => Promise<void>;
+  /** chatId + 重置前的旧 sessionKey（09-20 孤儿档案修：/new 会换新 session.id，
+   *  provider 落盘的会话档案按旧 key 存——不带上旧 key，"存"和"删"就是两把尺子，必留孤儿） */
+  onSessionReset?: (chatId: string, oldSessionKey?: string) => Promise<void>;
 }
 
 /** 会话注册表：chatId → Session（持久化到内存；重启后重新绑定） */
@@ -102,6 +104,7 @@ export class SessionManager {
    */
   async reset(chatId: string): Promise<Session> {
     const session = this.getOrCreate(chatId);
+    const oldSessionKey = session.id; // 换新 id 前留底：provider 删档案要用旧 key（同一把尺子）
     session.id = crypto.randomUUID();
     session.displayId = session.id; // /new = 新对话 → 状态栏 id 换新
     session.context = [];
@@ -111,7 +114,7 @@ export class SessionManager {
     session.pendingFreshReason = 'user-new';
     session.lastActiveAt = Date.now();
     if (this.opts.onSessionReset) {
-      try { await this.opts.onSessionReset(chatId); } catch (e) {
+      try { await this.opts.onSessionReset(chatId, oldSessionKey); } catch (e) {
         console.error(`[session] reset callback failed:`, e);
       }
     }

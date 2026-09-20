@@ -101,8 +101,10 @@ export interface RuntimeProvider {
    * 2026-08-29：加可选 sessionKey —— SessionManager.reset 早已把 chatId 传给
    * onSessionReset（session.ts:102），但接口没这个参数导致 index.ts 把它丢弃，
    * in-process 组的 resetSession 因拿不到 key 而从不删 map 条目。
+   * 🔴 2026-09-20 孤儿档案修：第二参数 oldSessionKey=重置前 streamChat 用的 sessionKey
+   * （/new 会换新 session.id，落盘档案按旧 key 存，删档必须用旧 key 才是同一把尺子）。
    */
-  resetSession(sessionKey?: string): Promise<void>;
+  resetSession(sessionKey?: string, oldSessionKey?: string): Promise<void>;
 
   /** /stop：中断当前任务（尽力而为，超时强制） */
   interrupt(): Promise<void>;
