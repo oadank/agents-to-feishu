@@ -185,11 +185,25 @@ export function createWorkBuddyProvider(): RuntimeProvider {
       // 铁律：只允许清自己那一代（按进程实例判等）。
       proc.on('exit', (code) => {
         rtLog(`[wb-acp] 子进程退出 code=${code} stderr尾=${stderr.slice(-200)}`);
+        // 🔴 09-20 wb-1③ 自愈（8e7cf9a/caf59ff 同类病）：进程死了，所有在途 rpc 之前要干等
+        // 最长 900s 保险丝才报错、卡片全程假死。现在当场以 error 响应唤醒 pend，在途轮次秒级收尾。
+        for (const [pid, res] of [...pend]) { pend.delete(pid); res({ error: { message: `WB ACP 子进程已退出 code=${code}` } }); }
         if (child === proc) { child = null; startPromise = null; }
       });
-      const r = await rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
-      if (!r.result) throw new Error('WB ACP initialize 失败');
-      rtLog('[wb-acp] initialize OK');
+      try {
+        const r = await rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
+        if (!r.result) throw new Error('WB ACP initialize 失败');
+        rtLog('[wb-acp] initialize OK');
+      } catch (e) {
+        // 🔴 09-20 wb-1③ 根治同类病："重投 prompt 不重建进程"的变体=init 失败不清尸——
+        // 原来 initialize 超时/失败后 spawn 出的 proc 仍挂在 child 上活着，下轮 ensureChild
+        // 判 stdin.writable+exitCode===null 直接复用这具半死尸体，之后每轮 rpc 全部超时死循环。
+        // 修法：失败即强杀当代+清把手，下条消息真重建（老大 09-20 令：先给能自愈的代码）。
+        console.warn(`[wb-acp] initialize 失败 → 强杀当代子进程待重建: ${String(e).slice(0, 160)}`);
+        rtLog(`[wb-acp] initialize 失败 → hardKill 当代待重建: ${String(e).slice(0, 160)}`);
+        if (child === proc) { hardKill(proc); child = null; startPromise = null; }
+        throw e;
+      }
     })();
     try { await startPromise; } finally { if (!child) startPromise = null; }
   }
@@ -316,6 +330,7 @@ export function createWorkBuddyProvider(): RuntimeProvider {
     async dispose(): Promise<void> {
       hardKill(child);
       child = null;
+      startPromise = null; // 09-20 wb-1③：不清则销毁后再 ensureChild 会 await 复用的死 promise 永挂
     },
   };
 }
