@@ -161,7 +161,10 @@ export function createWorkBuddyProvider(): RuntimeProvider {
   };
 
   async function ensureChild(): Promise<void> {
-    if (child?.stdin?.writable && child.exitCode === null) return;
+    // 票 hand-3①（对齐 ACP 六家 0317046 双尺）：判活补 signalCode。Windows 下 kill()
+    // （TerminateProcess）式死亡 exitCode 恒 null、只有 signalCode 置位 —— 只判 exitCode 会把
+    // 被杀型死的进程当活的复用（stdin.writable 在进程刚死时仍可能为 true），下面每轮 rpc 白等一次。
+    if (child?.stdin?.writable && child.exitCode === null && child.signalCode === null) return;
     if (startPromise) return startPromise;
     startPromise = (async (): Promise<void> => {
       // 🔴 09-20 复盘定罪：--tools 是全局白名单，把 MCP 池一并杀了（20:47 无刀时六域全绿

@@ -76,7 +76,8 @@ export class OpenClawProvider implements RuntimeProvider {
   private child: ChildProcess | null = null;
   private lineBuf = '';
   private nextId = 100;
-  private pending = new Map<number, (msg: any) => void>();
+  /** 按 request id 等待的响应 resolver —— 存 {resolve,reject} 两把手：进程没了要能 reject 掉等待方 */
+  private pending = new Map<number, { resolve: (msg: any) => void; reject: (e: Error) => void }>();
   private activePrompt: ActivePrompt | null = null;
   private currentStreamEnd: Promise<void> | null = null;
   private interruptedSessionIds = new Set<string>();
@@ -162,8 +163,22 @@ export class OpenClawProvider implements RuntimeProvider {
     const stranded = this.activePrompt;
     this.activePrompt = null;
     if (stranded) { try { stranded.onDone(`OpenClaw 引擎进程已退出，本条消息请重发（已自动复位，下条消息走新进程）`); } catch { /* 单条唤醒失败不阻塞收口 */ } }
-    // 注：pending 目前只存 resolve（无 reject），初始化/建会话阶段的等待方仍需下一笔
-    // 把 pending 改 {resolve,reject} 形态才能真正逐个唤醒 —— 见 hand-3 剩余清单。
+    // 票 hand-3 剩余（老大 09-20"别靠监控垃圾维持稳定，把代码写对"）：pending 过去只存
+    // resolve，初始化/建会话阶段的等待方进程死了也不醒，只能干等各自兜底超时（prompt 更无超时=永生）。
+    this.wakePending(`OpenClaw 引擎进程已退出`);
+  }
+
+  /**
+   * 票 hand-3 剩余：把在途的所有请求等待方逐个唤醒（reject）并清账。
+   * 与 handleProcessLost/killProcess/close 三处进程丢失路径绑定 —— 引擎没了，等的人必须当场知道，
+   * 而不是把兜底超时当答案（initialize/session-new/resume 的兜底是 60s，prompt 那条根本没有超时）。
+   */
+  private wakePending(reason: string): void {
+    const waiters = [...this.pending.values()];
+    this.pending.clear();
+    for (const w of waiters) {
+      try { w.reject(new Error(`ACP 请求中止：${reason}`)); } catch { /* 单条唤醒失败不阻塞收口 */ }
+    }
   }
 
   /**
@@ -198,7 +213,7 @@ export class OpenClawProvider implements RuntimeProvider {
     this.child = null;
     this.spawnPromise = null;
     this.sessions.clear();
-    this.pending.clear();
+    this.wakePending('引擎进程已关闭（主动杀，下条消息重建）');
     this.activePrompt = null;
     this.lineBuf = '';
   }
@@ -216,9 +231,9 @@ export class OpenClawProvider implements RuntimeProvider {
       const id = msg.id as number | undefined;
       const isResponse = !msg.method && (msg.result !== undefined || msg.error);
       if (isResponse && id != null && this.pending.has(id)) {
-        const resolve = this.pending.get(id)!;
+        const w = this.pending.get(id)!;
         this.pending.delete(id);
-        resolve(msg);
+        w.resolve(msg);
         continue;
       }
 
@@ -285,7 +300,7 @@ export class OpenClawProvider implements RuntimeProvider {
         rtLog(`[openclaw] ACP exited code=${code}`);
         if (this.child === child) {
           this.child = null; this.spawnPromise = null;
-          this.sessions.clear(); this.pending.clear(); this.activePrompt = null; this.lineBuf = '';
+          this.sessions.clear(); this.wakePending(`引擎进程已 close（code=${code}）`); this.activePrompt = null; this.lineBuf = '';
         } else if (this.spawnPromise) {
           // 2026-09-01 修复：初始化完成前进程退出（如 gateway 未就绪 ECONNREFUSED）时清悬挂
           // spawnPromise 并唤醒等待方——否则后续 ensureProcess 永远复用死 promise，
@@ -325,7 +340,7 @@ export class OpenClawProvider implements RuntimeProvider {
 
   private waitResponse(id: number, timeoutMs?: number): Promise<any> {
     return new Promise((resolve, reject) => {
-      this.pending.set(id, resolve);
+      this.pending.set(id, { resolve, reject });
       if (timeoutMs && timeoutMs > 0) {
         setTimeout(() => {
           if (this.pending.has(id)) { this.pending.delete(id); reject(new Error(`ACP request ${id} timeout`)); }

@@ -329,7 +329,9 @@ export class ZcodeProvider implements RuntimeProvider {
     this.child = null;
     this.spawnPromise = null;
     this.sessions.clear();
-    this.pending.clear();
+    // 票 hand-3 剩余（zcode 是 ACP 六家之外判活/唤醒意义上的第七家）：清账前先把等待方唤醒，
+    // 否则 session/new|close 的调用方只能干等自己的兜底超时（旧写法是静默 clear）。
+    this.wakePending('ZCode 进程已释放');
     this.lineBuf = '';
     for (const [, t] of this.turns) {
       try { t.emit({ type: 'error', message: 'ZCode 进程已释放' }); } catch { /* 忽略 */ }
@@ -382,7 +384,7 @@ export class ZcodeProvider implements RuntimeProvider {
         rtLog(`[zcode] app-server exited code=${code}`);
         if (this.child === child) {
           this.child = null; this.spawnPromise = null;
-          this.pending.clear();
+          this.wakePending(`ZCode 进程退出（code=${code}）`);
           // 票 hand-1（对齐 mimo.ts:221 现成写法）：进程把手复位时必须连会话把手一起清。
           // sessionId 属于这个已死的 app-server，不清则 ensureSession 的 existing 分支
           // 把死 id 原样交回，而落盘 resume 分支要求 !existing —— 被自己挡住永不触发 ⇒
@@ -405,6 +407,19 @@ export class ZcodeProvider implements RuntimeProvider {
       resolve(child);
     });
     return this.spawnPromise;
+  }
+
+  /**
+   * 票 hand-3 剩余（zcode 是六家 ACP 之外同族的第七家）：在途请求等待方逐个唤醒并清账。
+   * 进程没了/被释放时，等 session/new|close 的调用方必须当场拿到错误，而不是干等兜底超时。
+   */
+  private wakePending(reason: string): void {
+    const waiters = [...this.pending.values()];
+    this.pending.clear();
+    for (const w of waiters) {
+      try { clearTimeout(w.timer); } catch { /* 计时器已触发 */ }
+      try { w.reject(new Error(`ZCode 请求中止：${reason}`)); } catch { /* 单条唤醒失败不阻塞收口 */ }
+    }
   }
 
   private request(method: string, params: unknown, timeoutMs = 30000): Promise<any> {
