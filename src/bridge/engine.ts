@@ -791,11 +791,13 @@ export class MessageEngine {
       //   compact.ts applyCompactResult —— 摘要作为 user 消息进入新会话，下轮自然携带。
       // 2026-08-30 修复：语音回复规范每轮随文携带（此前 systemPrompt 仅会话首条注入，
       // 老会话不知道【语音】块约定 ⇒ TTS 对老会话失效，实测 claude/dsh 语音回复=0）
-      const VOICE_RULE_TURN = '\n\n[回复格式提醒] 若用户发来的是语音、或明确要求语音回复（如"用语音回答"）：在回复末尾追加一个【语音】块——单独一行"【语音】"，下一行写口语文本（禁 markdown/代码/表格）；未被要求时不写该块。';
       const turnStartTs = Date.now(); // litellm 中转 bot 补拉用量用（按时间窗过滤记账库）
       let gotRealUsage = false; // [票mm-1] 判据=usage 事件输入侧有量（能落盘 stats）才算真实；gemini 恒 input=0 → 放行补拉
       for await (const ev of provider.streamChat({
-        text: `${text}${provider.name === 'deeptutor' ? '' : VOICE_RULE_TURN}`,
+        // [09-20 老大令·去堆积] 语音规则每轮尾巴（VOICE_RULE_TURN ~90字/条，且随引擎历史
+        // 永久堆积）废除：该规则全文已在注入 global 段「## 语音」（老大瘦身版自带），每家新引擎
+        // 会话首条必带；09-20 全桥已滚过一轮，存量会话 persona 均已含此段，尾巴纯冗余。
+        text,
         // [2026-09-03] deeptutor 语音标记：attachments 带 audio 项 = 本轮来自语音
         // 消息，provider 据此给 DeepTutor 拼 [语音消息] 前缀触发其语音契约（自动
         // 回语音 artifact，再由 sources 钩子投递）。其他 provider 忽略。
