@@ -347,6 +347,37 @@ export class DshProvider implements RuntimeProvider {
   private interruptedSessionIds = new Set<string>();
   /** 09-20 老大令：弹卡要报原因——idle/interrupt/restart 属正常换代温和提醒，判不了才按异常告警 */
   private lostReasons = new Map<string, 'idle' | 'interrupt' | 'restart'>();
+  /** 🔴 09-20 老大令「不主动 /new 就不许断」：会话档案号落盘，进程死亡后首条先向引擎
+   *  session/resume 赎回（DSH ACP 声明 sessionCapabilities.resume，对话本就持久化在盘）。
+   *  赎回成功=记忆原样、不弹卡；失败才走老路新建+弹卡。文件形态对齐 WB 家。 */
+  private savedSids = new Map<string, string>();
+  private sidFile(): string {
+    return path.join(process.env.CTI_USER_HOME || os.homedir(), '.agents-to-feishu', 'runtime', 'sessions-dsh-acp.json');
+  }
+  private loadSids(): void {
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.sidFile(), 'utf8')) as Record<string, string>;
+      for (const [k, v] of Object.entries(raw)) if (typeof v === 'string' && v) this.savedSids.set(k, v);
+      rtLog(`[dsh] 载入 ${this.savedSids.size} 条会话档案号（复活可赎回）`);
+    } catch { /* 首跑无档案 */ }
+  }
+  private saveSids(): void {
+    try {
+      fs.mkdirSync(path.dirname(this.sidFile()), { recursive: true });
+      fs.writeFileSync(this.sidFile(), JSON.stringify(Object.fromEntries(this.savedSids)), 'utf8');
+    } catch { /* 落盘失败不拦主流程 */ }
+  }
+  /** 向引擎要回旧会话。引擎侧档案缺失/cwd 不符/方法不支持都会报错，由调用方兜底新建。 */
+  private async resumeSession(sid: string, cwd: string): Promise<void> {
+    const child = await this.ensureProcess();
+    const id = this.nextId++;
+    this.sendRequest(child, {
+      jsonrpc: '2.0', id, method: 'session/resume',
+      params: { sessionId: sid, cwd, mcpServers: this.acpMcpServers() },
+    });
+    const msg = await this.waitResponse(id, 60_000);
+    if (!msg?.result) throw new Error(msg?.error?.message ? String(msg.error.message) : 'no result');
+  }
   /** 会话注册表：sessionKey（桥接层 id）→ ACP session（同一进程内） */
   private sessions = new Map<string, AcpSession>();
   /** 进程 spawn 等待队列（initialize 未完成时排队的请求） */
@@ -359,6 +390,7 @@ export class DshProvider implements RuntimeProvider {
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
+    this.loadSids();
     // Phase 1（2026-08-29 方向定调）：bot 启动即确保内置工具插件就位（幂等，零配置、不走 HTTP）
     ensureDshPluginInjected((m) => rtLog(m));
   }
@@ -402,7 +434,10 @@ export class DshProvider implements RuntimeProvider {
    */
   async resetSession(sessionKey?: string): Promise<void> {
     if (sessionKey) {
+      // 用户显式 /new：档案号一并作废（下条不赎回，新建后写新号）
       this.sessions.delete(sessionKey);
+      this.savedSids.delete(sessionKey);
+      this.saveSids();
       rtLog(`[dsh] resetSession key=${sessionKey.slice(0, 8)}`);
     }
   }
@@ -803,6 +838,7 @@ export class DshProvider implements RuntimeProvider {
     // 而 session 可能因空闲回收/进程重启/LRU 被清——这些路径新建会话却不带历史 ⇒ 失忆。
     // 现统一为「本轮新建了会话 && bridge 有历史」就注入。/new 时 context 已清空天然空白。
     const isNewSession = !session || params.freshSession || sessionInterrupted;
+    let resumedOk = false;
     if (!session || params.freshSession || sessionInterrupted) {
       if (session && sessionInterrupted) {
         this.interruptedSessionIds.delete(session.sessionId);
@@ -810,15 +846,35 @@ export class DshProvider implements RuntimeProvider {
         this.sessions.delete(sessionKey);
         rtLog(`[dsh] interrupted session, opening new one for key ${sessionKey.slice(0, 8)}`);
       }
-      try {
-        session = await this.createSession(process.env.CTI_DEFAULT_WORKDIR || process.cwd());
-        this.sessions.set(sessionKey, session);
-        this.startCleanupTimer();
-        if (params.freshSession) rtLog(`[dsh] freshSession: new acp session for key ${sessionKey.slice(0, 8)}`);
-      } catch (e) {
-        yield { type: 'error', message: `DSH ACP 会话创建失败: ${e instanceof Error ? e.message : String(e)}` };
-        yield { type: 'done' };
-        return;
+      if (params.freshSession) { this.savedSids.delete(sessionKey); this.saveSids(); }
+      const savedCwd = process.env.CTI_DEFAULT_WORKDIR || process.cwd();
+      const saved = params.freshSession ? undefined : this.savedSids.get(sessionKey);
+      if (saved) {
+        try {
+          await this.resumeSession(saved, savedCwd);
+          session = { sessionId: saved, cwd: savedCwd, lastUsed: Date.now(), personaInjected: true };
+          this.sessions.set(sessionKey, session);
+          this.startCleanupTimer();
+          resumedOk = true;
+          rtLog(`[dsh] session/resume 赎回 ${saved.slice(0, 8)}：记忆原样，不弹卡`);
+        } catch (e) {
+          rtLog(`[dsh] session/resume 失败(${e instanceof Error ? e.message.slice(0, 140) : e}) → 新建+照常弹卡`);
+          this.savedSids.delete(sessionKey); this.saveSids();
+        }
+      }
+      if (!resumedOk) {
+        try {
+          session = await this.createSession(savedCwd);
+          this.sessions.set(sessionKey, session);
+          this.savedSids.set(sessionKey, session.sessionId);
+          this.saveSids();
+          this.startCleanupTimer();
+          if (params.freshSession) rtLog(`[dsh] freshSession: new acp session for key ${sessionKey.slice(0, 8)}`);
+        } catch (e) {
+          yield { type: 'error', message: `DSH ACP 会话创建失败: ${e instanceof Error ? e.message : String(e)}` };
+          yield { type: 'done' };
+          return;
+        }
       }
     }
 
@@ -832,7 +888,7 @@ export class DshProvider implements RuntimeProvider {
     }
     // [2026-09-17] history 注入条件改为 isNewSession（见上方注释）。
     // 🔴 老大令 2026-09-19：非 /new 的丢失性新建 → 自动 /new（回调桥清 shadow 并告知），影子回灌废除
-    if (isNewSession && !params.freshSession && params.history && params.history.length > 0) {
+    if (isNewSession && !resumedOk && !params.freshSession && params.history && params.history.length > 0) {
       const lostReason = this.lostReasons.get(sessionKey) ?? (this.sessions.size <= 1 ? 'restart' : 'unknown');
       this.lostReasons.delete(sessionKey);
       rtLog(`[dsh] engine session lost (${lostReason}, shadow ${params.history.length}) → auto /new`);
