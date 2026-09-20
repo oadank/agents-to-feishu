@@ -574,6 +574,9 @@ export class MessageEngine {
     const { provider, sessions } = this.opts;
     const session = sessions.getOrCreate(chatId);
     const fresh = sessions.consumeFresh(session);
+    // [09-20 裁决] fresh 的来源：user-new=用户主动 /new；restore=桥重启恢复。
+    // 供支持赎回的 provider（dsh）区分"复活旧会话"还是"彻底空白"。
+    const freshReason = fresh ? sessions.consumeFreshReason(session) : undefined;
     // [2026-09-02 修复] 中断插队后保留历史：status==='interrupted'（卡片"是"/自动插队/或 /stop 触发）时，
     // 下条消息把 session.context 作为 history 传给 provider，避免"新建会话丢上下文"。
     const interrupted = session.status === 'interrupted';
@@ -792,6 +795,7 @@ export class MessageEngine {
           : {}),
         sessionKey: session.id,
         freshSession: fresh,
+        freshReason,
         systemPrompt: this.buildSystemPrompt(),
         workdir: session.workdir,
         // [2026-09-17] 恒传 history（现仅供 /new 语义的合法携带）。
@@ -802,6 +806,7 @@ export class MessageEngine {
           if (session.context.length === 0) return;
           session.context = [];
           session.pendingFresh = true;
+          session.pendingFreshReason = 'user-new'; // 等效自动 /new：下条绝不许赎回旧会话
           this.opts.sessions.persist();
           console.log(`[engine] auto /new on engine session lost (${reason || 'unknown'}) chat=${chatId.slice(0, 12)}`);
           // 🔴 老大令 2026-09-20：🆕 卡太吓人还满天飞——先分原因再说话。idle/interrupt/restart

@@ -29,6 +29,8 @@ export interface Session {
   context: Array<{ role: 'user' | 'assistant'; content: string }>;
   /** 该会话是否已被 /new 重置（下一条消息 fresh） */
   pendingFresh: boolean;
+  /** fresh 标记的来源（09-20 裁决）：user-new=用户 /new；restore=重启恢复。consumeFresh 时一并取走 */
+  pendingFreshReason?: 'user-new' | 'restore';
   /** 逻辑会话 id（状态栏显示用）：持久化、跨重启稳定，仅 /new 时重新生成（2026-08-31） */
   displayId?: string;
   /** usage 统计（实时缓存命中率/上下文） */
@@ -106,6 +108,7 @@ export class SessionManager {
     session.status = 'idle';
     session.usage = { lastHit: 0, lastTotal: 0, sumHit: 0, sumMiss: 0, requests: 0, outputTokens: 0 };
     session.pendingFresh = true;
+    session.pendingFreshReason = 'user-new';
     session.lastActiveAt = Date.now();
     if (this.opts.onSessionReset) {
       try { await this.opts.onSessionReset(chatId); } catch (e) {
@@ -142,6 +145,7 @@ export class SessionManager {
         // P0 修复：恢复的会话若有历史 context，标记 fresh——下次消息 fresh 注入 history 才生效
         if (Array.isArray(s.context) && s.context.length > 0) {
           s.pendingFresh = true;
+          s.pendingFreshReason = 'restore'; // 09-20 裁决：重启恢复≠用户 /new，provider 可据此走赎回通道
           withCtx++;
         }
         this.sessions.set(k, s);
@@ -156,7 +160,15 @@ export class SessionManager {
   consumeFresh(session: Session): boolean {
     const fresh = session.pendingFresh;
     session.pendingFresh = false;
+    if (!fresh) session.pendingFreshReason = undefined;
     return fresh;
+  }
+
+  /** 消费 fresh 的来源标记（09-20 裁决：区分 /new 与重启恢复；必须在 consumeFresh 之后紧跟着调） */
+  consumeFreshReason(session: Session): 'user-new' | 'restore' | undefined {
+    const r = session.pendingFreshReason;
+    session.pendingFreshReason = undefined;
+    return r;
   }
 
   /** /stop：中断当前任务 */

@@ -846,9 +846,12 @@ export class DshProvider implements RuntimeProvider {
         this.sessions.delete(sessionKey);
         rtLog(`[dsh] interrupted session, opening new one for key ${sessionKey.slice(0, 8)}`);
       }
-      if (params.freshSession) { this.savedSids.delete(sessionKey); this.saveSids(); }
+      // [09-20 裁决] freshSession 两个来源分道：user-new=用户主动 /new（档案作废，绝不复活）；
+      // restore=桥重启恢复（先向引擎赎回旧会话，成功=记忆原生连续且不喂影子，失败=退回新建+影子注入照旧）。
+      const reviveAllowed = !params.freshSession || params.freshReason === 'restore';
+      if (params.freshSession && !reviveAllowed) { this.savedSids.delete(sessionKey); this.saveSids(); }
       const savedCwd = process.env.CTI_DEFAULT_WORKDIR || process.cwd();
-      const saved = params.freshSession ? undefined : this.savedSids.get(sessionKey);
+      const saved = reviveAllowed ? this.savedSids.get(sessionKey) : undefined;
       if (saved) {
         try {
           await this.resumeSession(saved, savedCwd);
@@ -902,7 +905,8 @@ export class DshProvider implements RuntimeProvider {
       rtLog(`[dsh] engine session lost (${lostReason}, shadow ${params.history.length}) → auto /new`);
       params.onSessionLost?.(lostReason as 'idle' | 'interrupt' | 'restart' | 'unknown');
     }
-    const historyText = isNewSession && params.freshSession && params.history && params.history.length > 0
+    // 赎回成功=引擎真记忆回来了，禁喂影子（双重上下文会串话）；仅 user-new/新建路径注入。
+    const historyText = isNewSession && params.freshSession && !resumedOk && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
       : '';
     if (historyText) {

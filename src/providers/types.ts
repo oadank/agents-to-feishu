@@ -66,6 +66,10 @@ export interface StreamChatParams {
   sessionKey: string;
   /** 是否需要新建空白会话（/new 后第一条消息必为 true） */
   freshSession?: boolean;
+  /** 🔴 09-20 裁决：freshSession 的来源区分——user-new=用户主动 /new（档案作废，绝不复活）；
+   *  restore=桥重启恢复（provider 可先向引擎赎回旧会话，成功则记忆原生连续）。
+   *  其他 provider 不读=行为不变。 */
+  freshReason?: 'user-new' | 'restore';
   /** 会话内已累积的正文（发给 CLI 型运行时的历史回放；/compact 摘要也在里面） */
   history?: ChatMessage[];
   /** 🔴 老大令 2026-09-19：桥发现引擎侧会话已丢（被杀/回收/库被清）时回调 ——
