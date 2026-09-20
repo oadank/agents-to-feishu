@@ -345,6 +345,8 @@ export class DshProvider implements RuntimeProvider {
   private currentStreamEnd: Promise<void> | null = null;
   /** 被 interrupt 取消过的 sessionId：下一条消息必须开新 session（cancel 后旧 turn 未释放，复用会 turn/start 冲突） */
   private interruptedSessionIds = new Set<string>();
+  /** 09-20 老大令：弹卡要报原因——idle/interrupt/restart 属正常换代温和提醒，判不了才按异常告警 */
+  private lostReasons = new Map<string, 'idle' | 'interrupt' | 'restart'>();
   /** 会话注册表：sessionKey（桥接层 id）→ ACP session（同一进程内） */
   private sessions = new Map<string, AcpSession>();
   /** 进程 spawn 等待队列（initialize 未完成时排队的请求） */
@@ -438,6 +440,7 @@ export class DshProvider implements RuntimeProvider {
       const now = Date.now();
       for (const [key, s] of this.sessions) {
         if (now - s.lastUsed > DshProvider.IDLE_TIMEOUT_MS) {
+          this.lostReasons.set(key, 'idle');
           this.sessions.delete(key);
           rtLog(`[dsh] idle cleanup session ${s.sessionId.slice(0, 8)}`);
         }
@@ -453,6 +456,7 @@ export class DshProvider implements RuntimeProvider {
     }
     this.child = null;
     this.spawnPromise = null;
+    for (const k of this.sessions.keys()) this.lostReasons.set(k, 'restart');
     this.sessions.clear();
     this.pending.clear();
     this.activePrompt = null;
@@ -560,6 +564,7 @@ export class DshProvider implements RuntimeProvider {
         if (this.child === child) {
           this.child = null;
           this.spawnPromise = null;
+          for (const k of this.sessions.keys()) this.lostReasons.set(k, 'restart');
           this.sessions.clear();
           this.pending.clear();
           this.activePrompt = null;
@@ -785,6 +790,7 @@ export class DshProvider implements RuntimeProvider {
         if (s.lastUsed < oldestAt) { oldestAt = s.lastUsed; oldestKey = k; }
       }
       if (oldestKey) {
+        this.lostReasons.set(oldestKey, 'idle');
         this.sessions.delete(oldestKey);
         rtLog(`[dsh] LRU evict session ${oldestKey.slice(0, 8)} (cap=${DshProvider.MAX_SESSIONS})`);
       }
@@ -800,6 +806,7 @@ export class DshProvider implements RuntimeProvider {
     if (!session || params.freshSession || sessionInterrupted) {
       if (session && sessionInterrupted) {
         this.interruptedSessionIds.delete(session.sessionId);
+        this.lostReasons.set(sessionKey, 'interrupt');
         this.sessions.delete(sessionKey);
         rtLog(`[dsh] interrupted session, opening new one for key ${sessionKey.slice(0, 8)}`);
       }
@@ -826,8 +833,10 @@ export class DshProvider implements RuntimeProvider {
     // [2026-09-17] history 注入条件改为 isNewSession（见上方注释）。
     // 🔴 老大令 2026-09-19：非 /new 的丢失性新建 → 自动 /new（回调桥清 shadow 并告知），影子回灌废除
     if (isNewSession && !params.freshSession && params.history && params.history.length > 0) {
-      rtLog(`[dsh] engine session lost (shadow ${params.history.length}) → auto /new`);
-      params.onSessionLost?.();
+      const lostReason = this.lostReasons.get(sessionKey) ?? (this.sessions.size <= 1 ? 'restart' : 'unknown');
+      this.lostReasons.delete(sessionKey);
+      rtLog(`[dsh] engine session lost (${lostReason}, shadow ${params.history.length}) → auto /new`);
+      params.onSessionLost?.(lostReason as 'idle' | 'interrupt' | 'restart' | 'unknown');
     }
     const historyText = isNewSession && params.freshSession && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')

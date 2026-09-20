@@ -20,3 +20,9 @@
 - 🔴 废除'load谎报/强制换代失忆'误判补丁：codebuddy 有真记忆系统（~/.codebuddy/projects/*/memory/MEMORY.md + word_*.md 词文件），session/load 重启恢复实测有效。
 - '工具风暴'判词修正：高工具数大头是它写/读自己记忆文件的正常动作（埋词=Write 词文件，追问=Read），并非全疯；--tools 白名单与 --effort medium 保留治真闲逛。
 - 测试纪律入账：桥有插队警示卡（处理上一条时新消息排队），必须读完回复全文再出下一题，禁连发。
+
+## 09-20 终审与 --tools 事故补账（对上表"六域全绿"的时效修正）
+- 六域全绿证据链属 19 日 19:2x-22:2x（session/new mcpServers 数组形态）。22:2x 我加 `--tools Bash,Read,...` 治工具风暴——**该参数是全局白名单，把 mcp__* 整池连坐砍光**，WB 退化成裸文件工具引擎。22:2x-次日09:0x 窗口内任何"能力在线"的说法不成立，本文件当时未修正＝虚报，记耻。
+- 期间两组对照实验均带同一把刀（对照组下毒），"mcp-config 文件不生效"系实验设计错误；真因 09:3x 才定罪。
+- 修复 563d0a1：撤 --tools/--mcp-config 实验件，恢复原配数组形态。终审：真调 `mcp__cti-builtin__skill_index`→count=13；`skill_read(lark-im)`→首标题 `# im (v1)`；DeferExecuteTool 痕迹两条在卡，回复全文已读。技能面+工具面双绿。
+- AGENTS.md 嫌疑排除：技能正文无 mcp__cti-builtin 字样；模型工具自报来自真实工具表。附带修正：`C:\D\opt\AGENTS.md` 曾自称"你是第13号WorkBuddy"，该目录与 dsh-web 共用致身份互串（老大 09:20 亲见），已改中性环境说明——**工作区根 AGENTS.md 对所有吃该目录的 agent 生效，禁写任何单一身份**。

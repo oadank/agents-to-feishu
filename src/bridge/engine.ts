@@ -798,13 +798,21 @@ export class MessageEngine {
         // 🔴 老大令 2026-09-19：影子回灌废除 —— provider 在「非用户 /new 的新建会话」
         // 分支回调 onSessionLost：桥清空 context + 发卡片告知（自动 /new）。
         ...(session.context.length > 0 ? { history: [...session.context] } : {}),
-        onSessionLost: () => {
+        onSessionLost: (reason) => {
           if (session.context.length === 0) return;
           session.context = [];
           session.pendingFresh = true;
           this.opts.sessions.persist();
-          console.log(`[engine] auto /new on engine session lost chat=${chatId.slice(0, 12)}`);
-          void this.sendCommandCard(chatId, '🆕 检测到引擎会话丢失（进程被杀/空闲回收/历史库被清），已自动新建会话并清空桥侧历史副本——记忆从此归各引擎自管。');
+          console.log(`[engine] auto /new on engine session lost (${reason || 'unknown'}) chat=${chatId.slice(0, 12)}`);
+          // 🔴 老大令 2026-09-20：🆕 卡太吓人还满天飞——先分原因再说话。idle/interrupt/restart
+          // 是正常换代（清 shadow+自动 /new 的 9/19 裁定不变），文案温和；未知原因才保留重警告。
+          const why = reason === 'idle' ? '空闲超时，旧会话按 12h 家法回收'
+            : reason === 'interrupt' ? '上一轮被打断，旧会话引擎侧无法复用'
+            : reason === 'restart' ? '引擎进程换代'
+            : null;
+          void this.sendCommandCard(chatId, why
+            ? `🔄 ${why}，已自动开新会话（桥侧历史副本清空，长期记忆按引擎自管）。`
+            : '🔄 引擎会话已换代（provider 未报原因），自动开新会话并清空桥侧历史副本——长期记忆归引擎自管。');
         },
       })) {
         switch (ev.type) {
