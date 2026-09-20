@@ -241,6 +241,11 @@ export function createDeeptutorProvider(): RuntimeProvider {
       capability: 'chat',
       language: 'zh',
       persona: PERSONA,
+      // 2026-09-20：主聊天默认不挂 load_tools，模型按人设铁律想掏外挂工具时
+      // 会"钥匙都不在手心"。走 TurnRequest.tools 合法入口强制挂上这把钥匙，
+      // 其余 mcp_* 由模型自己 load_tools 按需拉（懒加载设计不变）。
+      tools: (process.env.CTI_DEEPTUTOR_TOOLS || 'load_tools,read_skill')
+        .split(',').map((s) => s.trim()).filter(Boolean),
       ...(kbIds.length ? { knowledge_bases: kbIds } : {}),
       ...(sessionId ? { session_id: sessionId } : {}),
       ...(parentMessageId ? { parent_message_id: parentMessageId } : {}),
