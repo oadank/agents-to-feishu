@@ -294,6 +294,15 @@ export class ZcodeProvider implements RuntimeProvider {
 
   private ensureProcess(): Promise<ChildProcess> {
     if (this.child && this.child.exitCode === null) return Promise.resolve(this.child);
+    // 票 hand-1b：child 已 exit（exitCode 置位）但 close 回调迟到（如孙进程占住 stdio 管道不关）时，
+    // 旧 spawnPromise 还挂在账上，下一行 `return this.spawnPromise` 会把死 child 原样复返 ⇒ 新消息
+    // 每条白等一次 request 超时才拿得到错误（claude 案同款：把手背后的东西没了没人复位）。
+    // 判据与上一行同一把尺子（exitCode !== null ⇒ 死，不引入 !killed）；摘把后落到下面真 spawn。
+    // close 后到时旧回调的 `this.child === child` 守卫不成立，不会把新把手误当死把手复位。
+    if (this.child && this.child.exitCode !== null) {
+      rtLog('[zcode] ensureProcess: 把手指向已 exit 的 child（close 未到），复位双把手强制真 spawn（hand-1b）');
+      this.child = null; this.spawnPromise = null;
+    }
     if (this.spawnPromise) return this.spawnPromise;
 
     let rejectSpawn: (e: Error) => void = () => {};
