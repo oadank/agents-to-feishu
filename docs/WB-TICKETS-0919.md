@@ -313,3 +313,5 @@ its configuration or execution environment is repaired
 | 票2 bash 126 | ⚠️ 部分修复（126 已解，遗留 10s 超时） | `%APPDATA%\reasonix\config.toml`（1 行） | `doctor --json` write_roots 已收窄；4 组排除实验 |
 
 **约束遵守**：全程未向飞书发送任何测试消息；判定依据仅来自 `logs/reasonix-*.log`、`reasonix doctor`（只读）、磁盘状态与配置对比。所有临时探针文件已清理，`git status` 仅剩 `src/index.ts` 一处改动。
+=== 撤单落账(不知会任何人, 只记账) ===
+■ 【撤单记录 09-20 老大口谕】wb-1①「10s 痕迹穷尽」与 wb-1②「方案书 A/B」两票永久撤销——前提已死(真因 allow_write 过宽已修, 沙箱 active), 且 dsh 第三条路已绕过; 无需知会执行人, 本行即结案。
