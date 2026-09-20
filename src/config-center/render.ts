@@ -56,13 +56,21 @@ export function withToolRouteInject(globalInject: string): string {
   return base.trim() ? `${base}\n\n${TOOL_ROUTE_PROMPT}` : TOOL_ROUTE_PROMPT;
 }
 
+/** 技能目录豁免户（老大 2026-09-20 令：deeptutor 不要能力——不注入【技能目录】、不铺盘）。
+ *  只摘技能面，lark/其他工具与聊天功能不受影响。 */
+const SKILL_EXEMPT_AGENTS = new Set(['deeptutor']);
+
 /**
  * apply 统一注入合成：store 全局注入 → 视觉降级令（按 model.visionCapable）→ 工具路权令（全员）。
  * config.env 与 dsh persona.md 共用，保证两处口径一致。
+ * agentId 传入时按豁免户摘掉技能目录段（老大 09-20 令）。
  */
-export function buildAgentGlobalInject(store: ConfigStore, model?: ModelDef): string {
+export function buildAgentGlobalInject(store: ConfigStore, model?: ModelDef, agentId?: string): string {
   const base = store.injection?.enabled === false ? '' : (store.injection?.global ?? '');
-  // skill Phase1：技能清单（name+一句 desc+路径）拼进统一注入，12 家同车（幂等，见 withSkillIndexInject）
+  // skill Phase1：技能清单（name+一句 desc+路径）拼进统一注入（幂等，见 withSkillIndexInject）
+  if (agentId && SKILL_EXEMPT_AGENTS.has(agentId)) {
+    return withToolRouteInject(withVisionDegradeInject(base, model));
+  }
   return withToolRouteInject(withVisionDegradeInject(withSkillIndexInject(base, resolveMountedSkills(store)), model));
 }
 
@@ -278,7 +286,7 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   // 注入（systemPrompt）：统一注入(全局) + 独立注入(该 agent)。值用 JSON 字符串编码，
   // loadConfig 读取时 JSON.parse 还原（支持多行/引号）。空字符串也写，保证键存在。
   // 合成：store 全局 → 视觉降级令（visionCapable）→ 工具路权令（全员，内建底座优先）。
-  const globalInject = buildAgentGlobalInject(store, model);
+  const globalInject = buildAgentGlobalInject(store, model, agent.id);
   lines.push('# ── systemPrompt 注入：统一(全局) + 独立(本 agent) ──');
   lines.push(`# visionCapable=${resolveVisionCapable(model)}；toolRoute=always`);
   lines.push(`CTI_SYSTEM_PROMPT_GLOBAL=${JSON.stringify(globalInject)}`);
@@ -673,7 +681,7 @@ export function writeAgentArtifacts(
     // 生成 persona.md：cordis.yml 的 acp-agent 段用 readFileSync 引用它，缺失会导致
     // 插件树加载失败（ENOENT persona.md）→ acp-demo 崩溃 → ACP 全部超时（"ACP request 100 timeout"）。
     // 内容 = 统一注入(全局, 视觉降级令+工具路权令) + 独立注入(本 agent)，拼接规则对齐 config.ts buildInjectedSystemPrompt。
-    const personaGlobal = buildAgentGlobalInject(_store, findModel(_store, agent.providerId, agent.modelId));
+    const personaGlobal = buildAgentGlobalInject(_store, findModel(_store, agent.providerId, agent.modelId), agent.id);
     const personaCustom = agent.systemPrompt ?? '';
     const personaBody = [personaGlobal, personaCustom].filter((s) => s && s.trim()).join('\n\n---\n\n');
     const personaPath = path.join(process.env.CTI_USER_HOME || os.homedir(), '.dsh', `${agent.id}-bot`, 'persona.md');
@@ -771,6 +779,7 @@ function syncOpenakitaSkillRegistry(hunme: string, skills: SkillIndexEntry[], ag
 
 /** apply 时把 skills/ 分发到各原生家（调用点：writeAgentArtifacts，紧随 syncMcpToCli） */
 export function syncSkillsToCli(store: ConfigStore, agent: AgentDef): void {
+  if (SKILL_EXEMPT_AGENTS.has(agent.id)) return; // 老大 09-20 令：deeptutor 不铺技能盘
   const rt = agent.runtime || '';
   if (!rt || rt === 'dsh') return; // dsh：cordis customSkillDirs + persona.md 已覆盖
   const skills = resolveMountedSkills(store);
