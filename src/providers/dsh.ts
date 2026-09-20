@@ -878,6 +878,14 @@ export class DshProvider implements RuntimeProvider {
       }
     }
 
+    // [兜底 2026-09-20] 上面分支逻辑上必产生有效 session，但 try/catch 内的赋值让 TS
+    // 无法收窄（TS18048×8）。此守卫运行时不可达，只作类型收窄 + 异常态响亮报错。
+    if (!session) {
+      yield { type: 'error', message: 'DSH ACP 会话状态异常（未赎回未新建）' };
+      yield { type: 'done' };
+      return;
+    }
+
     session.lastUsed = Date.now();
 
     // 首次注入人设
