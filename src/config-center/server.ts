@@ -38,6 +38,8 @@ import { startAgent as pmStart, stopAgent as pmStop, restartAgent as pmRestart, 
 import { syncDeepTutorModel, syncDeepTutorMcp } from './sync-deeptutor.js';
 import { scanChatsMap } from './chats-map-scan.js';
 import { buildAgentRuntimeState, type AgentRuntimeState } from './runtime.js';
+// 团队任务账（2026-09-20）：一本账 + 版本号 + 状态机，见 taskboard.ts。独立落盘，不碰 config-store。
+import { createTask, claimTask, updateTask, listTasks, getTask, boardSummary } from './taskboard.js';
 import { lookImage } from '../vision/look.js';
 import {
   synthesize, synthesizeVoiceClone, AUDIO8_DIR, AUDIO8_VOICES_DIR, AUDIO8_PY, type TtsConfig,
@@ -623,6 +625,37 @@ export function createConfigServer(opts: ConfigServerOptions) {
         save(store);
         return json(res, 200, { ok: true, data: store.settings });
       }
+      // ══ 团队任务账（2026-09-20）══
+      // 一本账：建账拿号（幂等）→ 领活（分片抢占）→ 推进/交活（版本对账 + 状态机 + 证据）。
+      // 业务拒绝一律 200 + ok:false（与各 bot 五花八门的调用方兼容），冲突带 conflict:true 让人一眼看见。
+      if (p === '/api/tasks' && method === 'GET') {
+        return json(res, 200, listTasks({
+          status: u.searchParams.get('status') ?? undefined,
+          owner: u.searchParams.get('owner') ?? undefined,
+          shard: u.searchParams.get('shard') ?? undefined,
+          limit: Number(u.searchParams.get('limit') ?? 200),
+        }));
+      }
+      if (p === '/api/tasks/board' && method === 'GET') {
+        return json(res, 200, boardSummary());
+      }
+      if (p === '/api/tasks' && method === 'POST') {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        return json(res, 200, createTask(body));
+      }
+      {
+        const mAct = p.match(/^\/api\/tasks\/([^/]+)\/(claim|update)$/);
+        if (mAct && method === 'POST') {
+          const id = decodeURIComponent(mAct[1]);
+          const body = JSON.parse((await readBody(req)) || '{}');
+          return json(res, 200, mAct[2] === 'claim' ? claimTask(id, body) : updateTask(id, body));
+        }
+        const mOne = p.match(/^\/api\/tasks\/([^/]+)$/);
+        if (mOne && method === 'GET') {
+          return json(res, 200, getTask(decodeURIComponent(mOne[1])));
+        }
+      }
+
       // POST /api/tools/user-self-test —— 用户身份（lark-cli）自测：以发送 bot 身份给自己私聊发一条
       if (p === '/api/tools/user-self-test' && method === 'POST') {
         try {
