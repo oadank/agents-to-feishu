@@ -811,13 +811,17 @@ export class MessageEngine {
           console.log(`[engine] auto /new on engine session lost (${reason || 'unknown'}) chat=${chatId.slice(0, 12)}`);
           // 🔴 老大令 2026-09-20：🆕 卡太吓人还满天飞——先分原因再说话。idle/interrupt/restart
           // 是正常换代（清 shadow+自动 /new 的 9/19 裁定不变），文案温和；未知原因才保留重警告。
+          // 票 claude-2 09-20：claude 家把两档可判定原因传进来了，卡片照实说；兜底句不再写
+          // "provider 未报原因"（其余 12 家可能压根没报因能力，那句把能力缺失说成失职，不诚实）。
           const why = reason === 'idle' ? '空闲超时，旧会话按 12h 家法回收'
             : reason === 'interrupt' ? '上一轮被打断，旧会话引擎侧无法复用'
             : reason === 'restart' ? '引擎进程换代'
+            : reason === 'engine-history-missing' ? '引擎历史库丢了该会话档案（jsonl 已被搬走/清理，resume 无从找回）'
+            : reason === 'resume-failed-library-intact' ? '引擎拒绝续用旧会话（历史库还在，但该会话 id 引擎已不认）'
             : null;
           void this.sendCommandCard(chatId, why
             ? `🔄 ${why}，已自动开新会话（桥侧历史副本清空，长期记忆按引擎自管）。`
-            : '🔄 引擎会话已换代（provider 未报原因），自动开新会话并清空桥侧历史副本——长期记忆归引擎自管。');
+            : '🔄 引擎会话已换代（原因无法判定：provider 未传可判定原因），自动开新会话并清空桥侧历史副本——长期记忆归引擎自管。');
         },
       })) {
         switch (ev.type) {

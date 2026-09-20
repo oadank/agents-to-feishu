@@ -75,8 +75,14 @@ export interface StreamChatParams {
   /** 🔴 老大令 2026-09-19：桥发现引擎侧会话已丢（被杀/回收/库被清）时回调 ——
    *  桥清空 shadow context 并发卡片告知，等效自动 /new。各引擎自管记忆，桥不回灌。
    *  09-20 增 reason：idle=空闲回收 / interrupt=上轮被打断 / restart=引擎进程换代，
-   *  桥按原因出温和文案（🆕 重卡满天飞震到老大，判不了就传 unknown，出中性句）。 */
-  onSessionLost?: (reason?: 'idle' | 'interrupt' | 'restart' | 'unknown') => void;
+   *  桥按原因出温和文案（🆕 重卡满天飞震到老大，判不了就传 unknown，出中性句）。
+   *  票 claude-2 09-20 增两档可判定原因（claude 家先接）：
+   *  engine-history-missing=resume 目标会话的 jsonl 在引擎历史库已缺失（被搬走/清理）；
+   *  resume-failed-library-intact=历史库还在但引擎拒 resume 该会话 id。
+   *  仍是可选参数、纯联合扩展：其余 12 家不传或传旧四值照旧，零影响。 */
+  onSessionLost?: (
+    reason?: 'idle' | 'interrupt' | 'restart' | 'unknown' | 'engine-history-missing' | 'resume-failed-library-intact',
+  ) => void;
   /**
    * 会话绑定的工作目录（/new [目录] 指定，缺省用 provider 默认）。
    * 2026-08-29 新增：此前该字段缺失，导致 /new 绑定目录对所有 runtime 都不生效

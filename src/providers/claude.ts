@@ -115,6 +115,10 @@ const PROCESS_LOST_RE = /引擎进程已退出|引擎本轮无响应|Claude 进�
 const RETRYABLE_RE = /502|503|504|429|backend request failed|ECONNRESET|ETIMEDOUT|timed out|socket hang up|network error|gateway|rate.?limit/i;
 /** 永久、不可重试的错误（重试纯浪费）：鉴权/权限/上下文超长/内容策略 */
 const NON_RETRYABLE_RE = /permission|forbidden|content.?policy|invalid_api_key|authentication|api[_ ]?key|unauthorized|context.?length|max.?token|too long/i;
+/** 🔴 票 claude-2 09-20：引擎 resume 失败的原始错误特征（`No conversation found with session ID...`，
+ *  原文在 SDKResultError.errors[]，sdk.d.ts L4697）。旧代码只匹配 NON_RETRYABLE_RE ⇒ 这类文案不命中，
+ *  jsonl 仍在库的"②库在但被拒"情形永不自愈，每条消息撞同一堵墙。本条把洞封掉。 */
+const NO_CONVERSATION_RE = /no conversation found/i;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -387,6 +391,8 @@ export class ClaudeProvider implements RuntimeProvider {
               is_error?: boolean;
               subtype?: string;
               result?: unknown;
+              /** SDKResultError.errors（sdk.d.ts L4697）：引擎原始错误文本数组，真因常藏这里 */
+              errors?: unknown;
               session_id?: string;
               num_turns?: number;
               usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
@@ -408,11 +414,14 @@ export class ClaudeProvider implements RuntimeProvider {
                 if (r.session_id) rtLog(`[claude] usage session_id=${r.session_id.slice(0, 8)}`);
                 sink.emit({ type: 'usage', sessionId: r.session_id, usage: usageInfo });
               }
-              // 错误事件带上 gateway/SDK 原始细节（subtype + result 文本），供 streamChat 判断是否属于瞬态可重试。
+              // 错误事件带上 gateway/SDK 原始细节（subtype + errors[] 原文 + result 文本），供 streamChat 判断可重试性与自愈原因分类。
               // 原先只发 "Claude 会话非正常结束"，导致 502/超时等瞬态错误无法被识别、也就无法重试。
+              // 票 claude-2：09-20 11:49 现场实证——真因 `No conversation found with session ID` 在 errors[] 里，
+              // 旧代码从不读 ⇒ 桥只剩 subtype，卡片只能说"未报原因"。从今往后原始文本保留（上限 400→800 防截尾）。
               let errMsg = 'Claude 会话非正常结束';
               if (r.is_error) {
-                const detail = [r.subtype, typeof r.result === 'string' ? r.result : ''].filter(Boolean).join(' ').slice(0, 400);
+                const rawErrors = Array.isArray(r.errors) ? r.errors.map((x) => String(x)).filter((s) => s.trim()) : [];
+                const detail = [r.subtype, ...rawErrors, typeof r.result === 'string' ? r.result : ''].filter(Boolean).join(' | ').slice(0, 800);
                 errMsg = detail ? `Claude 会话非正常结束：${detail}` : `Claude 会话非正常结束（subtype=${r.subtype ?? 'unknown'}）`;
               }
               sink.emit(r.is_error ? { type: 'error', message: errMsg } : { type: 'done' });
@@ -606,12 +615,21 @@ export class ClaudeProvider implements RuntimeProvider {
       }
       // P1 修复：resume 的持久化会话报不可重试错误（损坏/超窗/被清理）→ 清除记录自愈，
       // 否则此后每条消息都 resume 同一坏会话，bot 变砖直到手动 /new
+      // 票 claude-2：①触发面补 NO_CONVERSATION_RE（②类旧代码永不自愈的洞，见常量注释）；
+      // ②按三档可判定原因传给桥——① engine-history-missing=历史库 jsonl 缺失；
+      //   ② resume-failed-library-intact=库在但引擎拒续；③ unknown=真判不了（鉴权/损坏等）。
       const savedResumeId = readSavedSessionId();
       const sessionFileGone = !!savedResumeId && !savedSessionFileExists(savedResumeId);
-      if (doneErr && (NON_RETRYABLE_RE.test(doneErr) || sessionFileGone) && savedResumeId) {
+      if (doneErr && (NON_RETRYABLE_RE.test(doneErr) || sessionFileGone || NO_CONVERSATION_RE.test(doneErr)) && savedResumeId) {
+        const lostReason = sessionFileGone
+          ? 'engine-history-missing'
+          : NO_CONVERSATION_RE.test(doneErr)
+            ? 'resume-failed-library-intact'
+            : 'unknown';
         clearSavedSessionId();
-        params.onSessionLost?.(); // 老大令 09-19：引擎历史不可恢复=自动 /new（桥清影子+告知），不回灌
-        rtLog(`[claude] resume 会话不可恢复（${doneErr.slice(0, 120)}${sessionFileGone ? '；历史库 jsonl 已缺失' : ''}），已清除 session_id，下条消息开新会话`);
+        params.onSessionLost?.(lostReason); // 老大令 09-19：引擎历史不可恢复=自动 /new（桥清影子+告知），不回灌
+        console.log(`[claude] resume 会话不可恢复 reason=${lostReason} session=${savedResumeId.slice(0, 8)} err=${doneErr.slice(0, 300)}`);
+        rtLog(`[claude] resume 会话不可恢复（reason=${lostReason}；${doneErr.slice(0, 120)}），已清除 session_id，下条消息开新会话`);
       }
       // 不可重试 / 重试耗尽：明确回报，绝不静默半截
       if (doneErr) yield { type: 'error', message: doneErr };
