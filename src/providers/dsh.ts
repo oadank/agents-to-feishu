@@ -495,6 +495,52 @@ export class DshProvider implements RuntimeProvider {
     }, 60_000);
   }
 
+  /**
+   * 票 hand-3（老大 09-20 令"别靠监控垃圾维持稳定，把代码写对"）：引擎进程丢失的统一收口。
+   * 复位常驻把手 ⇒ 下一条消息必然走 ensureProcess 真重建；与 killProcess()（"我要杀它"）区分开，
+   * 这里是"它没了"。activePrompt 先唤醒再摘除：在途轮次当场收尾，不再干等看门狗。
+   */
+  private handleProcessLost(reason: string): void {
+    rtLog(`[dsh] ⚠️ ${reason} —— 复位常驻把手 + 唤醒在途轮次，下一条消息重建引擎进程`);
+    this.child = null;
+    this.spawnPromise = null;
+    for (const k of this.sessions.keys()) this.lostReasons.set(k, 'restart');
+    this.sessions.clear();
+    this.lineBuf = '';
+    const stranded = this.activePrompt;
+    this.activePrompt = null;
+    if (stranded) { try { stranded.onDone(`DSH 引擎进程已退出，本条消息请重发（已自动复位，下条消息走新进程）`); } catch { /* 单条唤醒失败不阻塞收口 */ } }
+    // 注：pending 目前只存 resolve（无 reject），初始化/建会话阶段的等待方仍需下一笔
+    // 把 pending 改 {resolve,reject} 形态才能真正逐个唤醒 —— 见 hand-3 剩余清单。
+  }
+
+  /**
+   * 票 hand-3③：所有 stdin 写入一律走这里。裸 `stdin.write()` 有两个致命点：
+   * ① 管道已销毁时 write() 同步抛 EPIPE，没人接就是桥进程级未捕获异常 —— 一崩全崩（13 家一起没）；
+   * ② 异步写失败走 stream 的 'error' 事件。这里同步/异步都兜住，并顺手复位常驻把手。
+   * @returns 是否已交给管道（false = 已丢弃，调用方无需再等响应）
+   */
+  private writeStdin(child: ChildProcess, payload: unknown, what: string): boolean {
+    const stdin = child.stdin;
+    if (!stdin || stdin.destroyed) {
+      rtLog(`[dsh] ⚠️ stdin 不可写(${what}) —— 引擎进程已不在，丢弃本次发送`);
+      if (this.child === child) this.handleProcessLost(`DSH 引擎 stdin 已关闭（${what}）`);
+      return false;
+    }
+    try {
+      stdin.write(JSON.stringify(payload) + '\n', (err) => {
+        if (!err) return;
+        rtLog(`[dsh] ⚠️ stdin 异步写失败(${what}): ${err.message}`);
+        if (this.child === child) this.handleProcessLost(`DSH 引擎 stdin 写入失败（${what}: ${err.message}）`);
+      });
+      return true;
+    } catch (e) {
+      rtLog(`[dsh] ⚠️ stdin 同步写异常(${what}): ${e instanceof Error ? e.message : String(e)}`);
+      if (this.child === child) this.handleProcessLost(`DSH 引擎 stdin 写入异常（${what}）`);
+      return false;
+    }
+  }
+
   private killProcess(): void {
     if (this.child && this.child.exitCode === null && this.child.signalCode === null) {
       try { this.child.kill('SIGTERM'); } catch {}
@@ -596,6 +642,11 @@ export class DshProvider implements RuntimeProvider {
       rtLog(`[dsh] ACP spawned pid=${child.pid}`);
 
       child.stderr.on('data', (c: Buffer) => rtLog(`[dsh] ACP stderr: ${c.toString().trim().slice(0, 300)}`));
+      // 票 hand-3③：stdin 上的 error 没有监听器 = Node 抛 uncaughtException，整个桥一起没。
+      child.stdin?.on('error', (err) => {
+        rtLog(`[dsh] ⚠️ ACP stdin error: ${err.message}`);
+        if (this.child === child) this.handleProcessLost(`DSH 引擎 stdin 异常（${err.message}）`);
+      });
       child.on('error', (err) => {
         rtLog(`[dsh] SPAWN ERROR: ${err.message}`);
         if (this.child === child) {
@@ -609,11 +660,8 @@ export class DshProvider implements RuntimeProvider {
       // 于是「进程已死 + 把手还在」= 下一条消息继续投给死进程（claude 案同款残留）。
       // 'exit' 由进程本身触发、不等管道 ⇒ 这里就把常驻把手复位掉（随后的 close 因把手已空自动 no-op）。
       child.on('exit', (code, signal) => {
-        rtLog(`[dsh] ACP exit code=${code} signal=${signal}（进程已退出，复位常驻把手，不等 stdio 关闭）`);
         if (this.child === child) {
-          this.child = null; this.spawnPromise = null;
-          for (const k of this.sessions.keys()) this.lostReasons.set(k, 'restart');
-          this.sessions.clear(); this.pending.clear(); this.activePrompt = null; this.lineBuf = '';
+          this.handleProcessLost(`DSH 引擎进程已退出（exit code=${code} signal=${signal}）`);
         } else if (this.spawnPromise) {
           this.spawnPromise = null;
           rejectSpawn(new Error(`DSH ACP exited before initialize (code=${code})`));
@@ -678,7 +726,8 @@ export class DshProvider implements RuntimeProvider {
 
   /** 发请求并返回 promise（等统一监听器分发响应） */
   private sendRequest(child: ChildProcess, msg: unknown): void {
-    child.stdin!.write(JSON.stringify(msg) + '\n');
+    // 票 hand-3③：dsh 的所有请求都过这里 ⇒ 一处加固即覆盖 initialize/session/new/resume/prompt。
+    this.writeStdin(child, msg, String((msg as { method?: string })?.method || 'request'));
   }
 
   private waitResponse(id: number, timeoutMs?: number): Promise<any> {
