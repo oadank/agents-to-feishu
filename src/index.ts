@@ -328,16 +328,12 @@ ${trimmed}`);
     rtLog(`[ws-keepalive] ⚠️ 覆写 pingInterval 失败: ${(e as Error).message}`);
   }
 
-  // WS 静默失联监测（2026-09-19）：09:07 dsh / 09:20 openakita 双双出现「WS 显示已连接
-  // 但飞书事件断流」（dsh 28min 自愈、openakita restart 才恢复；TCP ESTABLISHED 无从感知，
-  // 实测 c443=1 却零 handleIncoming）。只能按「最后收到消息的时间」兜底告警，为自动重连
-  // 修复票（ws-keepalive）留证据。深夜无消息也会告警——告警≠故障，连续多条才需人工查。
-  setInterval(() => {
-    const silentMin = Math.round((Date.now() - wsLastIncomingAt) / 60000);
-    if (silentMin >= 10) {
-      console.warn(`[agents-to-feishu] [ws-watch] WS 已静默 ${silentMin} 分钟无任何消息事件（连接可能假活，若 bot 同时无响应请 restart 并附本日志）`);
-    }
-  }, 5 * 60_000).unref?.();
+  // 【2026-09-20 已删】ws-watch 静默告警（be8511f，09-19 照"openakita WS 静默失联"那个**后来被推翻的
+  // 错结论**写的）：只会往 err 日志刷"WS 已静默 N 分钟"，不重连、不通知，无任何处置能力。
+  // 实测 09-19 至今全量 3,280 条告警、同期真断线（ws-backoff）0 次 —— 全部是"没人跟 bot 说话"。
+  // 连接保活与断线重连已由上面的 ws-keepalive（30s ping + 45s pong 看门狗 + 指数退避强杀重连）承担，
+  // 那才是"保持不死"的东西。老大令：不要靠监控垃圾维持稳定，把代码写对。
+
 
   // ── 指数退避重连（票1 第 2 项）──────────────────────────────────────────────
   // SDK 自带的重连是【固定间隔】：reconnectInterval 由服务端下发，实测恒为 120s，
