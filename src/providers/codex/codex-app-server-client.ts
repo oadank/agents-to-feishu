@@ -365,6 +365,18 @@ export class CodexAppServerClient {
       this.failAllPending(new Error(`[codex-app-server] Process exited with ${suffix}`));
       this.proc = null;
       this.startPromise = null;
+      // 票 hand-1（09-20，claude-1 根治的 codex 版）：常驻进程死亡必须通知订阅者。
+      // 「turn/start 返回后进程才死」的时刻已无任何 pending RPC，failAllPending 空转，
+      // listeners 收不到任何信号 ⇒ provider 消费循环永等 settledP ⇒ 该 chat 永久挂起。
+      // 广播一条合成 error 通知（params.processExit=true，provider 见之分流解套），一个订阅者都不许漏。
+      const envelope: CodexServerMessage = {
+        kind: 'notification',
+        method: 'error',
+        params: { processExit: true, error: { message: `Codex 引擎进程已退出（${suffix}）` } },
+      };
+      for (const listener of [...this.listeners]) {
+        try { listener(envelope); } catch { /* 单个订阅者抛错不得阻塞其余收讫死讯 */ }
+      }
     });
 
     const rl = readline.createInterface({ input: proc.stdout });

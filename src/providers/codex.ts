@@ -18,6 +18,15 @@ function rtLog(msg: string): void {
 type JsonRecord = Record<string, unknown>;
 
 /**
+ * 票 hand-1（2026-09-20，对齐 caf59ff claude-1 根治样板）：codex 此前整个 provider 零看门狗 ——
+ * 常驻 app-server 进程静默消失后无人复位把手，消费循环 `Promise.race([settledP, wakeupP])`
+ * 只有 turn/completed 才解套 ⇒ 该 chat 永久挂起。两级空闲阈值（env 可覆写，命名对齐 CTI_CLAUDE_*）：
+ * 首包（进程可能压根不在）只等 60s；已开吐字后允许 300s 静默（工具执行期间不出流事件）。
+ */
+const STALL_MS = Number(process.env.CTI_CODEX_STALL_MS ?? 300_000);
+const STALL_FIRST_MS = Number(process.env.CTI_CODEX_STALL_FIRST_MS ?? 60_000);
+
+/**
  * [绕过·非修复] 桥接直调 openmem MCP（streamable-http :3466）。
  * codex 模型侧 mcp__openmem__* 路由 unsupported call 未修通前的兜底。
  */
@@ -85,6 +94,20 @@ export class CodexProvider implements RuntimeProvider {
     return this.client;
   }
 
+  /**
+   * 票 hand-1：进程丢失的统一收口 —— 复位常驻把手（this.client 置 null），
+   * 下一条消息的 ensureClient 必然新建 app-server 进程。不能只等惰性检测：
+   * 僵尸进程（proc 名义活着、管道已死）时 prepare() 会返回旧 startPromise 原地复用，
+   * 永不重建 ⇒ 每条消息投进没人认领的死队列（claude 案同款绝症）。
+   */
+  private async handleProcessLost(reason: string): Promise<void> {
+    if (!this.client) return; // 已复位过，别重复报
+    rtLog(`[codex] ⚠️ ${reason} —— 复位常驻把手，下一条消息将重建 app-server 进程`);
+    const dead = this.client;
+    this.client = null;
+    try { await dead.close(); } catch { /* 可能已死透，close 只是收尾 */ }
+  }
+
   async prepare(): Promise<void> {
     try { await this.ensureClient(); } catch (e) {
       console.warn(`[codex] prepare failed:`, e);
@@ -120,6 +143,10 @@ export class CodexProvider implements RuntimeProvider {
     const poke = (): void => { wakeup(); };
     let settleResolve: () => void = () => {};
     const settledP = new Promise<void>((r) => { settleResolve = r; });
+    // 票 hand-1：看门狗活性信号 —— 本 thread 收到任何事件都刷新，用于区分
+    // "首包就没来（疑进程不在，60s 短路）"与"吐到一半断流（长任务静默，300s 才判）"
+    let lastEventAt = Date.now();
+    let gotEvent = false;
 
     // [2026-09-02] 线程连续性：同一飞书会话复用同一 codex thread（thread/resume，
     // 原生全量上下文=真记忆）；/new（freshSession）丢弃旧线程开新对话；
@@ -172,6 +199,7 @@ export class CodexProvider implements RuntimeProvider {
       const itemParams = (typeof message.params === 'object' && message.params ? message.params as JsonRecord : {});
       const tId = extractThreadId(message);
       if (tId && tId !== threadId) return;
+      lastEventAt = Date.now(); gotEvent = true; // 票 hand-1：喂看门狗（含 server request，能说话=活着）
       if (message.kind === 'request') {
         // server request：当前最小实现不处理，其余忽略
         return;
@@ -242,6 +270,14 @@ export class CodexProvider implements RuntimeProvider {
         }
         case 'error': {
           doneErr = String((itemParams.error as JsonRecord | undefined)?.message || 'Codex 出错');
+          // 票 hand-1：client 在进程 exit 时广播的合成死讯（params.processExit=true）——这是终态，
+          // 必须当场分流解套并复位把手，否则消费循环继续永等 settledP（本票要修的死穴）。
+          // 引擎真发的 error 仍按旧行为等 turn/completed 收尾，不改既有语义。
+          if (itemParams.processExit === true) {
+            settled = true;
+            settleResolve();
+            void this.handleProcessLost(doneErr || 'Codex 引擎进程已退出');
+          }
           break;
         }
         case 'turn/completed': {
@@ -308,6 +344,21 @@ export class CodexProvider implements RuntimeProvider {
     }
     rtLog(`[codex] turn started thread=${threadId.slice(0, 8)}`);
 
+    // 票 hand-1：空闲看门狗（caf59ff claude-1 两级阈值同款）。每 10s 检查一次，
+    // 连续零事件超 stallLimit() ⇒ 判死：明确报错 + 复位把手（不等下一条消息惰性发现，
+    // 僵尸进程下惰性检测根本不会重建）。持续吐字/工具事件都会刷新 lastEventAt，不误杀长任务。
+    const stallLimit = () => (gotEvent ? STALL_MS : STALL_FIRST_MS);
+    const stallTimer = setInterval(() => {
+      if (settled) return;
+      if (Date.now() - lastEventAt >= stallLimit()) {
+        doneErr = `⚠️ Codex 引擎 ${Math.round(stallLimit() / 1000)}s 零事件（${gotEvent ? '吐到一半断流' : '首包未到，疑常驻进程已丢失'}），已放弃本轮并复位常驻把手，重发本条即可自动重建后继续`;
+        rtLog(`[codex] 看门狗判定流卡死（${gotEvent ? '半截断流' : '首包未到'}），复位把手收尾`);
+        settled = true;
+        settleResolve();
+        void this.handleProcessLost(`本轮 ${Math.round(stallLimit() / 1000)}s 无响应`);
+      }
+    }, 10_000);
+
     // 消费队列
     try {
       while (true) {
@@ -318,6 +369,7 @@ export class CodexProvider implements RuntimeProvider {
         await Promise.race([settledP, wakeupP]);
       }
     } finally {
+      clearInterval(stallTimer);
       unsubscribe?.();
       if (doneErr) yield { type: 'error', message: doneErr };
       yield { type: 'done' };

@@ -320,6 +320,12 @@ export class ZcodeProvider implements RuntimeProvider {
         if (this.child === child) {
           this.child = null; this.spawnPromise = null;
           this.pending.clear();
+          // 票 hand-1（对齐 mimo.ts:221 现成写法）：进程把手复位时必须连会话把手一起清。
+          // sessionId 属于这个已死的 app-server，不清则 ensureSession 的 existing 分支
+          // 把死 id 原样交回，而落盘 resume 分支要求 !existing —— 被自己挡住永不触发 ⇒
+          // 进程重建了、每条消息仍永久报错，只能人工 /new。清掉后下一条消息走 resume 路径：
+          // 新进程 + 落盘 id 赎回会话；赎回失败再经 onSessionLost 自动 /new。
+          this.sessions.clear();
           this.lineBuf = '';
           for (const [, t] of this.turns) {
             try { t.emit({ type: 'error', message: `ZCode 进程退出（code=${code}）` }); } catch { /* 忽略 */ }
@@ -617,6 +623,11 @@ export class ZcodeProvider implements RuntimeProvider {
         rtLog(`[zcode] session resumed: ${sessionId.slice(0, 8)} (session=${sessionKey.slice(0, 12)})`);
       } catch (e) {
         rtLog(`[zcode] resume 失败，回退新建: ${e instanceof Error ? e.message : String(e).slice(0, 120)}`);
+        // 🔴 老大令 09-19（票 hand-1 补接线）：resume 失败 = 引擎历史不可恢复 → 自动 /new
+        // （桥清影子并告知用户），不回灌。对齐 mimo.ts:338-341 —— 此前 zcode 全文件零
+        // onSessionLost，此处是它唯一的"丢失性新建"点。新建成功后 persistSessionId
+        // 覆盖落盘，不会每条消息反复踩同一个坏 id。
+        params.onSessionLost?.();
         sessionId = '';
       }
     }
