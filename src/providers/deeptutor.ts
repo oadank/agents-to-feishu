@@ -57,6 +57,16 @@ const KB_REFRESH_MS = 10 * 60 * 1000;
 const TURN_TIMEOUT_MS = 10 * 60 * 1000; // 单轮保护上限（DeepTutor 自身有租约看门狗）
 const PROTOCOL = '2.0';
 
+// [2026-09-20 T-0007·老大终案] 主聊天通道(/ws unified)按渠道 fail-closed：
+// _user_grant → 非 partner 轮次 deferred MCP 池=0 → load_tools 必拒（"该工具在本次
+// 对话中不可用"）。而网页聊天走的 partner 卡通道（is_partner 轮次 → caller_whitelist
+// 卡授权 → 池开放）全功能实测通过。故桥默认改走 /ws/partners/<id>，与网页同门同权。
+// partner 协议差异：连上先收 {type:'ready'} 再发 {content, session_key}（无 start_turn
+// 帧）；事件帧外面包一层 {type:'stream_event', event:<StreamEvent>}，内层与 unified
+// 同形（content/tool_call/tool_result/sources/done）。
+const DT_MODE = (process.env.CTI_DEEPTUTOR_MODE || 'partner').trim().toLowerCase();
+const DT_PARTNER_ID = (process.env.CTI_DEEPTUTOR_PARTNER_ID || 'partner-e7873667').trim();
+
 function homeDir(): string {
   return process.env.CTI_USER_HOME || os.homedir();
 }
@@ -116,7 +126,7 @@ interface DsAttachment {
 export function createDeeptutorProvider(): RuntimeProvider {
   const sessions = new SessionMap();
   let kbCache: { ids: string[]; at: number } | null = null;
-  let activeTurn: { ws: WebSocket; turnId: string; sessionId: string } | null = null;
+  let activeTurn: { ws: WebSocket; turnId: string; sessionId: string; pkey: string } | null = null;
 
   async function fetchKbIds(): Promise<string[]> {
     if (kbCache && Date.now() - kbCache.at < KB_REFRESH_MS) return kbCache.ids;
@@ -251,11 +261,24 @@ export function createDeeptutorProvider(): RuntimeProvider {
       ...(parentMessageId ? { parent_message_id: parentMessageId } : {}),
     };
 
+    // ── partner 通道载荷（T-0007）──
+    // session_key 是 partner 会话的持久锚点：同 key 永远同会话（重启不断）。
+    // /new（resetSession）给 gen +1 → 换 key → 干净新会话；gen 落磁盘 map 不丢。
+    const genKey = `__gen__:${params.sessionKey}`;
+    const gen = DT_MODE === 'partner' ? Number(sessions.get(genKey) ?? '0') || 0 : 0;
+    const partnerSessionKey = `bridge:${params.sessionKey}:g${gen}`;
+    const partnerMsg = { content, session_key: partnerSessionKey };
+
     const ws = await new Promise<WebSocket>((resolve, reject) => {
-      const sock = new WebSocket(WS_BASE, { handshakeTimeout: 15_000 });
+      const url = DT_MODE === 'partner' ? `${WS_BASE}/partners/${DT_PARTNER_ID}` : WS_BASE;
+      const sock = new WebSocket(url, { handshakeTimeout: 15_000 });
       sock.once('open', () => resolve(sock));
       sock.once('error', (err) => reject(new Error(`DeepTutor WS 连接失败: ${err.message}`)));
     });
+
+    // partner 握手：服务端就绪帧 {type:'ready'} 到达后才能发话
+    let readyResolve: (() => void) | null = null;
+    const readyP = new Promise<void>((r) => { readyResolve = r; });
 
     let turnId = '';
     let done = false;
@@ -279,6 +302,12 @@ export function createDeeptutorProvider(): RuntimeProvider {
     ws.on('message', (raw: WebSocket.RawData) => {
       let msg: Record<string, unknown>;
       try { msg = JSON.parse(String(raw)); } catch { return; }
+      // [T-0007] partner 帧外套 {type:'stream_event', event:<StreamEvent>}，剥壳
+      // 后与 unified 事件同形；ready 帧放行握手门。
+      if (msg.type === 'ready') { readyResolve?.(); return; }
+      if (msg.type === 'stream_event' && msg.event && typeof msg.event === 'object') {
+        msg = msg.event as Record<string, unknown>;
+      }
       const type = String(msg.type ?? '');
       const meta = (msg.metadata ?? {}) as Record<string, unknown>;
 
@@ -293,7 +322,7 @@ export function createDeeptutorProvider(): RuntimeProvider {
       const frameTurnId = typeof msg.turn_id === 'string' ? msg.turn_id : '';
       if (frameTurnId && !turnId) {
         turnId = frameTurnId;
-        if (sessionId) activeTurn = { ws, turnId, sessionId };
+        if (sessionId) activeTurn = { ws, turnId, sessionId, pkey: partnerSessionKey };
       }
       if (type === 'content' && typeof msg.content === 'string' && msg.content) {
         push({ type: 'text', text: msg.content });
@@ -359,7 +388,23 @@ export function createDeeptutorProvider(): RuntimeProvider {
       wake = null;
     });
 
-    ws.send(JSON.stringify(startMsg));
+    if (DT_MODE === 'partner') {
+      const readyOk = await Promise.race([
+        readyP.then(() => true),
+        new Promise<false>((r) => setTimeout(() => r(false), 15_000)),
+      ]);
+      if (!readyOk) {
+        try { ws.close(); } catch { /* 忽略 */ }
+        yield { type: 'error', message: `DeepTutor partner(${DT_PARTNER_ID}) 未就绪（ready 帧 15s 未到）` };
+        yield { type: 'done' };
+        return;
+      }
+      ws.send(JSON.stringify(partnerMsg));
+      // partner 的 stop 只认 session_key，不等 turn_id 帧也先挂上，保证可打断
+      activeTurn = { ws, turnId: '', sessionId: sessionId ?? '', pkey: partnerSessionKey };
+    } else {
+      ws.send(JSON.stringify(startMsg));
+    }
 
     const deadline = Date.now() + TURN_TIMEOUT_MS;
     try {
@@ -403,13 +448,25 @@ export function createDeeptutorProvider(): RuntimeProvider {
 
     async resetSession(sessionKey?: string): Promise<void> {
       // /new：桥接按 chatId 调用；全清场景（极少）由桥接逐 chat 触发
-      if (sessionKey) sessions.delete(sessionKey);
+      if (sessionKey) {
+        sessions.delete(sessionKey);
+        // [T-0007] partner 会话按 session_key 持久锚定，光删映射没用——
+        // gen+1 换 key，下一轮必是服务端新会话。
+        const gk = `__gen__:${sessionKey}`;
+        sessions.set(gk, String(Number(sessions.get(gk) ?? '0') + 1));
+      }
     },
 
     async interrupt(): Promise<void> {
       const at = activeTurn;
       if (!at) return;
       try {
+        if (DT_MODE === 'partner') {
+          // partner socket 的打断帧：{action:'stop', session_key}
+          at.ws.send(JSON.stringify({ action: 'stop', session_key: at.pkey }));
+          rtLog(`deeptutor interrupt(partner) 已发: key=${at.pkey}`);
+          return;
+        }
         at.ws.send(JSON.stringify({
           type: 'cancel_turn',
           command_id: `cli-${Date.now()}`,
