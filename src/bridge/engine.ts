@@ -15,7 +15,7 @@ import type { FeishuClient } from '../feishu/client.js';
 import type { RuntimeProvider, StreamEvent } from '../providers/types.js';
 import { SessionManager, type Session } from './session.js';
 import { synthesize, toOpus, type TtsConfig } from '../voice/tts.js';
-import { readStore, type SpeechConfig } from '../config-center/store.js';
+import { readStore, DEFAULT_PROMPT_OPTIMIZE, type PromptOptimizeConfig, type SpeechConfig } from '../config-center/store.js';
 import {
   buildStreamingCardSkeleton,
   buildSimpleCard,
@@ -37,6 +37,17 @@ import { recordStats } from './stats.js';
 // 状态行固定全局显示项（管所有 agent；缺省全显示）
 export const DIVIDER_FIELDS = ['agent', 'model', 'provider', 'dir', 'session', 'cache', 'avg', 'context', 'usage', 'balance'];
 const PROVIDER_SHORT: Record<string, string> = { 'volc-ark': 'Ark', gw: 'GW', 'deepseek-official': 'DeepSeek', litellm: 'LiteLLM' };
+
+/** ⚡ 提示词优化触发前缀匹配：命中返回剥去前缀的正文（空正文=光杆前缀，按未命中处理），未命中返回 null */
+function stripOptimizePrefix(text: string, prefixesRaw: string): string | null {
+  for (const pre of prefixesRaw.split(/[,，\n]/).map((s) => s.trim()).filter(Boolean)) {
+    if (text.length > pre.length && text.slice(0, pre.length).toLowerCase() === pre.toLowerCase()) {
+      const body = text.slice(pre.length).replace(/^[\s:：]+/, '');
+      return body === '' ? null : body;
+    }
+  }
+  return null;
+}
 
 export interface EngineOptions {
   feishu: FeishuClient;
@@ -515,6 +526,41 @@ export class MessageEngine {
     await this.opts.feishu.sendText(chatId, text);
   }
 
+  private _poCache: { cfg: PromptOptimizeConfig; at: number } | null = null;
+
+  /** 是否 ⚡ 优化触发消息（启用+前缀命中+正文非空）：index.ts 命令分发据此放行，不进斜杠命令表 */
+  isOptimizeTrigger(text: string): boolean {
+    const po = this.promptOptimizeCfg();
+    return po.enabled && stripOptimizePrefix(text.trim(), po.prefixes) !== null;
+  }
+
+  /** ⚡ 提示词优化配置：实时读 config-store（5 秒缓存）——设置页勾选即生效，bot 无需重启 */
+  private promptOptimizeCfg(): PromptOptimizeConfig {
+    if (this._poCache && Date.now() - this._poCache.at < 5000) return this._poCache.cfg;
+    let cfg: PromptOptimizeConfig = DEFAULT_PROMPT_OPTIMIZE;
+    try {
+      cfg = readStore().promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE;
+    } catch { /* 文件缺失/损坏：视同未启用，消息原样直通 */ }
+    this._poCache = { cfg, at: Date.now() };
+    return cfg;
+  }
+
+  /** 调优化端点 POST {text} → {ok,optimized}；null=失败（网络/超时/空返回），调用方按原文继续 */
+  private async callOptimizeEndpoint(endpoint: string, raw: string): Promise<string | null> {
+    try {
+      const r = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: raw }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const j = (await r.json()) as { ok?: boolean; optimized?: string };
+      return j.ok && typeof j.optimized === 'string' && j.optimized.trim() !== '' ? j.optimized.trim() : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** 发送本地图片到聊天：上传飞书(image_key) → sendImage（发图能力） */
   async sendImageFile(chatId: string, imagePath: string): Promise<boolean> {
     try {
@@ -578,6 +624,23 @@ export class MessageEngine {
   /** 处理一条用户文本消息（replyToMessageId 仅保留兼容，不用于引用；opts.replyAudio=用户发语音/要求语音时语音回复） */
   async handleText(chatId: string, text: string, _replyToMessageId?: string, opts?: { replyAudio?: boolean }): Promise<void> {
     void _replyToMessageId; // 不引用用户消息（对齐旧体验）
+    // [2026-09-21] 内建 ⚡ 提示词优化（与语音同定位，设置页勾选即用）：消息以触发前缀
+    // （/p、优化：）开头 → 先调优化端点精炼余文（dsh-web 实现含 openmem 画像注入），
+    // 回执精炼稿后以精炼稿走原流程。未启用/无前缀/失败 = 原样直通，零干扰主链。
+    const po = this.promptOptimizeCfg();
+    if (po.enabled) {
+      const body = stripOptimizePrefix(text, po.prefixes);
+      if (body !== null) {
+        const optimized = await this.callOptimizeEndpoint(po.endpoint, body);
+        if (optimized !== null) {
+          try { await this.sendText(chatId, `⚡ 优化后提示词：\n${optimized}`); } catch { /* 回执失败不拦正文 */ }
+          text = optimized;
+        } else {
+          try { await this.sendText(chatId, '⚡ 优化端点无有效返回，已按原文继续'); } catch { /* 同上 */ }
+          text = body;
+        }
+      }
+    }
     // 标记当前 chat 正在执行的任务（插队 interrupt 判断用：只在旧任务仍活跃时中断，不误伤插队消息自己）
     if (_replyToMessageId) this.activeTaskMid.set(chatId, _replyToMessageId);
     const { provider, sessions } = this.opts;

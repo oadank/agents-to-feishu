@@ -645,7 +645,8 @@ async function handleIncoming(
   if (!text) return;
 
   // 命令？isCommand 已在去重段算出（已 trim 并判 / 开头）。鉴权已前移到去重之后。
-  if (isCommand) {
+  // [2026-09-21] ⚡ 优化触发前缀（/p 等）不是命令：放行到普通消息链，由 engine.handleText 精炼处理
+  if (isCommand && !engine.isOptimizeTrigger(text)) {
     await handleCommand(text, chatId, engine, sessions);
     return;
   }

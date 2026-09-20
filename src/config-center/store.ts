@@ -205,6 +205,8 @@ export interface ConfigStore {
   injection?: InjectionConfig;
   /** 内建技能库配置：启停白名单 + 远程市场 URL（项目 skills/ 目录挂载控制） */
   skills?: SkillConfig;
+  /** 内建 ⚡ 提示词优化（勾选即用）：消息带触发前缀时先精炼再喂 bot，与语音能力同定位 */
+  promptOptimize?: PromptOptimizeConfig;
   /** 全局默认工作目录（所有 agent 的缺省启动目录；每 agent 可覆盖，见 AgentDef.workdir） */
   defaultWorkdir?: string;
 }
@@ -225,6 +227,21 @@ export const DEFAULT_SKILLS: SkillConfig = {
   enabled: [],
   marketUrl: '',
 }
+
+/** 内建 ⚡ 提示词优化配置：触发前缀命中 → POST endpoint {text} → {ok,optimized} 精炼稿喂 bot */
+export interface PromptOptimizeConfig {
+  enabled: boolean;
+  /** 优化端点（默认复用 dsh-web 的实现：模板+openmem 画像注入都在线） */
+  endpoint: string;
+  /** 触发前缀（逗号分隔，ASCII 前缀大小写不敏感）；优化成功后剥前缀精炼余文 */
+  prefixes: string;
+}
+
+export const DEFAULT_PROMPT_OPTIMIZE: PromptOptimizeConfig = {
+  enabled: false,
+  endpoint: 'http://127.0.0.1:3080/optimize-prompt',
+  prefixes: '/p,优化：,优化:',
+};
 
 /** 统一注入配置：所有 agent 生效的全局 systemPrompt（手动填，存 config-store.json） */
 export interface InjectionConfig {
@@ -369,6 +386,7 @@ export function readStore(file?: string): ConfigStore {
       vision: DEFAULT_VISION,
       speech: DEFAULT_SPEECH,
       injection: DEFAULT_INJECTION,
+      promptOptimize: DEFAULT_PROMPT_OPTIMIZE,
       defaultWorkdir: '',
     };
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -387,6 +405,7 @@ export function readStore(file?: string): ConfigStore {
       speech: parsed.speech ?? DEFAULT_SPEECH,
       injection: parsed.injection ?? DEFAULT_INJECTION,
       skills: parsed.skills,
+      promptOptimize: parsed.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE,
       defaultWorkdir: parsed.defaultWorkdir ?? '',
       settings: parsed.settings ?? { groupMentionOnly: true },
     };

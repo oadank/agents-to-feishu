@@ -29,6 +29,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import {
   type ConfigStore, type AgentDef, type ProviderDef, type McpDef, type SpeechConfig,
   readStore, writeStore, findProvider, DEFAULT_SPEECH, DEFAULT_INJECTION, defaultStorePath,
+  DEFAULT_PROMPT_OPTIMIZE,
 } from './store.js';
 import { writeAgentArtifacts, readCredentialKey, readOldEnvKey, assertModelProtocolAllowed } from './render.js';
 // [根治 C 2026-09-15] 语法闸门。bot 服务由 tsx 直读 src，代码带语法错时「保存即 apply
@@ -1261,6 +1262,39 @@ export function createConfigServer(opts: ConfigServerOptions) {
         save(store);
         return json(res, 200, { ok: true, vision: store.vision });
       }
+      // ── 内建 ⚡ 提示词优化（勾选即用，与语音/看图同定位）──
+      // GET /api/prompt-optimize：读配置
+      if (p === '/api/prompt-optimize' && method === 'GET') {
+        const store = load();
+        return json(res, 200, { ok: true, promptOptimize: store.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE });
+      }
+      // PUT /api/prompt-optimize：写配置（bot 侧 5 秒缓存自动跟进，无需重启）
+      if (p === '/api/prompt-optimize' && method === 'PUT') {
+        const store = load();
+        const body = JSON.parse((await readBody(req)) || '{}');
+        store.promptOptimize = { ...(store.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE), ...body };
+        save(store);
+        return json(res, 200, { ok: true, promptOptimize: store.promptOptimize });
+      }
+      // POST /api/prompt-optimize/test：试优化（body {text} → {ok,optimized|error}），设置页「试一下」按钮用
+      if (p === '/api/prompt-optimize/test' && method === 'POST') {
+        const store = load();
+        const cfg = store.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE;
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const text = String(body.text ?? '').trim();
+        if (text === '') return json(res, 400, { ok: false, error: 'text is required' });
+        try {
+          const r = await fetch(cfg.endpoint, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }), signal: AbortSignal.timeout(60_000),
+          });
+          const j = (await r.json()) as { ok?: boolean; optimized?: string; error?: string };
+          return json(res, 200, j.ok && j.optimized ? { ok: true, optimized: j.optimized } : { ok: false, error: j.error || '优化端点返回空' });
+        } catch (e) {
+          return json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+
       // GET /api/vision/sample-image：返回项目内置样例图（前端预览图用）
       if (p === '/api/vision/sample-image' && method === 'GET') {
         if (!fs.existsSync(SAMPLE_VISION_IMAGE)) return json(res, 404, { error: 'sample image not found' });
