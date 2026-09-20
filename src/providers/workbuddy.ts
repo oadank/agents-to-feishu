@@ -70,7 +70,9 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
   return clean;
 }
 
-/** ACP mcpServers 数组（stdio/http/sse 三形态），配置中心池直读 */
+/** ACP mcpServers 数组（stdio/http/sse 三形态），配置中心池直读。
+ *  20:47 时代以此形态实测六域全绿（lark/openmem/生图真调有痕），是已验证的正解；
+ *  09-19 夜曾误判"此路不通"换 --mcp-config 文件+--tools，反把 MCP 池杀光（见 ensureChild 注释）。 */
 function buildMcpServers(): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
   try {
@@ -162,9 +164,10 @@ export function createWorkBuddyProvider(): RuntimeProvider {
     if (child?.stdin?.writable && child.exitCode === null) return;
     if (startPromise) return startPromise;
     startPromise = (async (): Promise<void> => {
-      // 🔴 老大令 09-19 三治之二（工具风暴/慢）：--tools 砍内置工具面（46 件套=作恶入口，MCP 池不受限）；
-      // --max-turns 防失控兜底；--effort medium 砍掉高推理（闲聊 4225 字内心戏的油门）。
-      const cliArgs = [resolveWbCli(), '--acp', '--tools', 'Bash,Read,Write,Edit,Grep,Glob', '--max-turns', '40', '--effort', 'medium'];
+      // 🔴 09-20 复盘定罪：--tools 是全局白名单，把 MCP 池一并杀了（20:47 无刀时六域全绿
+      // 真调有痕；22:2x 加刀后 mcp__*=0，还被它带进自报"我只有 6 个工具"）。撤刀。
+      // 防失控交回 --max-turns/--effort；MCP 恢复 session/new 数组=20:47 原配正解。
+      const cliArgs = [resolveWbCli(), '--acp', '--max-turns', '40', '--effort', 'medium'];
       const proc = spawn(process.execPath, cliArgs, { cwd: cwdOf(), env: buildSpawnEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
       child = proc;
       let buf = '';
