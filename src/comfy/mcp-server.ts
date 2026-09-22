@@ -74,7 +74,8 @@ export function createComfyMcpServer(): McpServer {
     'generate_image',
     {
       description:
-        '生成图片（文生图/图生图）或生视频。template 为模板名（可用 list_templates 查，默认 Krea2 Turbo-文生图.json），' +
+        '生成图片（文生图/图生图）或生视频。template 为模板名（用 list_templates 现查，别凭记忆写），' +
+        '⚠️ 省略 template 不等于走本控制台：会先打 N5105 agnes（快但画面差），失败才回落 8090→XDN；要高质量请显式传模板名（如 "QW_image2.1-文生图" 出图 / "QW_image2.1-图像编辑" 改图），显式传即跳过 agnes。' +
         'prompt 为提示词，image 为可选 base64 图（图生图），image_name 为可选历史图名，width/height/seed/steps/cfg/denoise 可调。',
       inputSchema: {
         template: z.string().optional().describe('模板名，如 "Krea2 Turbo-文生图.json"'),

@@ -123,6 +123,7 @@ const app = createApp({
       mcps: '🔌 总配置 · MCP',
       vision: '👁 看图配置',
       speech: '🗣 语音能力',
+      promptopt: '⚡ 提示词优化',
       skills: '🛠 技能库',
       comfy: '🎨 生图',
       inject: '💉 注入',

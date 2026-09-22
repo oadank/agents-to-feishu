@@ -72,7 +72,8 @@ reasonix 实测其 exec 沙箱整轮不可用（所有 bash 10s 超时，报 `se
 
 ## 老大拍板项汇总
 
-1. 桥重启批次（13 家引擎 bot 何时滚重启，一次一个）。
-2. reasonix bash 10s 超时方向：报官方 / 桥侧降级 / 接受现状（WB 备方案 A/B 待命）。
+1. 桥重启批次（13 家引擎 bot 何时滚重启，一次一个）。——✅ 已拍板执行完（见 ds-1 台账）
+2. reasonix bash 10s 超时方向：报官方 / 桥侧降级 / 接受现状（WB 备方案 A/B 待命）。——✅ 09-20 晨老大令"快修"：dsh 已改 config.toml 两处盘根（allow_write C:\D→C:\D\opt、bot.routes workspace_root C:\→agents-to-feishu，留 bak-dsh-sandboxfix-20260920）并重启 reasonix 单服务，待其 bash 自测回执。
 3. mimo 票B 弹头：恢复现场结案，还是继续布弹。
-4. 凭据收口是否即刻（dsh 执行）。
+4. 凭据收口是否即刻（dsh 执行）。——✅ 已执行完（口令迁 env，条目改指针）
+5. 【新增·z-1 衍生】zcode 服务账户=LocalSystem（其余 12 家均 .\oadan），OS keychain 隔离致其 lark-cli user 身份全废（补账复跑/自动回执均卡）。待批：nssm 改 .\oadan + 重启 zcode。其 z-1 复跑项已由 dsh 代跑销案：13 户全 kept / added=0 / mismatch=0 / changed=false（扫 29 会话，名册外 bot 会话仅列报不动账）。

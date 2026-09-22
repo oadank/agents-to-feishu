@@ -182,14 +182,35 @@ export function buildBuiltinTools(deps: BridgeToolDeps): BuiltinTool[] {
       },
     },
     {
+      name: 'list_templates',
+      description:
+        '列出本机 8090 生图控制台当前可用的工作流模板（实时读取）。'
+        + '调 generate_image 前若不确定模板名，先查这里——不要凭记忆写模板名。',
+      schema: {},
+      execute: async () => {
+        try {
+          const r = await fetch(`${COMFY_BASE_URL}/templates`);
+          if (!r.ok) return `获取模板失败: HTTP ${r.status}`;
+          const j = (await r.json()) as { templates?: Array<{ name: string; kind: string; need_image?: boolean }> };
+          const list = (j.templates ?? []).map((t) => `- ${t.name}  [${t.kind}${t.need_image ? '，需传参考图' : ''}]`);
+          return `可用模板 ${list.length} 个（generate_image 的 template 直接传这个名字）：\n${list.join('\n')}`;
+        } catch (e) {
+          return `获取模板失败: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      },
+    },
+    {
       name: 'generate_image',
       description:
-        '文生图/图生图：默认走 N5105 agnes（快），失败自动回落本机 ComfyUI/XDN。返回 JSON 含 source/output_name/path。'
-        + '用户要画图/生图时使用；定稿要更好质量可传 template=comfy。'
+        '文生图/图生图：默认走 N5105 agnes（快但画面差），失败自动回落本机 ComfyUI/XDN。返回 JSON 含 source/output_name/path。'
+        + '用户要画图/生图时使用。'
+        + '【要高质量/定稿/人像/海报/画面里带文字 → 必须显式传 template】传模板名（≠ agnes）会跳过 agnes 直发 8090→XDN。'
+        + '当前首选：文生图 "QW_image2.1-文生图"（Qwen-Image-2.1，7B，2K 直出、中文文字渲染准、支持透明底）；'
+        + '改图/换背景/换风格 "QW_image2.1-图像编辑"（需传参考图）。模板名可用 list_templates 现查。'
         + '【服务侧已写死】成功后桥接会自动把本地图发到当前飞书会话，不必再自己 send_image。',
       schema: {
         prompt: z.string().describe('生图提示词'),
-        template: z.string().optional().describe('工作流模板名；省略=agnes 快路；显式(如 Krea2 Turbo-文生图.json/comfy)=直走 8090→XDN 高质量产线，不再先试 agnes'),
+        template: z.string().optional().describe('工作流模板名；省略=agnes 快路（画面差）；显式传（如 QW_image2.1-文生图 / QW_image2.1-图像编辑 / Krea2 Turbo-文生图.json / comfy）=直走 8090→XDN 高质量产线，不再先试 agnes'),
         width: z.number().optional(),
         height: z.number().optional(),
         seed: z.number().optional(),

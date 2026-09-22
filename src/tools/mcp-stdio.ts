@@ -20,7 +20,7 @@ import { buildLarkTools } from './lark-tools.js';
 import { buildSkillTools } from './skills.js';
 
 // 技能读取件 skill_index/skill_read 与 look/gen 同批暴露（registry 生图看图路本身未改）
-const EXPOSE = new Set(['look_image', 'generate_image', 'reverse_prompt', 'transcribe', 'skill_index', 'skill_read']);
+const EXPOSE = new Set(['look_image', 'generate_image', 'reverse_prompt', 'list_templates', 'transcribe', 'skill_index', 'skill_read']);
 
 const server = new McpServer({ name: 'cti-builtin', version: '1.0.0' });
 
