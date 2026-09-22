@@ -8,6 +8,7 @@
 //    详情见 SKILL.md「2026-09-21 yt-dlp 复核实测」节。
 // 依赖：Node >= 22（全局 WebSocket）+ 同目录 cdp.port / yt-dlp.exe
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { pickPage } from './cdp_page.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
@@ -26,7 +27,7 @@ const state = { phase: 'opening', msg: '正在打开抖音登录页…', qr: nul
 const say = (m) => { const s = `[${new Date().toLocaleTimeString('zh-CN')}] ${m}`; state.log.push(s); state.msg = m; console.log(s); };
 
 const targets = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-const page = targets.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+const page = pickPage(targets);
 if (!page) { say('CDP 上没有 page 目标，专用 Edge 可能挂了'); process.exit(1); }
 
 const ws = new WebSocket(page.webSocketDebuggerUrl);
@@ -104,7 +105,7 @@ async function grabQr() {
 async function loginHit() {
   try {
     const ts = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-    const pg = ts.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+    const pg = pickPage(ts);
     if (!pg) return [];
     const w = new WebSocket(pg.webSocketDebuggerUrl);
     await new Promise((res, rej) => {
@@ -125,7 +126,7 @@ async function exportCookies() {
   // 之前这里调用已被删掉的 cookies() → 崩溃 "cookies is not defined"。
   // 改成跟 loginHit 一样自开一条短连接，页面跳转后也不会失效。
   const ts = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-  const pg = ts.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+  const pg = pickPage(ts);
   if (!pg) throw new Error('CDP 没有 page 目标');
   const w = new WebSocket(pg.webSocketDebuggerUrl);
   await new Promise((res, rej) => { w.addEventListener('open', res, { once: true }); w.addEventListener('error', () => rej(new Error('conn')), { once: true }); });

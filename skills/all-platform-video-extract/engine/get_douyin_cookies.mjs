@@ -6,6 +6,7 @@
 // 用法：node get_douyin_cookies.mjs          端口从同目录 cdp.port 读
 //       CDP_PORT=9401 node get_douyin_cookies.mjs
 import { readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { pickPage } from './cdp_page.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,7 +18,7 @@ const OUT = join(HERE, 'cookies.txt');
 const WANTED = /\.(?:douyin|iesdouyin|snssdk|ixigua)\.com$/i;
 
 const targets = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-const page = targets.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+const page = pickPage(targets);
 if (!page) throw new Error(`CDP ${PORT} 上没有 page 目标 —— 那个专用 Edge 窗口被关了？重开它`);
 
 const ws = new WebSocket(page.webSocketDebuggerUrl);

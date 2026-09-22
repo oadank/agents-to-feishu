@@ -12,6 +12,7 @@
 //   node cdp_tool.mjs waitlogin [秒]               轮询等登录态 Cookie 出现
 // 端口读同目录 cdp.port（bind 实测挑的空闲口）
 import { readFileSync, writeFileSync } from 'node:fs';
+import { pickPage } from './cdp_page.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,7 +21,7 @@ const PORT = (process.env.CDP_PORT || readFileSync(join(HERE, 'cdp.port'), 'utf8
 const [cmd, ...rest] = process.argv.slice(2);
 
 const targets = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-const page = targets.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+const page = pickPage(targets);
 if (!page) throw new Error(`CDP ${PORT} 上没有 page 目标：专用 Edge 挂了，重开它`);
 
 const ws = new WebSocket(page.webSocketDebuggerUrl);

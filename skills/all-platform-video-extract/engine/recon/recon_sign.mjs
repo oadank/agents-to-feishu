@@ -2,6 +2,7 @@
 // 做法：导航到抖音视频页 → 列出所有 script src → 探测 window 上挂的签名相关全局对象
 // 用法：node recon_sign.mjs      （产物：本目录 recon_globals.json）
 import { writeFileSync, readFileSync } from 'node:fs';
+import { pickPage } from '../cdp_page.mjs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -11,7 +12,7 @@ const PORT = (process.env.CDP_PORT || readFileSync(join(TOOLS, 'cdp.port'), 'utf
 const VIDEO = process.env.RECON_URL || 'https://www.douyin.com/video/7686131844495969586';
 
 const ts = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-const page = ts.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+const page = pickPage(ts);
 if (!page) { console.error('CDP 没有 page 目标：专用 Edge 没开或没登录'); process.exit(1); }
 
 const ws = new WebSocket(page.webSocketDebuggerUrl);

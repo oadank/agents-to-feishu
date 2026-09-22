@@ -94,6 +94,18 @@ if (existsSync(SIGNED)) {
   bad(`签名中转脚本不存在：${SIGNED}`);
 }
 
+// ── 3c) CDP 目标页挑选：禁止盲取第一个 page（Edge 自家页 edge://nurturing/ 会排第一，2026-09-21 实测踩过）
+const BLIND_FILES = ['cdp_eval.mjs', 'sniff_download.mjs', 'resolve_signed.mjs', 'qr_server.mjs',
+  'cdp_tool.mjs', 'get_douyin_cookies.mjs', 'douyin_collect.mjs', 'recon/recon_sign.mjs'];
+const blind = BLIND_FILES.filter((rel) => {
+  const p = join(ROOT, rel);
+  return existsSync(p) && /\.find\(\(t\) => t\.type === 'page'/.test(read(p));
+});
+if (blind.length) bad('仍在盲取第一个 page（应走 pickPage）：' + blind.join(', '));
+else ok(`无盲取 page 的写法（${BLIND_FILES.length} 个文件都走 pickPage）`);
+if (existsSync(join(ROOT, 'cdp_page.mjs'))) ok('cdp_page.mjs 共享挑选器存在');
+else bad('缺 cdp_page.mjs');
+
 // ── 4) 汇总
 console.log('=== PASS ===');
 pass.forEach((m) => console.log('  ✓ ' + m));

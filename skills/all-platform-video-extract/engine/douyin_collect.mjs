@@ -2,6 +2,7 @@
 // 用法：node douyin_collect.mjs <url> [滚动次数]
 // 只依赖 Node 22+ 的全局 WebSocket 与 CDP 端口文件 cdp.port（那个已登录的专用 Edge）。
 import { readFileSync } from 'node:fs';
+import { pickPage } from './cdp_page.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,7 +13,7 @@ const SCROLLS = Number(process.argv[3] || 6);
 const TAB = process.argv[4] || '';   // 例如 收藏 / 喜欢：进去后先点这个标签
 
 const ts = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-const page = ts.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+const page = pickPage(ts);
 if (!page) { console.error('CDP 没有 page 目标：先启动专用 Edge'); process.exit(2); }
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((res, rej) => { ws.addEventListener('open', res, { once: true }); ws.addEventListener('error', () => rej(new Error('连不上 CDP')), { once: true }); });
