@@ -40,7 +40,11 @@ const BLOCK_CONTENT = [
   [/\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/, 'GitHub token'],
   [/\bsk-[A-Za-z0-9]{24,}/, 'API key'],
 ];
-const TEXT_EXT = /\.(txt|json|jsonl|md|js|mjs|cjs|ts|tsx|jsx|py|sh|ps1|yml|yaml|env|conf|ini|log|html|css|csv|xml|toml)$/i;
+// 只扫「数据类」文件的**内容** —— 代码/文档里出现 sessionid=/odin_tt= 这类词是**规则或示例**，
+// 不是真凭证。把它们也扫会反复误报「扫描器扫到自己」「文档列举规则被拦」，
+// 最后大家都用 --no-verify 绕过、防护名存实亡（2026-09-21 连踩两次，这里收口）。
+// 🔴 注意：**文件名规则对所有文件仍然生效**，且数据文件是严格扫描的。
+const TEXT_EXT = /\.(txt|json|jsonl|csv|log|env|ini|conf|dat|xml|toml|ya?ml)$/i;
 const MAX_MB = 5;
 
 const problems = [];

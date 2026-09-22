@@ -1,3 +1,6 @@
+> 🔒 本仓库是公开的：提交前有防呆检查（登录凭证 / 浏览器登录态 / 大件二进制）。
+> 新克隆的机器先跑一次 `git config core.hooksPath .githooks` 启用，详见 [.githooks/README.md](.githooks/README.md)。
+
 # agents-to-feishu
 
 把多个 AI Agent 桥接到飞书 / Lark 的独立、可分发框架（多 Agent 配置中心 + 飞书消息桥接）。
