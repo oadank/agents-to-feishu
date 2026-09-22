@@ -1,0 +1,7 @@
+#!/bin/sh
+# 提交前防呆（2026-09-21 加）：挡住登录凭证 / 浏览器登录态 / 大件二进制。
+# 本仓库是公开的，一次手滑把 cookies.txt 推上去 = 账号送人。
+#
+# 启用（每台克隆的机器跑一次）：git config core.hooksPath .githooks
+# 绕过（确认无误时）：git commit --no-verify
+node scripts/preflight-secrets.mjs || exit 1

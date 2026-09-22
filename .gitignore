@@ -13,3 +13,35 @@ _removed-overview-backup/
 .mimocode/
 
 inbox/
+
+# ── 登录凭证与浏览器登录态（2026-09-21 加；本仓库是公开的，这些绝不入库）──
+cookies.txt
+**/cookies.txt
+*_cookies.txt
+edge-video-profile/
+**/edge-video-profile/
+*-browser-profile/
+
+# 登录/验证过程截图（正当素材请显式加例外，如 !assets/xxx.png）
+login_*.png
+login-*.png
+qr_*.png
+qr-*.png
+sms_*.png
+verify_*.png
+*_state.png
+
+# 大件二进制与模型（用脚本下载，不进库）
+*.exe
+*.dll
+*.so
+*.dylib
+*.zip
+*.7z
+*.tar.gz
+*.onnx
+*.gguf
+*.pt
+*.safetensors
+*.pyc
+__pycache__/
