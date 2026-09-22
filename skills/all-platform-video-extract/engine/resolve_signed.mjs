@@ -73,7 +73,15 @@ const awemeId = await getAwemeId(VIDEO);
 log('aweme id = ' + awemeId);
 const bare = `https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=${awemeId}&device_platform=webapp&aid=6383`;
 
+await rpc('Page.enable').catch(() => {});
 await rpc('Network.enable');
+// 🔴 页面必须位于抖音域内：否则对 douyin.com 的 fetch 既跨域、又带不上登录 cookie。
+//    实测踩到（2026-09-21）：浏览器刚启动停在「新建标签页」时，解析直接失败。不在域内就先导航过去。
+if (!/douyin\.com/.test(page.url || '')) {
+  log(`页面不在抖音域（当前 ${String(page.url).slice(0, 60)}），先导航到视频页…`);
+  await rpc('Page.navigate', { url: `https://www.douyin.com/video/${awemeId}` });
+  await sleep(9000);
+}
 // 让页面发一次详情请求：SDK 的拦截器会往里注入 a_bogus/uifid/msToken/verifyFp/x-secsdk-web-signature
 const expr = `(async function(){ var r = await fetch(${JSON.stringify(bare)}, {credentials:"include"}); return (await r.text()).length; })()`;
 const ev = await rpc('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });

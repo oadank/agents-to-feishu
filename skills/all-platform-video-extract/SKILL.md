@@ -178,7 +178,7 @@ node scripts/download_videos.cjs urls.txt
 - 同一链接给本地 yt-dlp → 短链跳转正常，但取详情常报 **"Fresh cookies are needed"**：这是**抖音风控随机抽奖**，不是"缺登录态"——2026-09-21 实测带完整 Cookie 也只有约 2/3 成功率，`--cookies-from-browser` 读出来的 cookie 一样随机。**本地引擎别用来碰抖音（除非只想赌运气），正式产出走③浏览器抓流。**
 - 分享文本**整段传给远端脚本**（前面那些 `1.07 QkC:/` 噪声字符它会自己挑出链接），别自己截 URL。
 
-本地引擎命令模板（**该目录不在 PATH，必须写全路径**；ffmpeg 已在 PATH，能合并高清晰度）：
+本地引擎命令模板（**已进 PATH：可直接写 `yt-dlp`** —— 走 `WinGet\Links\yt-dlp.cmd` 包装脚本 → `C:\D\opt\tools\yt-dlp\yt-dlp.exe`；写全路径同样可用。ffmpeg 也已在 PATH，能合并高清晰度）。⚠️ 跑任何抖音命令前先确认专用 Edge 的 9401 在听，否则报的是"连接被拒"（看不出真正原因）：
 
 > 🔵 **存放目录已被配置文件钉死**：`C:\D\opt\tools\yt-dlp\yt-dlp.conf`（与 exe 同目录，自动加载）里写了 `--paths C:/D/opt/extract_video`。所以**不管在哪个目录跑、加不加 `-o`，视频都落到 `C:\D\opt\extract_video\`**，不用再操心路径。
 
@@ -309,7 +309,7 @@ node C:\D\opt\asr-service\vad-transcribe.mjs "<视频目录>" "<标题(给精修
 
 ```powershell
 # 前置：专用 Edge 开在 9401 且已登录（见上方「第三条路」）
-& 'C:\D\opt\tools\yt-dlp\yt-dlp.exe' --plugin-dirs 'C:\D\opt\tools\yt-dlp\plugins' "<抖音URL>"
+yt-dlp --plugin-dirs 'C:\D\opt\tools\yt-dlp\plugins' "<抖音URL>"
 ```
 实测 2026-09-21：`v.douyin.com/w2CD2pVwgws` → **1920x1080 hevc + aac / 288.17s / 5.53MB**，自动合流，一条命令出片。
 
