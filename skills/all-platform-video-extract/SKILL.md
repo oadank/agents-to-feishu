@@ -175,7 +175,7 @@ node scripts/download_videos.cjs urls.txt
 
 🔴 **2026-09-19 实测分工（同一条抖音链接两边跑）**：
 - 抖音分享口令（`v.douyin.com` 短链）→ **远端 skill 一次成功**：8.2 秒拿到 720p 带声成片（ffprobe 实测 h264 1280×720 + aac，288 秒）。**抖音、快手一律走远端。**
-- 同一链接给本地 yt-dlp → 短链跳转正常，但取详情 **HTTP 403 + "Fresh cookies are needed"**：抖音要浏览器登录态。**除非喂 `--cookies-from-browser edge|chrome`，否则别用本地引擎碰抖音。**
+- 同一链接给本地 yt-dlp → 短链跳转正常，但取详情常报 **"Fresh cookies are needed"**：这是**抖音风控随机抽奖**，不是"缺登录态"——2026-09-21 实测带完整 Cookie 也只有约 2/3 成功率，`--cookies-from-browser` 读出来的 cookie 一样随机。**本地引擎别用来碰抖音（除非只想赌运气），正式产出走③浏览器抓流。**
 - 分享文本**整段传给远端脚本**（前面那些 `1.07 QkC:/` 噪声字符它会自己挑出链接），别自己截 URL。
 
 本地引擎命令模板（**该目录不在 PATH，必须写全路径**；ffmpeg 已在 PATH，能合并高清晰度）：
@@ -205,17 +205,17 @@ node scripts/download_videos.cjs urls.txt
 | 路线 | 抖音 | 实测结论 |
 |---|---|---|
 | ① 远端 skill（greenvideo.cc） | ✅ 8.2 秒出片 720p 带声 | 能用；代价=链接明文过别人服务器，且依赖对方不挂 |
-| ② 本地 yt-dlp 直解 | ❌ **死路，别再试** | **已把登录 Cookie（`sessionid`/`sid_guard`）喂进去照样 403**；stable 2026.08.19 与 **nightly 2026.09.16 全部失败**。真因：详情接口要 `a_bogus` 签名（抖音自家 JS 现场算），yt-dlp 算不出。它报的 "Fresh cookies are needed" 是**误导性兜底文案**，别再为此去凑 Cookie |
+| ② 本地 yt-dlp 直解 | ⚠️ **不可依赖，别进流水线**（2026-09-21 复核，归因已更正） | 不是"必然 403"：带完整 Cookie 实测 **9 成 4 败（约 2/3 成功率）**，是**抖音随机风控**抽奖，不是签名必然算不出。yt-dlp 源码 `DouyinIE` 只调 1 个接口（`aweme/v1/web/aweme/detail/`），旁边自带 `# TODO: Run verification challenge code to generate signature cookies`——**官方自己也没实现挑战码**，"Fresh cookies are needed" 是它的兜底文案。成功时出 **6 档**（h264/h265 各档 + 水印下载档），最高 **1280×720**。详见文末「2026-09-21 yt-dlp 复核实测」节 |
 | ③ **浏览器当解析器 + 本地抓流** | ✅ **成功出片** | `node sniff_download.mjs "<视频URL>"`：让已登录的专用 Edge 自己去播（签名它算好了），CDP 监听网络响应抓到真实媒体地址，本地下载，DASH 分离的音视频用 ffmpeg 合流。实测 h264 1024×576 + aac / 288 秒 |
 
 **第三条路的配套（本机已全部跑通，都在 `C:\D\opt\tools\yt-dlp\`）**：
 
 - 专用 Edge：**必须开在 session 1 用户桌面**（用 win-desktop-helper 的 `app_run` 启动）。session 0 的隐形实例会导致抖音二维码加载失败（实测服务端只会发出纯色灰块）。参数 `--remote-debugging-port=9401 --user-data-dir=...\edge-video-profile`，端口记在 `cdp.port`
 - `cdp_tool.mjs`：`state`/`click`/`clickxy`/`type`/`drag`(滑块)/`key`/`shot`/`waitlogin` —— 真鼠标真键盘事件，不是改 DOM 糊弄
-- `qr_server.mjs`：本机 `http://127.0.0.1:8899/` 二维码**每 10 秒自动刷新**，终结"人工接力跑不赢 2~3 分钟时效"的死循环；自动等登录→导 Cookie→下载。🔴 想保住进行中的短信/二次验证流程必须带 `SKIP_OPEN=1`，否则它会导航把流程冲掉
+- `qr_server.mjs`：本机 `http://127.0.0.1:8899/` 二维码**每 10 秒自动刷新**，终结"人工接力跑不赢 2~3 分钟时效"的死循环；自动等登录→导 Cookie→**调 `sniff_download.mjs` 抓流下载**（🔴 2026-09-21 起改的：原来走 `yt-dlp --cookies` 直解只有约 2/3 成功率，已换掉）。🔴 想保住进行中的短信/二次验证流程必须带 `SKIP_OPEN=1`，否则它会导航把流程冲掉
 - 抖音短信登录后常见**「新设备二次验证」**（手机刷脸 / 原设备扫码）：**刷脸任何工具都过不去**，选「使用原设备扫码」，用手机端已登录的抖音来扫
 - 表单填写坑：手机号会被显示成 `150 3593 4590`（3-4-4 加空格），**校验必须 `-replace '\D',''` 只比数字**，否则会把成功当失败
-- 🔒 凭证：`cookies.txt` 与 `edge-video-profile` 已 `icacls /inheritance:r` 锁成仅 `LECOO\oadan` 可访问，**禁止同步/上传/入库**
+- 🔒 凭证：`cookies.txt` 与 `edge-video-profile` 已 `icacls /inheritance:r` 锁成仅 `LECOO\oadan` 可访问，**禁止同步/上传/入库**（`cookies.txt` 2026-09-21 起仅供留档/碰运气 —— 抓流下载不依赖它，只有 yt-dlp 直解才要）
 - 已知瑕疵：抓流拿到的是浏览器当时选择的码率（本次 576p < 远端 720p）。要高画质先在播放器里切清晰度再抓
 - 产物：`C:\D\opt\extract_video\`；同一条视频别两边都跑一遍，白占空间（远端 `douyin-<vid>-<标题>\`，本地 `local-sniff-*.mp4` + 两个合流前的中间文件）
 
@@ -237,7 +237,7 @@ node scripts/download_videos.cjs urls.txt
 - 下载完再 ffprobe 复核真实时长，对不上就删除换下一路，最多试 12 路
 修好后实测 576p → **1920x1080**（注意：抖音 1080p 这档给的是 **HEVC/h265**，Windows/Edge/PotPlayer 没问题，但要喂剪映或老设备可能吃力，需要兼容就退回 h264 那档）
 
-**转写引擎定论（同一条 4分52秒视频实测对比）**：飞书妙记完胜——带标点、说话人、毫秒时间戳，技术词准确（`UTF-8 BOM`/`ANSI`/`glob`/`daily_batch`）；本机 SenseVoice 无标点且听成「u t f 八磅」「n c」「go」「一个会画」，**入库等于灌错字，降级为断网兜底**。lark-minutes 技能自己也明文写着"本地音视频转纪要优先走妙记，不要用 ffmpeg/whisper 本地转写"。
+**转写引擎定论（同一条 4分52秒视频实测对比）**（🔴 2026-09-21 作废——妙记烧老大配额，且"本地丢内容"根因已由 VAD 分段方案治好，现行口径看文末「VAD 转写定论」节，本段只当历史保留）：飞书妙记完胜——带标点、说话人、毫秒时间戳，技术词准确（`UTF-8 BOM`/`ANSI`/`glob`/`daily_batch`）；本机 SenseVoice 无标点且听成「u t f 八磅」「n c」「go」「一个会画」，**入库等于灌错字，降级为断网兜底**。lark-minutes 技能自己也明文写着"本地音视频转纪要优先走妙记，不要用 ffmpeg/whisper 本地转写"。
 走妙记需要的 scope：`minutes:minutes.basic:read`（user 身份，设备码授权**一次性**，用过再开同一链接会报"请求不合法"，别被这个骗回去重新找人授权——用 `lark-cli auth status --json --verify` 看 `ready` 即已生效）。
 另注：`minutes +detail` 会把逐字稿落在 **cwd 下的 `minutes\<token>\transcript.txt`**（只认相对路径），cwd 挑错就会在项目根目录长出一堆野文件。
 
@@ -256,3 +256,49 @@ node scripts/download_videos.cjs urls.txt
 → 点标签后地址变成 `?showTab=favorite_collection`，脚本用 CDP 真实点击 + 滚动加载 + 抽 `a[href*="/video/"]`，输出 id/标题/链接清单。收藏与喜欢同理（标签名传 `喜欢`）。
 ⚠️ 抖音网页"作品/喜欢/收藏"三个 tab 都在 `user/self` 下，**不点就只读到默认的"作品"**（我第一次就读错了）。
 ⚠️ 收藏里老视频（一两年前的）预取地址签名普遍过期 → 批量时必须每条真开一次页面让抖音现场算签名，约 20 秒/条，并且限速、别上量（用的是本人登录态，风控代价是账号）。
+
+## 🔴 2026-09-21 VAD 转写定论：长音频本地转写必须分段，禁止 :18790 整段吞（现行口径）
+
+老大嫌本地 ASR 不准，根因查实：**SenseVoice 整段吞 >2 分钟音频会丢约四成内容**（583 秒视频只出 1992 字、英文工具名全灭、结尾整段消失）——不是听错，是没转。VAD 分段后 3708 字（+86%）、语音覆盖 98.3%、MoneyPrinterTurbo/MediaCrawler/Remotion/HyperFrames 等专名全捞回。
+
+**一条命令出精修终稿**（目录含 audio.m4a 即可，跳过下载）：
+```powershell
+node C:\D\opt\asr-service\vad-transcribe.mjs "<视频目录>" "<标题(给精修当上下文)>"
+# 精修默认 QW3.8F（litellm :4000），POLISH_MODEL 可换引擎。DV4F 已实测**不可用**：
+# 3708 字精修灌成 37625 字复读水稿（2026-09-21），别再拿 ⚡ 提示词钮的 DV4F 战绩套这条链。
+```
+→ `transcript.本地ASR.md`（VAD raw → 大模型标点恢复+专名纠错）+ `.raw.txt` + `.vad分段.txt`（带时间戳）+ info.json 回填。全链实测约 3 分钟（转写仅 ~35 秒，RTF 0.04；精修 ~100 秒/块 ×4 块）。
+
+**已验证事实（都是踩过才写的，别重新试错）**：
+- silero VAD 模型：`C:\D\opt\sherpa-onnx\models\silero_vad.onnx`。**v5 就 629KB，别按"≥1MB 才像话"判死活**。缺了下载：`cmd /c gh release download asr-models -R k2-fsa/sherpa-onnx -p silero_vad.onnx -D <目录> --clobber`（gh 自写文件零转码；snakers4 仓库 contents/files 路径 404 不存在；裸 curl github 会被 dsh-api-gate 拦）。
+- 分段参数用**默认 max-speech-duration=20s**：实测调 8s+阈值0.45 不涨专名反而把词切烂（`sscaleki`、`时0间成本`）。想当然调短=负优化。
+- VAD 治"丢内容"，**不治英文专名**（MoneyPrinterTurbo 照样听成 many pretty trouble）→ 专名靠精修纠回。精修 prompt 带全片主题+专有名词表，铁律"不确定就保留原文别猜"。
+- sherpa 二进制中文输出必须 **cmd 重定向落盘再按 UTF-8 读**，PowerShell 管道会吃字/加 BOM。
+- 精修走 litellm :4000 **QW3.8F**（老大令：别烧 GwV4F 额度；DV4F 长文精修已实测翻车不可用）。⚠️ Node fetch/undici 有 300s headersTimeout 硬顶不可配，长请求会被掐死（UND_ERR_HEADERS_TIMEOUT）→ asr-polish 已改 node:http + 900s + 3 重试。
+- 精修可单用：`ASR_RAW=<含{"text":...}的json路径> node C:\D\opt\asr-service\asr-polish.mjs <视频目录> <标题>`；`POLISH_OUT=xxx.md` 改输出名（试跑不覆盖正稿）。**别信 wrapper 打印的"终稿"文件名以外的一切中间输出。**
+- 输出质量残留预期：`blackbo`/`HTTS` 一类冷门专名仍可能保原样（不猜是纪律不是偷懒）；模型偶发敬语"您"混入，交付前通读一眼。
+
+**同日两条管线修复**：① `video_kb.mjs` 的 stripAds 在无标点 raw 稿上会把**全文当"一句广告"整删**（一词命中全文陪葬，实测逐字稿被掏空），已加 ">120 字巨块免疫" 守卫（备份 `%TEMP%\video_kb.mjs.bak-20260921`）；② nssm `asr` 服务 09/18 起跑的是旧代码（spawnSync 30s 超时），长音频必 ETIMEDOUT —— `nssm restart asr` 已加载 15min 版；该服务今后只当短语音兜底，**长音频一律走 vad-transcribe**。
+
+## 🔴 2026-09-21 yt-dlp 复核实测（抖音归因更正 + 可吸收清单）
+
+**结论先行**：yt-dlp 自带的抖音解析器是**半成品，不可依赖**；但它的工程设施值得吸收。完整研究细节见 openmem 条目 `11b50c2f`。
+
+**实测（本机 nightly 2026.09.16，同一条抖音链接）**：
+
+| 喂什么 | 结果 |
+|---|---|
+| 什么都不喂／只喂匿名 cookie（16 项：ttwid/s_v_web_id/__ac_nonce…）／喂全部**非登录** cookie（40 项） | **全失败** |
+| 完整 `cookies.txt`（66 项含登录态） | ⚠️ **9 成 4 败（约 2/3）**；成功时出 **6 档**，最高 1280×720 |
+| 完整 cookie + `--impersonate chrome` | **无稳定增益**（2/4，对照 3/4） |
+| `--cookies-from-browser "edge:C:\D\opt\tools\yt-dlp\edge-video-profile"` | **能读**（102 条；Edge 开着也能读，yt-dlp 会复制 DB 绕锁）→ 旧说法"Windows 下永远失败"**作废**；但抖音照样随机 |
+
+**为什么不能靠它**：`DouyinIE._real_extract` 只调 1 个接口（`aweme/v1/web/aweme/detail/`），旁边有 `# TODO: Run verification challenge code to generate signature cookies` —— **官方自己没实现抖音挑战码**，"Fresh cookies are needed" 只是兜底文案。所以**抖音继续走③浏览器抓流**。
+
+**值得吸收的（按值排序）**：
+1. **插件化**（`yt_dlp_plugins/extractor/*.py`，`--plugin-dirs`）：把③抓流封成 extractor，白捡它的下载管线（分片/并发/断点续传/限速/合流/去重/输出模板）
+2. **JS 挑战解法形态**（EJS / JSC Provider）：外部求解脚本 + JS 运行时（deno/node/quickjs）+ 可插拔 provider —— 真要正面解 `a_bogus` 就照这个骨架做（Node 跑抖音 webmssdk.js，不开浏览器）
+3. **`--cookies-from-browser`**：可替代 `qr_server.mjs` 里手工导 `cookies.txt` 的脆逻辑
+4. **格式偏好排序**：它按 url_key 解编码/分辨率，**水印档 −2、API 来源 −1、自研 h266（bytevc2）标 UNPLAYABLE 且 −100**，并给媒体域注入 `sid_tt`（分片下载必需）→ 我们的抓流选择逻辑缺这几条
+5. **测试基建**：每个 extractor 强制 `_TESTS`（URL + md5 + 预期报错）；我们那堆 mjs **零测试**
+6. **`--impersonate`（curl_cffi）**：本机支持 Chrome/Edge/Safari 多目标；抖音上无效，留给别处裸请求备用
