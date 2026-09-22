@@ -320,4 +320,9 @@ node C:\D\opt\asr-service\vad-transcribe.mjs "<视频目录>" "<标题(给精修
 - 插件 extractor **优先于**内置 `DouyinIE`（同一 URL 被插件抢走）
 - 格式 dict **必须带 `ext`**（视频 mp4 / 音频 m4a）：否则 yt-dlp 推成 `unknown_video`，ffmpeg 合流报 `Postprocessing: Error opening output files: Invalid argument`
 - **音轨常常只存在于 CDP 网络响应里**（实测某次清单 34 路里音频 **0** 路），JSON 已补网络音频兜底；不补就会出现 `Downloading 1 format(s)` ＝ 下成纯视频**没声音**
-- 解析后端 = `sniff_download.mjs` 的 `RESOLVE_JSON=1` 模式（吐一行 `__RESOLVE_JSON__{...}`）；**将来若上「Node 补环境跑 webmssdk 算签名」，只需改插件的 `_resolve_via_sniff`**，命令与下游用法一行都不用动
+- **两个解析后端**（环境变量 `DOUYIN_RESOLVE=api|sniff|auto`，默认 auto）：
+  - `api`（**默认首选，2026-09-21 新增**）「签名中转」= `resolve_signed.mjs`：浏览器发一次详情请求、我们抄下被 SDK 签好名的 URL，再用 Node 重放拿 JSON 并下载。**实测 4.8 秒出 1080p**（抓流要 20~40 秒），档位更全（56 路：1080p/720p/576p × h264/hevc + 原声音轨）
+  - `sniff`（兜底）「浏览器抓流」= `sniff_download.mjs`
+  - 两个后端都吐**同一种**一行 `__RESOLVE_JSON__{...}`，下游共用；换后端只动插件的 `_JOBS` / `_resolve_via`
+- 🔴 **为什么不在 Node 里自己算签名**（2026-09-21 探针结论）：`a_bogus` / `x-secsdk-web-signature` 藏在 webmssdk 的**自研 VM 字节码**里（219 个已加载脚本里搜不到这两个字面量；公开入口 `window.byted_acrawler.frontierSign` 在真实请求中**调用 0 次**，它只产旧的 X-Bogus）。补环境复刻要同时拿下 webmssdk + secsdk + bdms 三套 SDK 并伪造整套设备指纹 → 代价过高，所以走"签名中转"：浏览器只借一道手，**下载完全不碰浏览器**
+- 🔴 **实测门槛 = 5 个 URL 参数一个不少 + cookie**：缺 `a_bogus`/`msToken`/`verifyFp` 报 `Sign Invalid`；缺 `uifid` 报 `Uifid Not Found`；缺 `x-secsdk-web-signature` 报 `Signature Not Found`；五个带齐但不带 cookie → HTTP 200 但**空响应**
