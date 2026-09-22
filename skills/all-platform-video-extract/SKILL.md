@@ -302,3 +302,22 @@ node C:\D\opt\asr-service\vad-transcribe.mjs "<视频目录>" "<标题(给精修
 4. **格式偏好排序**：它按 url_key 解编码/分辨率，**水印档 −2、API 来源 −1、自研 h266（bytevc2）标 UNPLAYABLE 且 −100**，并给媒体域注入 `sid_tt`（分片下载必需）→ 我们的抓流选择逻辑缺这几条
 5. **测试基建**：每个 extractor 强制 `_TESTS`（URL + md5 + 预期报错）；我们那堆 mjs **零测试**
 6. **`--impersonate`（curl_cffi）**：本机支持 Chrome/Edge/Safari 多目标；抖音上无效，留给别处裸请求备用
+
+## 🔴 2026-09-21 新能力：yt-dlp 插件（抖音解析换成抓流后端）
+
+**一句话**：抖音现在也能走 yt-dlp —— 下载/合流/断点续传/格式选择交给它，解析用我们的浏览器抓流。插件在 `C:\D\opt\tools\yt-dlp\plugins\douyin-browser\`（类 `DouyinBrowserIE`，`IE_NAME=douyin:browser`）。
+
+```powershell
+# 前置：专用 Edge 开在 9401 且已登录（见上方「第三条路」）
+& 'C:\D\opt\tools\yt-dlp\yt-dlp.exe' --plugin-dirs 'C:\D\opt\tools\yt-dlp\plugins' "<抖音URL>"
+```
+实测 2026-09-21：`v.douyin.com/w2CD2pVwgws` → **1920x1080 hevc + aac / 288.17s / 5.53MB**，自动合流，一条命令出片。
+
+**踩过的坑（全是实测）**：
+- 插件目录结构必须是 `<插件根>/<项目名>/yt_dlp_plugins/extractor/*.py`，**少一层目录就静默不加载**（第一次就栽在这）
+- `--list-extractors` **不列插件类** —— 别拿它判成败；要看 `-v` 日志里的 `[debug] Extractor Plugins:` 行
+- 打包版 `yt-dlp.exe` **支持** Python 插件，不用装 pip 版
+- 插件 extractor **优先于**内置 `DouyinIE`（同一 URL 被插件抢走）
+- 格式 dict **必须带 `ext`**（视频 mp4 / 音频 m4a）：否则 yt-dlp 推成 `unknown_video`，ffmpeg 合流报 `Postprocessing: Error opening output files: Invalid argument`
+- **音轨常常只存在于 CDP 网络响应里**（实测某次清单 34 路里音频 **0** 路），JSON 已补网络音频兜底；不补就会出现 `Downloading 1 format(s)` ＝ 下成纯视频**没声音**
+- 解析后端 = `sniff_download.mjs` 的 `RESOLVE_JSON=1` 模式（吐一行 `__RESOLVE_JSON__{...}`）；**将来若上「Node 补环境跑 webmssdk 算签名」，只需改插件的 `_resolve_via_sniff`**，命令与下游用法一行都不用动
