@@ -326,3 +326,20 @@ node C:\D\opt\asr-service\vad-transcribe.mjs "<视频目录>" "<标题(给精修
   - 两个后端都吐**同一种**一行 `__RESOLVE_JSON__{...}`，下游共用；换后端只动插件的 `_JOBS` / `_resolve_via`
 - 🔴 **为什么不在 Node 里自己算签名**（2026-09-21 探针结论）：`a_bogus` / `x-secsdk-web-signature` 藏在 webmssdk 的**自研 VM 字节码**里（219 个已加载脚本里搜不到这两个字面量；公开入口 `window.byted_acrawler.frontierSign` 在真实请求中**调用 0 次**，它只产旧的 X-Bogus）。补环境复刻要同时拿下 webmssdk + secsdk + bdms 三套 SDK 并伪造整套设备指纹 → 代价过高，所以走"签名中转"：浏览器只借一道手，**下载完全不碰浏览器**
 - 🔴 **实测门槛 = 5 个 URL 参数一个不少 + cookie**：缺 `a_bogus`/`msToken`/`verifyFp` 报 `Sign Invalid`；缺 `uifid` 报 `Uifid Not Found`；缺 `x-secsdk-web-signature` 报 `Signature Not Found`；五个带齐但不带 cookie → HTTP 200 但**空响应**
+
+## 🔴 2026-09-21 本机引擎资产已入库（`engine/`）
+
+本技能包下 `engine/` 是本机引擎的**快照**（25 个文件 / 约 120KB）：两个解析脚本（抓流 + 签名中转）、
+CDP 工具、登录服务、知识库流水线、yt-dlp 插件、自检脚本、侦察脚本。
+**不单独开源发布**，随 agents-to-feishu 项目走（老大 2026-09-21 定）。
+
+- **真源在本机 `C:\D\opt\tools\yt-dlp\`**（插件里路径硬编码，运行位置就是那儿）；`engine/` 只作快照/备份
+- 改完本机脚本后同步（**带排除清单 + sha 对比，别手抄**）：
+  ```powershell
+  node C:\D\opt\agents-to-feishu\skills\all-platform-video-extract\engine\sync.mjs --dry-run   # 先看差异
+  node C:\D\opt\agents-to-feishu\skills\all-platform-video-extract\engine\sync.mjs             # 再同步
+  ```
+- 🔴 **绝不入库**（排除清单写死在 `engine/sync.mjs`）：`cookies.txt`（真登录凭证）、`edge-video-profile/`（含 sessionid）、
+  `yt-dlp.exe`（17MB 第三方二进制）、`cdp.port`、`recon_full_url.txt`（真实带签名 URL，含**设备级 uifid**，属凭证性质）、
+  登录截图 png、`__pycache__`
+- 自检一条命令：`node C:\D\opt\tools\yt-dlp\test\selfcheck.mjs`（20 项：排序语义 / 两个后端 / 插件结构）

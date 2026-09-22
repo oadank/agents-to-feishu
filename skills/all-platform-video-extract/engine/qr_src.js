@@ -1,0 +1,1 @@
+(function(){var e=document.querySelector("img[class*=`"RhjdbXj8`"]")||[].slice.call(document.querySelectorAll("img")).filter(function(x){var r=x.getBoundingClientRect();return r.width>90&&Math.abs(r.width-r.height)<40})[0];return e?(e.currentSrc||e.src||"").slice(0,80)+"  ["+e.naturalWidth+"x"+e.naturalHeight+"]":"NONE";})()
