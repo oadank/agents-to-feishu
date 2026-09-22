@@ -105,6 +105,11 @@ if (blind.length) bad('仍在盲取第一个 page（应走 pickPage）：' + bli
 else ok(`无盲取 page 的写法（${BLIND_FILES.length} 个文件都走 pickPage）`);
 if (existsSync(join(ROOT, 'cdp_page.mjs'))) ok('cdp_page.mjs 共享挑选器存在');
 else bad('缺 cdp_page.mjs');
+// 页面收尾脚本：跑完得把抖音页收走，否则视频页会自动连播下一条、窗口一直在后台响
+if (existsSync(join(ROOT, 'park_page.mjs'))) ok('park_page.mjs 收尾脚本存在');
+else bad('缺 park_page.mjs（跑完不会收页面，视频页会自动连播）');
+if (/park_page\.mjs/.test(read(PLUGIN_PY) || '')) ok('插件跑完会调 park_page 收尾');
+else bad('插件里没有 park_page 收尾调用');
 
 // ── 4) 汇总
 console.log('=== PASS ===');

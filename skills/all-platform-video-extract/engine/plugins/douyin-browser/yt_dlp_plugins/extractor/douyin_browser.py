@@ -44,31 +44,52 @@ class DouyinBrowserIE(InfoExtractor):
     )
     _TESTS = []
 
+    def _park_page(self):
+        """收尾：把浏览器页面停到不播东西的位置。
+
+        🔴 老大 2026-09-21 点名要求。抖音视频页**播完会自动连播下一条**，窗口留在那儿就会在
+        后台一直响；而且不光是抓流后端会播 —— 签名中转后端虽然只发一次接口请求，页面被留在
+        视频页上抖音自己也会开始播。所以无论哪个后端、成功还是失败，跑完都得把页面收走。
+        DOUYIN_KEEP_PAGE=1 可关掉（调试用）。
+        """
+        if os.environ.get('DOUYIN_KEEP_PAGE') == '1':
+            return
+        park = os.path.join(_HOME, 'park_page.mjs')
+        if not os.path.isfile(park):
+            return
+        try:
+            subprocess.run([_NODE, park], capture_output=True, timeout=20)
+        except Exception:
+            pass  # 收尾失败不影响下载结果
+
     def _resolve_via(self, kind, url):
         script, label = _JOBS[kind]
         if not os.path.isfile(script):
             raise ExtractorError(f'{label}脚本不存在：{script}')
         env = dict(os.environ, RESOLVE_JSON='1')
         try:
-            proc = subprocess.run([_NODE, script, url], capture_output=True, timeout=_TIMEOUT, env=env)
-        except FileNotFoundError:
-            raise ExtractorError(f'找不到 node 解释器：{_NODE}')
-        except subprocess.TimeoutExpired:
-            raise ExtractorError(f'{label}超时（{_TIMEOUT}s）：专用 Edge 没开或没登录？')
+            try:
+                proc = subprocess.run([_NODE, script, url], capture_output=True, timeout=_TIMEOUT, env=env)
+            except FileNotFoundError:
+                raise ExtractorError(f'找不到 node 解释器：{_NODE}')
+            except subprocess.TimeoutExpired:
+                raise ExtractorError(f'{label}超时（{_TIMEOUT}s）：专用 Edge 没开或没登录？')
 
-        out = (proc.stdout or b'').decode('utf-8', 'replace')
-        err = (proc.stderr or b'').decode('utf-8', 'replace')
-        for line in out.splitlines():
-            if line.startswith(_MARKER):
-                return json.loads(line[len(_MARKER):])
+            out = (proc.stdout or b'').decode('utf-8', 'replace')
+            err = (proc.stderr or b'').decode('utf-8', 'replace')
+            for line in out.splitlines():
+                if line.startswith(_MARKER):
+                    return json.loads(line[len(_MARKER):])
 
-        tail = ' | '.join(out.strip().splitlines()[-3:]) or '(stdout 为空)'
-        raise ExtractorError(
-            f'{label}没吐出 JSON。末尾日志：{tail[:280]}'
-            + (f' / stderr: {err.strip()[-200:]}' if err.strip() else '')
-            + '\n提示：先确认专用 Edge 开在 9401 且已登录（见 SKILL.md 第三条路）',
-            expected=True,
-        )
+            tail = ' | '.join(out.strip().splitlines()[-3:]) or '(stdout 为空)'
+            raise ExtractorError(
+                f'{label}没吐出 JSON。末尾日志：{tail[:280]}'
+                + (f' / stderr: {err.strip()[-200:]}' if err.strip() else '')
+                + '\n提示：先确认专用 Edge 开在 9401 且已登录（见 SKILL.md 第三条路）',
+                expected=True,
+            )
+        finally:
+            self._park_page()  # 成功/失败/超时都收尾，别让页面留在视频页上自动连播
 
     def _resolve(self, url):
         mode = (os.environ.get('DOUYIN_RESOLVE') or 'auto').lower()

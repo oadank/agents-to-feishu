@@ -342,4 +342,8 @@ CDP 工具、登录服务、知识库流水线、yt-dlp 插件、自检脚本、
 - 🔴 **绝不入库**（排除清单写死在 `engine/sync.mjs`）：`cookies.txt`（真登录凭证）、`edge-video-profile/`（含 sessionid）、
   `yt-dlp.exe`（17MB 第三方二进制）、`cdp.port`、`recon_full_url.txt`（真实带签名 URL，含**设备级 uifid**，属凭证性质）、
   登录截图 png、`__pycache__`
-- 自检一条命令：`node C:\D\opt\tools\yt-dlp\test\selfcheck.mjs`（20 项：排序语义 / 两个后端 / 插件结构）
+- 🔴 **跑完会自动把页面收走**（2026-09-21 老大点名要求）：抖音视频页**播完会自动连播下一条**，窗口留在那儿就一直在后台响；而且签名中转后端虽然只发接口请求不播放，页面被留在视频页上**抖音自己也会开始播**。所以插件跑完（**成功 / 失败 / 超时都算**）会调 `park_page.mjs`，把页面停到 `about:blank`。
+  - 想停在抖音首页：设 `PARK_URL=https://www.douyin.com/`（⚠️ 首页**自己也会自动播放推荐流**，达不到"别一直响"的目的，所以默认不是它）
+  - 调试想保留现场：设 `DOUYIN_KEEP_PAGE=1`（不收尾）
+  - 也可单独手动收尾：`node C:\D\opt\tools\yt-dlp\park_page.mjs`
+- 自检一条命令：`node C:\D\opt\tools\yt-dlp\test\selfcheck.mjs`（22 项：排序语义 / 两个后端 / 插件结构 / 无盲取 page）
