@@ -1,6 +1,7 @@
 ---
 name: lark-minutes
 version: 1.0.0
+disable-model-invocation: true
 description: "飞书妙记：搜索妙记、查看妙记基础信息、下载音视频、读取或编辑已存在的妙记产物、改标题、替换说话人/关键词、申请妙记查看/编辑权限。当给出minute_token、或要查/改既有妙记产物时使用。⚠️ 上传新音频转写受老大配额红线管制（见文首），仅当老大明确要求走妙记时才许上传；转写新音频默认走本地 ASR（桥 voice/asr.ts：小米 mimo/whisper）。不负责：获取会议关联妙记，或仅按自然语言标题定位纪要"
 metadata:
   requires:
