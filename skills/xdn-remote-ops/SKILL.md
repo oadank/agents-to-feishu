@@ -1,10 +1,18 @@
 ---
 name: xdn-remote-ops
-description: 远程操作/诊断家里的 Windows 机器（XDN=100.119.140.33 别名 cszg，RTX3080 20G 生图生视频；shlc=100.93.226.56；同一套账号密码）。触发词：XDN、3080 那台、cszg、shlc、远程显卡、显存被占、XDN 显存、生图机器、comfyui 远程、XDN 关机/开机、XDN 卡了、XDN 是什么版本、给某台机器配百度翻译、远程改 win-desktop-helper 配置、助手配置丢了、多机部署助手、给远程机器升级桌面助手、远程助手启不来、schtasks 起不来助手、助手进程反复消失。含：paramiko SSH 连法（密码从 nssm comfyui 服务现取）、GPU/显存/Ollama/ComfyUI 一体体检、远程改 helper 配置脚本、**远程部署新版 helper（换 exe + 切 agnes 远程识图 + 拉起 + OCR 端到端验证）**、WDDM 每进程显存拿不到的绕法、XDN「开机白占 8.9GB 显存」真因、helper 「更新不覆盖 / 卸载不再删配置」的机制、**单实例互斥与 schtasks 任务的 `/IT /RL HIGHEST` 铁律**。
+description: 远程运维家里两台 Windows 机器：XDN（100.119.140.33 / cszg，RTX3080 20G 生图生视频）与 shlc。触发词：XDN、cszg、shlc、3080 那台、远程显卡、显存被占、生图机器、comfyui 远程、XDN 卡了、XDN 开关机、远程改 win-desktop-helper 配置、助手配置丢了、多机部署助手、给远程机器升级桌面助手、远程助手起不来、schtasks 起不来、助手进程反复消失。
 agent_created: true
 ---
 
 # XDN 远程运维
+
+## 本技能包含什么（原写在简介里，2026-09-23 挪进正文以免简介超长被截断）
+
+- **怎么连**：paramiko SSH 唯一可靠姿势（密码从 nssm comfyui 服务环境变量现取，不落文件、不 echo）
+- **一键体检**：`probe.py` —— 开机时长 / GPU 概况 / 每进程显存 / Ollama 加载了什么 / ComfyUI 状态与队列 / helper 预热痕迹
+- **远程改 helper 配置**：`wdh_probe.py` 体检、`wdh_sftp_set.py` 只改百度三行（文本替换保留原格式）
+- **🚀 远程部署新版 helper**：`wdh_deploy.py`（传新 exe + OCR 切 agnes 直连 + 修任务 + 拉起 + 端到端复验）、`wdh_restart.py`、`wdh_verify_ocr.py`
+- **踩过的坑**：WDDM 下 `nvidia-smi` 每进程显存全是 `N/A` 的绕法；XDN「刚开机白占 8.9GB 显存」真因与处置；helper「更新不覆盖配置 / 卸载不再删配置」机制；全局单实例互斥与 schtasks `/IT /RL HIGHEST` 铁律
 
 > XDN 是一台 **Windows** 机器（不是 Linux！），跑 powershell。**RTX3080 20G**，是生图/生视频的真实推理引擎；需要开关机时由本机米家开机卡控制。
 > 🔴 **没有"空闲 20 分钟自动关机"这回事**（那只是最初构想，关机定时任务从未设置过）——完整说明与实测证据在 `comfyui-ops` 的「历史坑」一节，本技能不再重述，**勿据此假设机器会自动断、抢排期**。
