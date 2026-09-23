@@ -29,3 +29,10 @@ description: 本机 ComfyUI 稳定服务（8090）与 XDN 远程生图/生视频
 ## 历史坑
 - bitsandbytes 管道死锁（Windows 上 `pip list | grep` 卡死 import）：改环境/重启前先确认不是这个
 - ❌ **「XDN 空闲 20 分钟自动关机」是假消息**（2026-09-14 老大确认：那只是最初计划，从未真正设置过，XDN 上无此机制）。**勿再按"会被自动关机"来排期或防中断**；实测 XDN 上只有 `ComfyUI Watchdog`（Ready）等计划任务，没有关机任务。XDN 真关机只发生在手动/断电/断网。
+  ⚠️ **同一条事实 2026-09-23 被老大当面纠正了第二遍**——原因是远程运维那份技能（`xdn-remote-ops`）里另写了一份、两边不同步。**本条为该事实的唯一记录，别处不要再抄**（2026-09-23 收编时已把那份删成指针）。
+
+## 分工边界（2026-09-23 收编 xdn-remote-ops / deeptutor-ops 时划定）
+
+- **本技能**：本机 8090 控制服务本体（server.py / 模板 / 米家开机卡 / lora 机制 / 卡死修复）+ **上面那条 XDN 关机真相的唯一记录**
+- **`xdn-remote-ops`**：远程登录 XDN/shlc 干活——paramiko 连法、机器与显存体检、Ollama 归因、远程部署 win-desktop-helper、schtasks 拉起铁律；含**直连 `http://<XDN>:8000` 的运维诊断接口**（`/system_stats` 看启动参数、`/free` 释放显存），业务出图走本技能 8090，**排查机器本身走那边**
+- **`deeptutor-ops`**：DeepTutor 那套本地部署（其 videogen-shim 会分流到本技能的 8090）

@@ -202,7 +202,7 @@ if ($Heal) {
     }
     foreach ($t in $todo) {
         if ($t.Kind -like '*junction*') {
-            (Get-Item $t.Path -Force).Delete()
+            (Get-Item $t.Path -Force).Delete($true)
             New-Item -ItemType Junction -Path $t.Path -Target $SkillInRepo | Out-Null
         }
         else {
@@ -240,7 +240,7 @@ foreach ($p in $Pools) {
         $global:LASTEXITCODE = 0
     }
     else {
-        if (Test-Path $p.Path) { (Get-Item $p.Path -Force).Delete() }
+        if (Test-Path $p.Path) { (Get-Item $p.Path -Force).Delete($true) }
         New-Item -ItemType Junction -Path $p.Path -Target $SkillInRepo | Out-Null
     }
     $new = Get-TreeHash $p.Path
