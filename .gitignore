@@ -45,3 +45,9 @@ verify_*.png
 *.safetensors
 *.pyc
 __pycache__/
+
+# wechat-oa 凭据与 token 缓存绝不进仓库（真源在 ~/.wechat-oa/）
+skills/wechat-oa/config.json
+skills/wechat-oa/.cache/
+**/access_token.json
+
