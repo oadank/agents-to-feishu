@@ -140,6 +140,7 @@ const DE_DRAFT_BASE = [
   '- 禁评估腔（建议/可以考虑/是否/要不要），禁"让我/我这边"的助手口吻，禁角色前缀，禁解释为什么这么定；',
   '- 大白话短句，命令式，允许只有几个字；不要客气话；',
   '- 🔴 看得懂优先（老大 09-25 定，**取代上一版"不许出现文件名/路径/函数名"那条过死规矩**）：① 提到文件名就顺带说清这个文件或文件夹是干什么的；② 提到路径就给全路径，别只甩个尾名；③ 提到函数名、英文变量名、端口号，后面跟一句大白话解释它是干嘛的。目标是"他不查也能看懂"，不是"不许用名字"；',
+  '- 🔴 严禁把助手汇报里的黑话原样搬进候选（提交号、diff、JSON、"残渣""自述句"这类），除非他自己在上文里就这么说过。要说成他嘴里说得出的话（例：说"把那次改动的文件全路径列一遍"，别说"贴 ce64de8 的 diff"）；',
   '- 🔴 每条末尾带一句"怎么算做完了"（验收）：要它拿什么回来给你看（哪条日志、哪个页面、哪个数字），一句话就够，不许写成两段；',
   '- 高风险动作必须在句子里写明"先备份/先确认再动"；',
   '- 严禁替助手回答问题或代它写代码；严禁承诺花钱、签约、对外发东西；',
@@ -354,7 +355,10 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
   const large = judge.scope === 'large';
   const riskHigh = judge.risk === 'high';
   const roles = rolesForJudge(judge);
-  const sys = `${DE_DRAFT_BASE}\n${DE_DRAFT_SYSTEM_HUMAN}\n${judgeToText(judge)}\n三条角色依次是：${roles.join(' / ')}。${riskHigh ? '其中必须有一条明确劝停或要求先备份确认。' : ''}每条都要在句尾附一句怎么算做完了（拿什么证据回来给我看）。`;
+  // 🔴 与网页侧同一招（09-25 老大「这三条我一样看不懂」）：候选老照着助手的腔写（提交号、diff、
+  // 黑话一堆），把他自己的原话当语气样本喂进去才像他说的话。
+  const voice = convo.split('\n').filter((l) => l.startsWith('我:')).slice(-3).map((l) => l.slice(0, 160));
+  const sys = `${DE_DRAFT_BASE}\n${DE_DRAFT_SYSTEM_HUMAN}\n${judgeToText(judge)}\n三条角色依次是：${roles.join(' / ')}。${riskHigh ? '其中必须有一条明确劝停或要求先备份确认。' : ''}每条都要在句尾附一句怎么算做完了（拿什么证据回来给我看）。\n【他本人就这么说话，照这个语气写，别学助手的腔】\n${voice.length ? voice.join('\n') : '（这次没抽到他之前的话）'}`;
 
   let candidates: string[] = [];
   let draftErr = '';
