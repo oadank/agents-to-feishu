@@ -207,6 +207,8 @@ export interface ConfigStore {
   skills?: SkillConfig;
   /** 内建 ⚡ 提示词优化（勾选即用）：消息带触发前缀时先精炼再喂 bot，与语音能力同定位 */
   promptOptimize?: PromptOptimizeConfig;
+  /** 副驾 /de：读本会话历史 → 判断 → 三条候选卡片（本地引擎，不依赖 dsh） */
+  de?: DeConfig;
   /** 全局默认工作目录（所有 agent 的缺省启动目录；每 agent 可覆盖，见 AgentDef.workdir） */
   defaultWorkdir?: string;
 }
@@ -228,19 +230,86 @@ export const DEFAULT_SKILLS: SkillConfig = {
   marketUrl: '',
 }
 
-/** 内建 ⚡ 提示词优化配置：触发前缀命中 → POST endpoint {text} → {ok,optimized} 精炼稿喂 bot */
+/**
+ * [2026-09-25 老大定调] OpenAI 兼容的单模型配置。
+ * /p 和 /de 各持一份，互不共用 —— 目的是**彻底不依赖 dsh**（dsh-web 与 dsh-input-tools 插件）：
+ * 别人拿到这套 agents-to-feishu 单独部署，填上自己的 base/key/model 就能用。
+ */
+export interface LlmConfig {
+  /** OpenAI 兼容根地址，例 https://api.deepseek.com/v1（无 /v1 会自动补） */
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  temperature?: number;
+  maxTokens?: number;
+  /** DeepSeek 官方独立思考开关：实测同一份输入 default 3.0s → disabled 0.8s。别的后端不认就留 default */
+  thinking?: 'default' | 'disabled';
+  timeoutMs?: number;
+}
+
+/** 内建 ⚡ 提示词优化配置：触发前缀命中 → 先精炼再喂 bot */
 export interface PromptOptimizeConfig {
   enabled: boolean;
-  /** 优化端点（默认复用 dsh-web 的实现：模板+openmem 画像注入都在线） */
+  /**
+   * 引擎选择：local=用本仓自带的本地引擎（默认，不碰 dsh）；endpoint=调外部端点（向后兼容旧配置）。
+   * 老配置里 endpoint 指着 dsh-web 的也不炸：engine=endpoint 才走它。
+   */
+  engine?: 'local' | 'endpoint';
+  /** 外部优化端点（仅 engine=endpoint 时生效；空则回落本地引擎） */
   endpoint: string;
   /** 触发前缀（逗号分隔，ASCII 前缀大小写不敏感）；优化成功后剥前缀精炼余文 */
   prefixes: string;
+  /** 本地引擎用的模型（/p 专属，可与 /de 不同） */
+  llm?: LlmConfig;
+  /** 本地引擎：精炼风格档（A=沟通/指令类，B=内容产出类），对齐 dsh 侧的档位语义 */
+  tierA?: boolean;
+  tierB?: boolean;
+  /** 本地引擎：是否顺带注入 openmem 画像（openmem 是独立服务，不是 dsh；关掉也能跑） */
+  useOpenmem?: boolean;
 }
 
 export const DEFAULT_PROMPT_OPTIMIZE: PromptOptimizeConfig = {
   enabled: false,
-  endpoint: 'http://127.0.0.1:3080/optimize-prompt',
+  engine: 'local',
+  endpoint: '',
   prefixes: '/p,优化：,优化:',
+  llm: { baseUrl: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-chat', temperature: 0.5, maxTokens: 1200, thinking: 'disabled', timeoutMs: 60000 },
+  tierA: true,
+  tierB: true,
+  useOpenmem: false,
+};
+
+/**
+ * [2026-09-25 新增] 副驾 /de：读本会话历史 → 判断局面 → 起草 3 条候选 → 排序 → 交互卡片三选一
+ * → 点哪条就用 user 令牌把**原文**发回该会话（不加署名，老大显式豁免）。全程不碰 dsh。
+ */
+export interface DeConfig {
+  enabled: boolean;
+  /** 触发词，默认 /de */
+  command: string;
+  /** 拉多少条会话历史进判断（老大 09-25 明说 10~15 够，50 是浪费 token） */
+  historyTurns: number;
+  /** 起草模型（写那三条） */
+  draft: LlmConfig;
+  /** 判断+排序模型（可指更便宜的；留空 = 复用 draft） */
+  judge?: LlmConfig;
+  /** 是否注入 openmem 画像/相关记忆（独立服务，非 dsh；拿不到就降级，不拦候选） */
+  useOpenmem: boolean;
+  /** openmem MCP 地址（默认本机 :3466/mcp） */
+  openmemUrl: string;
+  /** 高风险（不可逆）时是否禁止直接发送、只允许复制/回显提示 */
+  blockRiskySend: boolean;
+}
+
+export const DEFAULT_DE: DeConfig = {
+  enabled: true,
+  command: '/de',
+  historyTurns: 15,
+  draft: { baseUrl: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-chat', temperature: 0.95, maxTokens: 900, thinking: 'disabled', timeoutMs: 45000 },
+  judge: { baseUrl: '', apiKey: '', model: '', temperature: 0.2, maxTokens: 600, thinking: 'disabled', timeoutMs: 12000 },
+  useOpenmem: false,
+  openmemUrl: 'http://127.0.0.1:3466/mcp',
+  blockRiskySend: true,
 };
 
 /** 统一注入配置：所有 agent 生效的全局 systemPrompt（手动填，存 config-store.json） */
@@ -387,6 +456,7 @@ export function readStore(file?: string): ConfigStore {
       speech: DEFAULT_SPEECH,
       injection: DEFAULT_INJECTION,
       promptOptimize: DEFAULT_PROMPT_OPTIMIZE,
+      de: DEFAULT_DE,
       defaultWorkdir: '',
     };
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -406,6 +476,8 @@ export function readStore(file?: string): ConfigStore {
       injection: parsed.injection ?? DEFAULT_INJECTION,
       skills: parsed.skills,
       promptOptimize: parsed.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE,
+      // 老 store 里没有 de：补默认（默认 draft 模型可跑，judge 留空=复用 draft）
+      de: { ...DEFAULT_DE, ...(parsed.de ?? {}) },
       defaultWorkdir: parsed.defaultWorkdir ?? '',
       settings: parsed.settings ?? { groupMentionOnly: true },
     };
