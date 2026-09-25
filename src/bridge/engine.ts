@@ -18,7 +18,7 @@ import { synthesize, toOpus, type TtsConfig } from '../voice/tts.js';
 import { readStore, DEFAULT_PROMPT_OPTIMIZE, DEFAULT_DE, type PromptOptimizeConfig, type DeConfig, type SpeechConfig } from '../config-center/store.js';
 // [2026-09-25 老大定调] /p 与 /de 的本地引擎与飞书流程：不依赖 dsh-web，也不依赖 dsh-input-tools 插件
 import { localOptimize } from './local-engines.js';
-import { runDe, onDeAction, type DeFeishuClient } from './de-flow.js';
+import { runDe, onDeAction, rememberAssistantSaid, type DeFeishuClient } from './de-flow.js';
 import {
   buildStreamingCardSkeleton,
   buildSimpleCard,
@@ -1099,6 +1099,10 @@ export class MessageEngine {
           if (missing.length > 0) { layers.text += `\n\n⚠️ 报告未落盘：${missing.slice(0, 3).join(' ; ')}`; console.log(`[engine] 产物警告 chat=${chatId.slice(0, 12)} missing=${missing.length}`); }
         } catch { /* 警告失败绝不拦正文 */ }
         const finalText = buildFinalMarkdown(layers);
+        // [2026-09-25 老大选方案A] 机器人自己知道刚回了什么：飞书「读消息」接口对流式卡片只回
+        // 「请升级至最新版本客户端，以查看内容」占位，/de 走读接口就拿不到对面那句话的正文。
+        // 在这里留一份内存副本，/de 优先用这份（每个会话只留最近 3 条）。
+        try { rememberAssistantSaid(chatId, finalText); } catch { /* 记不上也不许影响发正文 */ }
         console.log(`[engine] FINAL text.len=${layers.text.length} thinking.len=${layers.thinking.length} tools=${layers.toolLines.length} finalText.len=${finalText.length}`);
         const ok = await render(finalText, true);
         if (!ok) {

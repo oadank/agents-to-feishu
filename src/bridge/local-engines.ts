@@ -134,10 +134,13 @@ const DE_DRAFT_SYSTEM_HUMAN = '用户在跟另一个 AI 助手对话，替他写
 const DE_DRAFT_BASE = [
   '规则：',
   '- 🔴 第一优先级：必须**接住标了「▶ 助手刚说的」那一句**。它问什么就答什么；它给了结论/方案/报错，就针对那句推进、否定、补条件或收窄；与这句无关的一律算错；',
+  '- 🔴 只写"能直接按回车发出去的那句话"本身。严禁复述角色名、严禁出现"用户要三条/所以三条要/第一条是/认账收尾：/可以要求它"这类自述或解释——出现一个就算废稿重写；',
   '- 助手原话里的具体名称、文件、命令、数字、选项序号，照抄进回复，不许改写成"那个东西/它"这种泛指；',
   '- 每条必须是用户现在就能按回车发给助手的**原话**：主语是"你"（指助手）；',
   '- 禁评估腔（建议/可以考虑/是否/要不要），禁"让我/我这边"的助手口吻，禁角色前缀，禁解释为什么这么定；',
   '- 大白话短句，命令式，允许只有几个字；不要客气话；',
+  '- 🔴 看得懂优先（老大 09-25 定，**取代上一版"不许出现文件名/路径/函数名"那条过死规矩**）：① 提到文件名就顺带说清这个文件或文件夹是干什么的；② 提到路径就给全路径，别只甩个尾名；③ 提到函数名、英文变量名、端口号，后面跟一句大白话解释它是干嘛的。目标是"他不查也能看懂"，不是"不许用名字"；',
+  '- 🔴 每条末尾带一句"怎么算做完了"（验收）：要它拿什么回来给你看（哪条日志、哪个页面、哪个数字），一句话就够，不许写成两段；',
   '- 高风险动作必须在句子里写明"先备份/先确认再动"；',
   '- 严禁替助手回答问题或代它写代码；严禁承诺花钱、签约、对外发东西；',
   '- 只输出 JSON 字符串数组，恰好 3 条，不要代码围栏，不要别的字。',
@@ -156,6 +159,27 @@ export interface DeResult {
 
 const AI_ROLES = ['推进', '收窄', '叫停'];
 const AI_ROLES_LARGE = ['方案A', '方案B', '叫停'];
+/**
+ * [2026-09-25 老大定方案一] 三条不再固定"推进/收窄/叫停"（他实测"方向太死，都不好用"），
+ * 改成按**当前场合**现场派角色；判不准才退回老三条。大改动仍强制给两个可比方案（他早前定的硬规则），
+ * 场合只决定这两条各自往哪个方向写。
+ */
+export function rolesForJudge(j: Record<string, unknown>): string[] {
+  const intent = String(j?.intent ?? '');
+  const mood = String(j?.mood ?? '');
+  const large = String(j?.scope ?? '') === 'large';
+  const third = large ? '叫停' : AI_ROLES[2];
+  let pair: [string, string] | null = null;
+  if (intent === 'question' || intent === 'ask_info') pair = ['直接答', '先要证据再答'];
+  else if (intent === 'decide') pair = ['就按它说的干', '换个更稳的做法'];
+  else if (intent === 'accept') pair = ['认账收尾', '挑一点让它证明'];
+  else if (intent === 'verify' || mood === 'doubtful' || mood === 'annoyed') pair = ['顶回去要理由', '先退回安全点'];
+  else if (intent === 'assign') pair = ['派下一步', '只做一半先验证'];
+  else if (intent === 'narrow' || intent === 'stop') pair = ['砍范围', '干脆停手'];
+  if (!pair) return large ? AI_ROLES_LARGE : AI_ROLES;
+  if (large) return [pair[0] + '（方案A）', pair[1] + '（方案B）', third];
+  return [pair[0], pair[1], third];
+}
 
 /** 会话拼文本（最近的必须在最后：模型对尾部最敏感，历史上保头砍尾出过大事故） */
 export function foldHistory(turns: DeHistoryTurn[], cap = 6000): string {
@@ -329,8 +353,8 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
 
   const large = judge.scope === 'large';
   const riskHigh = judge.risk === 'high';
-  const roles = large ? AI_ROLES_LARGE : AI_ROLES;
-  const sys = `${DE_DRAFT_BASE}\n${DE_DRAFT_SYSTEM_HUMAN}\n${judgeToText(judge)}\n三条角色依次是：${roles.join(' / ')}。${riskHigh ? '其中必须有一条明确劝停或要求先备份确认。' : ''}`;
+  const roles = rolesForJudge(judge);
+  const sys = `${DE_DRAFT_BASE}\n${DE_DRAFT_SYSTEM_HUMAN}\n${judgeToText(judge)}\n三条角色依次是：${roles.join(' / ')}。${riskHigh ? '其中必须有一条明确劝停或要求先备份确认。' : ''}每条都要在句尾附一句怎么算做完了（拿什么证据回来给我看）。`;
 
   let candidates: string[] = [];
   let draftErr = '';
@@ -345,6 +369,9 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
       for (const x of (arr as unknown[])) {
         const s = typeof x === 'string' ? x : String((x as Record<string, unknown>)?.text ?? '');
         const t = s.replace(/^["'「『\s]+|["'」』\s]+$/g, '').replace(/^[-*·]\s*/, '').replace(/^\d+\s*[.、)）:：]\s*/, '').trim();
+        // 🔴 光靠提示词拦不住"自述"（09-25 实测模型写出「用户要三条：…」「所以三条要针对这句：…」当候选），
+        // 代码里再兜一道：这种句子直接判废，不够 3 条就走已有的重试循环重写，绝不发上卡片。
+        if (/用户要三条|三条要?针对|所以三条|第一条是|角色[:：]|拟用\s*\d|^\s*(推进|收窄|叫停|认账收尾|挑一点让它证明|直接答|先要证据再答|方案[AB])\s*[:：]/.test(t)) continue;
         if (t.length >= 1 && !candidates.includes(t)) candidates.push(t);
       }
     } catch (e) { draftErr = (e as Error).message.slice(0, 160); break; }

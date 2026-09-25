@@ -129,6 +129,31 @@ function extractMsgText(msgType: string, raw: string): string {
   return '';
 }
 
+/**
+ * 机器人"自己说过什么"的内存副本（每个会话留最近 3 条，带时间戳）。
+ * 🔴 为什么要有它（2026-09-25 老大方案A）：飞书「读消息」接口把流式卡片读回来是
+ * `请升级至最新版本客户端，以查看内容` 这种占位，/de 光靠读接口看不到对面那句的正文，
+ * 候选就会接错话。机器人自己发出去的那份文本它本来就知道，留一份最准。
+ */
+const saidStore = new Map<string, Array<{ at: number; text: string }>>();
+export function rememberAssistantSaid(chatId: string, text: string): void {
+  const t = String(text ?? '').trim();
+  if (!chatId || t === '') return;
+  const arr = saidStore.get(chatId) ?? [];
+  if (arr[arr.length - 1]?.text === t) return;
+  arr.push({ at: Date.now(), text: t });
+  while (arr.length > 3) arr.shift();
+  saidStore.set(chatId, arr);
+  if (saidStore.size > 200) { const k = saidStore.keys().next().value; if (k) saidStore.delete(k); }
+}
+/** 取本会话最近一条"机器人自己说的"正文（默认只认 30 分钟内的，太旧的别拿来当上下文）。 */
+export function lastAssistantSaid(chatId: string, maxAgeMs = 30 * 60_000): string {
+  const arr = saidStore.get(chatId);
+  if (!arr || arr.length === 0) return '';
+  const last = arr[arr.length - 1];
+  return Date.now() - last.at <= maxAgeMs ? last.text : '';
+}
+
 /** 读本会话最近 N 条消息（含 AI 的卡片回答）。app 发的算助手，其余算用户。 */
 export async function fetchHistory(client: DeFeishuClient & { getAppId?: () => Promise<string> }, chatId: string, count: number): Promise<DeHistoryTurn[]> {
   const tk = await client.getTenantToken();
@@ -151,6 +176,22 @@ export async function fetchHistory(client: DeFeishuClient & { getAppId?: () => P
 export async function runDe(client: DeFeishuClient, cfg: DeConfig, chatId: string): Promise<{ mid: string | null; res: DeResult }> {
   if (!cfg.enabled) throw new Error('/de 未在配置中心启用');
   const turns = await fetchHistory(client as DeFeishuClient, chatId, cfg.historyTurns || 15);
+  // 🔴 [方案A] 读回来的"对面那句话"经常是占位语（流式卡片读接口给不到正文），
+  // 机器人自己那份副本才有真内容：有新鲜副本就以副本为准，替换最后那条助手发言（没有就补一条）。
+  const mine = lastAssistantSaid(chatId);
+  if (mine !== '') {
+    let patched = false;
+    for (let i = turns.length - 1; i >= 0; i--) {
+      if (turns[i].role !== 'assistant') continue;
+      const t = turns[i].text;
+      if (/请升级至最新版本客户端|以查看内容/.test(t) || t.length < 40 || mine.startsWith(t.slice(0, 24))) {
+        turns[i] = { role: 'assistant', text: mine };
+      }
+      patched = true;
+      break;
+    }
+    if (!patched) turns.push({ role: 'assistant', text: mine });
+  }
   if (turns.length === 0) throw new Error('这个会话读不到文本历史（可能是空会话或只有图片/文件）');
   const res = await localDe(turns, cfg);
   if (res.candidates.length === 0) throw new Error(`没出候选：${res.context.note || '起草模型返回空'}`);
