@@ -138,17 +138,30 @@ export class MiMoProvider implements RuntimeProvider {
 
   async interrupt(): Promise<void> {
     if (!this.activePrompt || !this.child) return;
+    const target = this.activePrompt;
     try {
       this.child.stdin!.write(JSON.stringify({
         jsonrpc: '2.0', method: 'session/cancel',
-        params: { sessionId: this.activePrompt.sessionId },
+        params: { sessionId: target.sessionId },
       }) + '\n');
-      rtLog(`[mimo] interrupt session=${this.activePrompt.sessionId.slice(0, 8)}`);
+      rtLog(`[mimo] interrupt session=${target.sessionId.slice(0, 8)}`);
     } catch {}
-    this.interruptedSessionIds.add(this.activePrompt.sessionId);
+    this.interruptedSessionIds.add(target.sessionId);
     if (this.currentStreamEnd) {
-      await this.currentStreamEnd;
-      rtLog(`[mimo] interrupt: current turn fully ended`);
+      // [2026-09-25 自测实锤·失忆根治补充] mimocode 长文本生成中**无视 session/cancel**，
+      // 实测中断后仍连写 6.5 分钟不停；原先此处无限 await 本轮收口 ⇒ 飞书"打断/插队"
+      // 卡住数分钟，正是"像断线"的真实触发条件之一。改为有界等待 15s：
+      // 超时即本地强制收口（activePrompt 置空 ⇒ 引擎迟到的散串 update 自然丢弃；
+      // 会话已由 interruptedSessionIds 保留 ⇒ 记忆不丢，下轮原会话续聊）。
+      const ended = await Promise.race([
+        this.currentStreamEnd.then(() => true),
+        new Promise<boolean>((r) => setTimeout(() => r(false), 15_000)),
+      ]);
+      rtLog(`[mimo] interrupt: current turn ${ended ? 'fully ended' : 'FORCED settle after 15s（引擎无视 cancel，本地收口，会话保留）'}`);
+      if (!ended) {
+        if (this.activePrompt === target) this.activePrompt = null;
+        target.onDone(); // onDone 幂等（settled 首判），已流出正文按正常完成收口
+      }
     }
   }
 
@@ -287,7 +300,24 @@ export class MiMoProvider implements RuntimeProvider {
       catch (e) { this.spawnPromise = null; reject(e); return; }
 
       rtLog(`[mimo] ACP spawned pid=${child.pid}`);
-      child.stderr?.on('data', (c: Buffer) => rtLog(`[mimo] ACP stderr: ${c.toString().trim().slice(0, 300)}`));
+      child.stderr?.on('data', (c: Buffer) => {
+        const s = c.toString().trim();
+        rtLog(`[mimo] ACP stderr: ${s.slice(0, 300)}`);
+        // [2026-09-25 空回复根治] mimocode 引擎对死会话的 NotFoundError 只吐 stderr，
+        // JSON-RPC 仍回「成功但空」→ 桥侧当正常完成 → 卡片落「（空回复）」。
+        // 这里把 stderr 上的会话失效接住：收口在途 prompt 为错误 + 弃用该会话，下条消息自动新建。
+        if (/Session not found/i.test(s)) {
+          const sidMatch = /Session not found:\s*(\S+)/i.exec(s);
+          const deadSid = sidMatch?.[1]?.replace(/["',].*$/, '');
+          rtLog(`[mimo] ⚠️ 会话已失效（stderr: Session not found${deadSid ? ' ' + deadSid.slice(0, 12) : ''}）→ 收口在途轮次并弃用`);
+          if (this.activePrompt) {
+            try { this.activePrompt.onDone(`MiMo 会话已失效（引擎侧 Session not found），本条未能作答；下条消息自动开新会话，可直接重发`); } catch { /* 收口失败不阻塞 */ }
+          }
+          if (deadSid) {
+            for (const [k, v] of this.sessions) { if (v.sessionId === deadSid || v.sessionId.startsWith(deadSid.slice(0, 12))) { this.sessions.delete(k); this.diskDelete(k); } }
+          }
+        }
+      });
       // 票 hand-3③：stdin 上的 error 没有监听器 = Node 抛 uncaughtException，整个桥一起没。
       child.stdin?.on('error', (err) => {
         rtLog(`[mimo] ⚠️ ACP stdin error: ${err.message}`);
