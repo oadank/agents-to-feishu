@@ -133,6 +133,8 @@ const DE_JUDGE_SYSTEM = [
 const DE_DRAFT_SYSTEM_HUMAN = '用户在跟另一个 AI 助手对话，替他写 3 条可直接发出的回复。';
 const DE_DRAFT_BASE = [
   '规则：',
+  '- 🔴 第一优先级：必须**接住标了「▶ 助手刚说的」那一句**。它问什么就答什么；它给了结论/方案/报错，就针对那句推进、否定、补条件或收窄；与这句无关的一律算错；',
+  '- 助手原话里的具体名称、文件、命令、数字、选项序号，照抄进回复，不许改写成"那个东西/它"这种泛指；',
   '- 每条必须是用户现在就能按回车发给助手的**原话**：主语是"你"（指助手）；',
   '- 禁评估腔（建议/可以考虑/是否/要不要），禁"让我/我这边"的助手口吻，禁角色前缀，禁解释为什么这么定；',
   '- 大白话短句，命令式，允许只有几个字；不要客气话；',
@@ -147,6 +149,7 @@ export interface DeHistoryTurn { role: 'user' | 'assistant'; text: string }
 export interface DeResult {
   judge: Record<string, unknown>;
   candidates: Array<{ text: string; p: number; role: string }>;
+  ranked: boolean;
   context: { rows: number; chars: number; openmem: boolean; note: string };
   degraded: { judge: boolean; draft: boolean; rank: boolean };
 }
@@ -156,8 +159,21 @@ const AI_ROLES_LARGE = ['方案A', '方案B', '叫停'];
 
 /** 会话拼文本（最近的必须在最后：模型对尾部最敏感，历史上保头砍尾出过大事故） */
 export function foldHistory(turns: DeHistoryTurn[], cap = 6000): string {
-  const rows = turns.filter((t) => t.text.trim() !== '')
-    .map((t) => `${t.role === 'user' ? '我' : '助手'}: ${t.text.replace(/\s+/g, ' ').trim()}`);
+  // [2026-09-25 老大 B 类问题「不像针对对面 AI 那句该回的话」的修法]
+  // 助手的卡片回答此前根本没进上下文（fetchHistory 只收 text），修好后动辄几千字：
+  // ① 逐条限长，别把预算吃光；② 明确标出「要回的就是最后这句」，模型才不会继续对着空气指挥。
+  const clean = turns.filter((t) => t.text.trim() !== '');
+  let lastAi = -1;
+  for (let i = clean.length - 1; i >= 0; i--) { if (clean[i].role === 'assistant') { lastAi = i; break; } }
+  const rows = clean.map((t, i) => {
+    const one = t.text.replace(/\s+/g, ' ').trim();
+    const isLastAi = i === lastAi;
+    const lim = t.role === 'user' ? 400 : (isLastAi ? 2400 : 1200);
+    // 用户的话保头；助手的长回答**保尾**（结论/下一步/报错通常在最后）
+    const body = one.length <= lim ? one : (t.role === 'user' ? one.slice(0, lim) + '…' : '…' + one.slice(-lim));
+    const label = isLastAi ? '▶ 助手刚说的（这次要回的就是这一句）: ' : (t.role === 'user' ? '我: ' : '助手: ');
+    return label + body;
+  });
   const joined = rows.join('\n');
   return joined.length > cap ? joined.slice(-cap) : joined;
 }
@@ -232,12 +248,18 @@ export function resolveDecision(dc?: DecisionConfig): { url: string; model: stri
 }
 
 /** 问一轮判断题，返回原始 answers（失败就抛，由调用方降级，绝不卡住 /de） */
-export async function askSystemOne(state: string, dc: DecisionConfig | undefined, timeoutMs = 6000): Promise<Record<string, { type?: string; choice?: string; noul?: number; score?: number }>> {
+export async function askSystemOne(
+  state: string,
+  dc: DecisionConfig | undefined,
+  timeoutMs = 6000,
+  questions: Record<string, unknown> = DE_QUESTIONS,
+  instructions: string = DE_DECISION_INSTRUCTIONS,
+): Promise<Record<string, { type?: string; choice?: string; noul?: number; score?: number }>> {
   const { url, model, key } = resolveDecision(dc);
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-    body: JSON.stringify({ model, instructions: DE_DECISION_INSTRUCTIONS, state, questions: DE_QUESTIONS }),
+    body: JSON.stringify({ model, instructions, state, questions }),
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!r.ok) throw new Error(`决策模型 HTTP ${r.status} ${(await r.text().catch(() => '')).slice(0, 80)}`);
@@ -330,25 +352,73 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
   candidates = candidates.slice(0, 3);
 
   const out: DeResult['candidates'] = candidates.map((text, i) => ({ text, p: 0, role: roles[i] ?? '' }));
-  let rankDegraded = true;
+  // [2026-09-25 老大实测「满屏拟用 0%」] 原来只认 {probabilities:{c1:…}} 一种形状，形状不对就静默算失败，
+  // 既不报错也不标降级 → 卡片上三条 0% 是假数据。现在：① 宽容解析聊天模型的各种形状；
+  // ② 还不行就交给决策模型选最优（dsh 侧同一招）；③ 全失败就 ranked=false，卡片干脆不显示百分比。
+  let ranked = false;
   if (candidates.length >= 2) {
+    const draftMap: Record<string, string> = {};
+    candidates.forEach((t, i) => { draftMap[`c${i + 1}`] = t; });
+    const applyProbs = (probs: Record<string, number>): boolean => {
+      const vals = candidates.map((_, i) => Number(probs[`c${i + 1}`] ?? NaN));
+      if (vals.some((v) => !Number.isFinite(v))) return false;
+      out.forEach((c, i) => { c.p = vals[i]; });
+      out.sort((a, b) => b.p - a.p);
+      return true;
+    };
     try {
       const j = pickJson(await chatOnce({
         llm: judgeLlm, json: true, system: DE_RANK_SYSTEM,
-        user: `${convo}\n\n候选：\n${candidates.map((t, i) => `c${i + 1}. ${t}`).join('\n')}`,
-      })) as { probabilities?: Record<string, number> } | null;
-      const probs = j?.probabilities;
-      if (probs && typeof probs === 'object') {
-        out.forEach((c, i) => { c.p = Number(probs[`c${i + 1}`]) || 0; });
-        out.sort((a, b) => b.p - a.p);
-        rankDegraded = false;
+        user: `${convo}\n\n候选：\n${candidates.map((t, i) => `c${i + 1}. ${t}`).join('\n')}\n\n只回 JSON，形状 {"probabilities":{"c1":0.6,"c2":0.3,"c3":0.1}}。`,
+      })) as Record<string, unknown> | null;
+      if (j) {
+        const p1 = (j.probabilities ?? j.p ?? j.scores ?? j) as Record<string, unknown>;
+        const flat: Record<string, number> = {};
+        for (const k of Object.keys(draftMap)) {
+          const v = (p1 as Record<string, unknown>)[k];
+          if (typeof v === 'number') flat[k] = v;
+          else if (v && typeof v === 'object') flat[k] = Number((v as Record<string, unknown>).p ?? (v as Record<string, unknown>).probability ?? NaN);
+        }
+        if (Object.keys(flat).length === candidates.length) ranked = applyProbs(flat);
+        // 模型可能只给了排序：{"order":["c2","c1","c3"]} → 按名次折算成递减分值
+        if (!ranked && Array.isArray(j.order)) {
+          const order = (j.order as unknown[]).map(String);
+          const byRank: Record<string, number> = {};
+          order.forEach((k, i) => { byRank[k] = Math.max(0.05, 0.75 - i * 0.25); });
+          for (const k of Object.keys(draftMap)) if (byRank[k] === undefined) byRank[k] = 0.05;
+          ranked = applyProbs(byRank);
+        }
       }
-    } catch (e) { note.push(`排序失败:${(e as Error).message.slice(0, 60)}`); }
+    } catch (e) { note.push(`聊天排序不通(${(e as Error).message.slice(0, 50)})，改问决策模型`); }
+    if (!ranked) {
+      const t0 = Date.now();
+      try {
+        const keys = Object.keys(draftMap);
+        const q = { bestDraft: { type: 'choice', instructions: 'Which draft should the user send back to the AI now? Prefer the one that moves the work forward with least risk and least rework.', criteria: { ...draftMap, other: 'none of these drafts is good' } } };
+        const ans = await askSystemOne(
+          JSON.stringify({ conversation: convo.slice(-2500), drafts: draftMap }),
+          cfg.decision, 6000, q,
+          'state 里是一段与 AI 助手的对话 conversation，和三条备选回复 drafts。判断用户此刻最该发出去的是哪一条。只回选项，别编造上下文。',
+        );
+        const raw = String(ans?.bestDraft?.choice ?? '').trim();
+        const li = /^L(\d+)$/i.exec(raw);
+        const chosen = li ? (keys[Number(li[1]) - 1] ?? raw) : (keys.indexOf(raw) >= 0 ? raw : keys.filter((k) => k.toLowerCase() === raw.toLowerCase())[0] ?? raw);
+        const idx = keys.indexOf(chosen);
+        if (idx >= 0) {
+          const byRank: Record<string, number> = {};
+          Object.keys(draftMap).forEach((k, i) => { byRank[k] = i === idx ? 0.8 : Number((0.2 / Math.max(1, candidates.length - 1)).toFixed(3)); });
+          ranked = applyProbs(byRank);
+          note.push(`排序=决策模型 ${Date.now() - t0}ms`);
+        } else { note.push('决策模型没选出最优'); }
+      } catch (e) { note.push(`决策排序也不通(${(e as Error).message.slice(0, 50)})`); }
+    }
+    if (!ranked) note.push('本次未排序（按起草顺序给）');
   }
   note.push(`历史${turns.length}条/${ctxChars}字`);
   return {
-    judge, candidates: out,
+    judge, ranked,
+    candidates: out,
     context: { rows: turns.length, chars: ctxChars, openmem: !!extra, note: note.join(' ｜ ') },
-    degraded: { judge: judgeDegraded, draft: candidates.length === 0, rank: rankDegraded },
+    degraded: { judge: judgeDegraded, draft: candidates.length === 0, rank: !ranked },
   };
 }

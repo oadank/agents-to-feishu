@@ -469,7 +469,8 @@ async function handleIncoming(
   // （否则 /new 等边命令可能"被吞"）。普通消息仍正常去重。先 trim 防前导空格/不可见字符。
   // [2026-09-21] ⚡ 优化触发（/p 等）虽以 / 开头但不是命令、不幂等（重复=双份优化+双份喂稿+
   // 插队卡幽灵），不得豁免去重——老大实测"优化后弹插队卡"即 SDK 重复投递的第二份绕过判重所致。
-  const isCommand = text.trim().startsWith('/') && !engine.isOptimizeTrigger(text);
+  // [2026-09-25 老大实测「触发 2 次」] /de 同样不幂等（重复=多张卡+多份 token），不得豁免去重。
+  const isCommand = text.trim().startsWith('/') && !engine.isOptimizeTrigger(text) && !engine.isDeCommand(text);
   if (fullId && processedMessageIds.has(fullId) && !isCommand) {
     rtLog(`[handleIncoming] SKIP duplicate mid=${fullId.slice(0, 24)}`);
     return;
@@ -648,13 +649,16 @@ async function handleIncoming(
 
   // 命令？isCommand 已在去重段算出（已 trim 并判 / 开头）。鉴权已前移到去重之后。
   // [2026-09-21] ⚡ 优化触发前缀（/p 等）不是命令：放行到普通消息链，由 engine.handleText 精炼处理
+  // /de 统一前置处理（写死的 '/de' 与配置中心自定义触发词都认）。
+  // 🔴 不许把它塞进 isCommand 链：为了让它参与去重（SDK 会把同一条消息重复投递，见 L473），
+  // isCommand 已刻意排除 /de；若仍按老写法在 isCommand 分支里判 /de，就永远不会命中，
+  // 结果是把 "/de …" 当普通消息喂给对面 AI —— 2026-09-25 我自己引入的回归，日志实证过。
+  if (engine.isDeCommand(text)) {
+    console.log(`[agents-to-feishu] 执行 /de chat=${chatId.slice(0, 20)} mid=${fullId.slice(0, 24)}`);
+    await engine.runDeCommand(chatId);
+    return;
+  }
   if (isCommand && !engine.isOptimizeTrigger(text)) {
-    // [2026-09-25] /de 的触发词可在配置中心改（命令表里只有写死的 '/de'）：自定义词在这儿认。
-    const head = text.trim().split(/\s+/)[0] ?? '';
-    if (engine.isDeCommand(text) && !/^\/de$/i.test(head)) {
-      await engine.runDeCommand(chatId);
-      return;
-    }
     await handleCommand(text, chatId, engine, sessions);
     return;
   }

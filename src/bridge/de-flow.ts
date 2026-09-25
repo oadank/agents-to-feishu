@@ -32,32 +32,45 @@ function gcPending() {
 }
 
 /** 卡片结构（飞书卡片 1.0：header + markdown 段 + 三个 action 按钮，点选即回传 value.callback） */
+/** 判断结果转中文小标签（卡片上给人看的，别露英文键） */
+const DE_ZH: Record<string, string> = {
+  assign: '派活', verify: '要证据', decide: '二选一', narrow: '收窄', stop: '叫停', question: '在追问', accept: '收尾', other: '其他',
+  none: '无', low: '低', mid: '中', high: '高', light: '轻', medium: '中', large: '大',
+};
+const zh = (k: unknown): string => DE_ZH[String(k ?? '')] ?? String(k ?? '?');
+
+/**
+ * 卡片（飞书卡 1.0）。[2026-09-25 老大实测三条]
+ *  · 按钮回传值**必须直接挂 value**，包一层 action 会被飞书丢掉 → 死按钮（这就是"点任何按钮没反应"的根因）
+ *  · 模型来源那行是废话，不再上卡（要排查去翻 bot 日志，那里 note 全都有）
+ *  · 没排序成功就干脆不显示百分比，不摆一排假的「拟用 0%」
+ */
 export function buildDeCard(uid: string, chatId: string, res: DeResult): unknown {
   const j = res.judge as Record<string, unknown>;
   const large = String(j.scope ?? '') === 'large';
-  // 老大 09-25 定的两条硬规则一并显示出来：改动大时必须给可比方案、每条要带拟用量（不截断全文）
-  const head = `局面：${String(j.intent ?? '?')}｜风险 ${String(j.risk ?? '?')}｜量级 ${String(j.scope ?? '?')}` + (large ? '｜改动大，已给两个可比方案' : '');
-  const notes = res.context?.note ? `\n（${res.context.note}）` : '';
-  const degraded = res.degraded.judge || res.degraded.rank ? '\n⚠ 这次判断/排序没走通，按降级出稿，自己看一眼再发' : '';
+  const head = `局面：${zh(j.intent)}｜风险 ${zh(j.risk)}｜改动量级 ${zh(j.scope)}` + (large ? '（已给两个可比方案）' : '');
+  const warn = res.degraded.judge
+    ? '\n⚠ 这次判断没走通，属降级稿，发前自己看一眼'
+    : (!res.ranked && res.candidates.length >= 2 ? '\n⚠ 这次没排出优劣，按起草顺序给' : '');
   const items = res.candidates.map((c, i) => ({
     tag: 'button',
-    text: { tag: 'plain_text', content: '发第 ' + (i + 1) + ' 条' + (c.role ? '（' + c.role + '）' : '') },
+    text: { tag: 'plain_text', content: c.role ? `${c.role}（第 ${i + 1} 条）` : `发第 ${i + 1} 条` },
     type: i === 0 ? 'primary' : 'default',
-    action: { tag: 'callback', value: { callback: `de:${chatId}:${uid}:${i}` } },
+    value: { callback: `de:${chatId}:${uid}:${i}` },
   }));
   return {
     config: { wide_screen_mode: true },
     header: { title: { tag: 'plain_text', content: `/de 回复预选 · 三选一` }, template: 'blue' },
     elements: [
-      { tag: 'div', text: { tag: 'lark_md', content: `**${head}**${notes}${degraded}` } },
+      { tag: 'div', text: { tag: 'lark_md', content: `**${head}**${warn}` } },
       { tag: 'hr' },
       ...res.candidates.map((c, i) => ({
         tag: 'div',
-        text: { tag: 'lark_md', content: '**' + (i + 1) + '. ' + (c.role ? '[' + c.role + '] ' : '') + (typeof c.p === 'number' ? '拟用 ' + Math.round(c.p * 100) + '%　' : '') + c.text + '**' },
+        text: { tag: 'lark_md', content: '**' + (i + 1) + '. ' + (c.role ? '[' + c.role + '] ' : '') + (res.ranked && typeof c.p === 'number' ? '拟用 ' + Math.round(c.p * 100) + '%　' : '') + c.text + '**' },
       })),
       { tag: 'hr' },
       { tag: 'action', actions: items },
-      { tag: 'note', elements: [{ tag: 'plain_text', content: '点一条即以其身份原文发出，不加水印；同一张卡每条只能发一次' }] },
+      { tag: 'note', elements: [{ tag: 'plain_text', content: '点一条就以你的身份原文发出，不加水印；每条只能发一次' }] },
     ],
   };
 }
@@ -74,7 +87,49 @@ async function sendAsUserToChat(chatId: string, text: string): Promise<void> {
   if (!j?.data?.message_id) throw new Error('以用户身份发送无回执 message_id');
 }
 
-/** 读本会话最近 N 条文本消息（bot 身份即可读自己所在的会话）。app 发的算助手，其余算用户。 */
+/**
+ * 把一条消息正文抽成纯文本。
+ * 🔴 [2026-09-25 老大：「三条内容方向不对，不像针对对面 AI 那句该回的话」根因]
+ * 对面 AI 在飞书里的回答是 **interactive 卡片**（流式卡片），不是 text 消息；旧代码只收 text，
+ * 结果整个上下文里一句 AI 的话都没有，起草只能照着"你说的话"瞎指挥干活。
+ * 现在：text / interactive / post 都抽。（merge_forward 等仍跳过）
+ */
+function extractMsgText(msgType: string, raw: string): string {
+  let obj: unknown;
+  try { obj = JSON.parse(raw ?? '{}'); } catch { return ''; }
+  if (msgType === 'text') {
+    return String((obj as { text?: unknown }).text ?? '').trim();
+  }
+  if (msgType === 'post') {
+    const p = obj as { title?: string; content?: Array<Array<{ tag?: string; text?: string }>> };
+    const lines = (p.content ?? []).map((row) => (row ?? []).map((c) => String(c.text ?? '')).join(''));
+    return [p.title ?? '', ...lines].filter(Boolean).join('\n').trim();
+  }
+  if (msgType === 'interactive') {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    (function walk(n: unknown): void {
+      if (!n || typeof n !== 'object') return;
+      if (Array.isArray(n)) { n.forEach(walk); return; }
+      const o = n as Record<string, unknown>;
+      for (const key of ['content', 'text']) {
+        const v = o[key];
+        if (typeof v === 'string') {
+          const s = v.trim();
+          // 卡片里的按钮文字与提示语不是"对话内容"，别污染上下文
+          if (s && s.length > 1 && !seen.has(s) && !/^(发第|点一条|同一张卡|⚠|局面：|\/de 回复预选)/.test(s) && !/^https?:/.test(s)) {
+            seen.add(s); out.push(s);
+          }
+        }
+      }
+      Object.values(o).forEach(walk);
+    })(obj);
+    return out.join('\n').trim();
+  }
+  return '';
+}
+
+/** 读本会话最近 N 条消息（含 AI 的卡片回答）。app 发的算助手，其余算用户。 */
 export async function fetchHistory(client: DeFeishuClient & { getAppId?: () => Promise<string> }, chatId: string, count: number): Promise<DeHistoryTurn[]> {
   const tk = await client.getTenantToken();
   const url = `https://open.feishu.cn/open-apis/im/v1/messages?container_id_type=chat&container_id=${encodeURIComponent(chatId)}&sort_type=ByCreateTimeDesc&page_size=${Math.min(50, Math.max(1, count))}`;
@@ -84,10 +139,7 @@ export async function fetchHistory(client: DeFeishuClient & { getAppId?: () => P
   const items = j.data?.items ?? [];
   const turns: DeHistoryTurn[] = [];
   for (const it of items) {
-    if ((it.msg_type ?? '') !== 'text') continue;
-    let text = '';
-    try { text = String(JSON.parse(it.body?.content ?? '{}').text ?? ''); } catch { text = ''; }
-    text = text.trim();
+    const text = extractMsgText(String(it.msg_type ?? ''), String(it.body?.content ?? ''));
     if (text === '') continue;
     turns.push({ role: it.sender?.sender_type === 'app' ? 'assistant' : 'user', text });
   }
