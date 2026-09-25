@@ -148,6 +148,7 @@ const DE_DRAFT_BASE = [
   '- 🔴 每条末尾带一句"怎么算做完了"（验收）：要它拿什么回来给你看（哪条日志、哪个页面、哪个数字），一句话就够，不许写成两段；',
   '- 高风险动作必须在句子里写明"先备份/先确认再动"；',
   '- 严禁替助手回答问题或代它写代码；严禁承诺花钱、签约、对外发东西；',
+  '- 🔴 上面这些只是给你的要求，一个字都不许出现在候选里。候选里出现"角色/验收/语气/接住/三条/量级/风险/情绪"这类词，就算废稿；',
   '- 只输出 JSON 字符串数组，恰好 3 条，不要代码围栏，不要别的字。',
 ].join('\n');
 
@@ -358,19 +359,13 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
 
   const large = judge.scope === 'large';
   const riskHigh = judge.risk === 'high';
-  // 🔴 与网页侧同一道代码闸门（老大硬要求"每条带验收"，光写在提示词里不算落实）：
-  // 模型漏写就补一句，且补的句子自己必须能被同一条正则认出，否则补了等于没补（09-25 自查抓出的乌龙）。
-  {
-    const hasCheck = /算完|算数|给我看|贴出来|贴过来|贴给我|发我|发过来|列出来|证明|核对|截图|日志原文/
-    for (let i = 0; i < candidates.length; i++) {
-      if (!hasCheck.test(candidates[i])) candidates[i] = candidates[i].replace(/[。！.]+$/, '') + '。做完把证据贴出来给我看。'
-    }
-  }
   const roles = rolesForJudge(judge);
   // 🔴 与网页侧同一招（09-25 老大「这三条我一样看不懂」）：候选老照着助手的腔写（提交号、diff、
   // 黑话一堆），把他自己的原话当语气样本喂进去才像他说的话。
   const voice = convo.split('\n').filter((l) => l.startsWith('我:')).slice(-3).map((l) => l.slice(0, 160));
-  const sys = `${DE_DRAFT_BASE}\n${DE_DRAFT_SYSTEM_HUMAN}\n${judgeToText(judge)}\n三条角色依次是：${roles.join(' / ')}。${riskHigh ? '其中必须有一条明确劝停或要求先备份确认。' : ''}每条都要在句尾附一句怎么算做完了（拿什么证据回来给我看）。\n【他本人就这么说话，照这个语气写，别学助手的腔】\n${voice.length ? voice.join('\n') : '（这次没抽到他之前的话）'}`;
+  // 🔴 判断小抄**不再放进系统提示词**（09-25 实测模型把「用户情绪不耐烦，风险无，改动量级轻」整句抄上卡片）：
+  // 挪到用户那一轮、并明确包成"只给你看、不许抄"，减少背题面。
+  const sys = `${DE_DRAFT_BASE}\n${DE_DRAFT_SYSTEM_HUMAN}\n三条角色依次是：${roles.join(' / ')}。${riskHigh ? '其中必须有一条明确劝停或要求先备份确认。' : ''}每条都要在句尾附一句怎么算做完了（拿什么证据回来给我看）。\n【他本人就这么说话，照这个语气写，别学助手的腔】\n${voice.length ? voice.join('\n') : '（这次没抽到他之前的话）'}`;
 
   let candidates: string[] = [];
   let draftErr = '';
@@ -378,7 +373,7 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
     try {
       const raw = await chatOnce({
         llm: draftLlm, system: sys,
-        user: att === 0 ? convo : `${convo}\n\n（上一次没给出可用候选。${att >= 2 ? '不要 JSON、不要围栏，直接输出 3 行，每行一条。' : '只输出 JSON 字符串数组，恰好 3 条。'}）`,
+        user: `${convo}\n\n【背景（只给你判断用，一个字都不许抄进候选）】\n${judgeToText(judge)}${att === 0 ? '' : `\n\n（上一次没给出可用候选。${att >= 2 ? '不要 JSON、不要围栏，直接输出 3 行，每行一条。' : '只输出 JSON 字符串数组，恰好 3 条。'}）`}`,
       });
       let arr = pickJson(raw);
       if (!Array.isArray(arr)) arr = String(raw).split(/\r?\n/).map((s) => s.trim()).filter((s) => s.length > 1);
@@ -387,7 +382,10 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
         const t = s.replace(/^["'「『\s]+|["'」』\s]+$/g, '').replace(/^[-*·]\s*/, '').replace(/^\d+\s*[.、)）:：]\s*/, '').trim();
         // 🔴 光靠提示词拦不住"自述"（09-25 实测模型写出「用户要三条：…」「所以三条要针对这句：…」当候选），
         // 代码里再兜一道：这种句子直接判废，不够 3 条就走已有的重试循环重写，绝不发上卡片。
-        if (/用户要三条|三条要?针对|所以三条|第一条是|角色[:：]|拟用\s*\d|^\s*>|💭|让我(们)?(先|再|仔细)?看|我需要|用户在和|助手刚说|替他写|作为\s*AI|^\s*(推进|收窄|叫停|认账收尾|挑一点让它证明|直接答|先要证据再答|方案[AB])\s*[:：]/.test(t)) continue;
+        // 🔴 老大 09-25 抓的铁证：「用户情绪不耐烦，风险无，改动量级轻」——这是模型把**判断小抄**
+        // 当回复抄上卡片（小抄内部管他叫"用户"）。他永远不会用"用户"称呼自己 ⇒ 第三者视角 = 直接判废，
+        // 不靠模型自觉。连同"角色/验收/量级/情绪/接住/三条"这些元词一起拦。
+        if (/用户|对方|角色|验收|量级|情绪|接住|语气样本|三条|照这个语气|每条|^\s*>|💭|让我(们)?(先|再|仔细)?看|我需要|助手刚说|替他写|作为\s*AI|风险\s*(无|低|中|高)|^\s*(推进|收窄|叫停|认账收尾|挑一点让它证明|直接答|先要证据再答|方案[AB])\s*[:：]/.test(t)) continue;
         // 🔴 实测卡片上出现过 `["…","…"]` 残渣：模型把两条塞进一个 JSON 数组字符串里，旧代码整坨当一条。
         // 先摊平成多条，再逐条走上面的判废与去重。
         const pieces = (t.startsWith('[') || t.includes('","') ? t.replace(/^\[|\]$/g, '').split('","') : [t])
@@ -400,6 +398,16 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
     } catch (e) { draftErr = (e as Error).message.slice(0, 160); break; }
   }
   candidates = candidates.slice(0, 3);
+  // 🔴 与网页侧同一道代码闸门（老大硬要求"每条带验收"，光写在提示词里不算落实）：
+  // 模型漏写就补一句；补的句子自己必须能被同一条正则认出，否则补了等于没补（09-25 自查抓出的乌龙）。
+  // 位置必须在候选生成之后 —— 上一版插在 candidates 声明之前，TS 直接 TDZ 报错、/de 会崩（fe73faf 那次）。
+  {
+    const hasCheck = /算完|算数|给我看|贴出来|贴过来|贴给我|发我|发过来|列出来|证明|核对|截图|日志原文/
+    for (let i = 0; i < candidates.length; i++) {
+      // 只给"像句人话"的候选补验收（≥10 字）；短成一坨的碎句别糊上统一尾巴装成真货（09-25 实测三条垃圾被补成三条验收句，更像真的）
+      if (candidates[i].length >= 10 && !hasCheck.test(candidates[i])) candidates[i] = candidates[i].replace(/[。！.]+$/, '') + '。做完把证据贴出来给我看。'
+    }
+  }
 
   const out: DeResult['candidates'] = candidates.map((text, i) => ({ text, p: 0, role: roles[i] ?? '' }));
   // [2026-09-25 老大实测「满屏拟用 0%」] 原来只认 {probabilities:{c1:…}} 一种形状，形状不对就静默算失败，
