@@ -34,7 +34,9 @@ function gcPending() {
 /** 卡片结构（飞书卡片 1.0：header + markdown 段 + 三个 action 按钮，点选即回传 value.callback） */
 export function buildDeCard(uid: string, chatId: string, res: DeResult): unknown {
   const j = res.judge as Record<string, unknown>;
-  const head = `局面：${String(j.intent ?? '?')}｜风险 ${String(j.risk ?? '?')}｜量级 ${String(j.scope ?? '?')}`;
+  const large = String(j.scope ?? '') === 'large';
+  // 老大 09-25 定的两条硬规则一并显示出来：改动大时必须给可比方案、每条要带拟用量（不截断全文）
+  const head = `局面：${String(j.intent ?? '?')}｜风险 ${String(j.risk ?? '?')}｜量级 ${String(j.scope ?? '?')}` + (large ? '｜改动大，已给两个可比方案' : '');
   const notes = res.context?.note ? `\n（${res.context.note}）` : '';
   const degraded = res.degraded.judge || res.degraded.rank ? '\n⚠ 这次判断/排序没走通，按降级出稿，自己看一眼再发' : '';
   const items = res.candidates.map((c, i) => ({
@@ -49,7 +51,10 @@ export function buildDeCard(uid: string, chatId: string, res: DeResult): unknown
     elements: [
       { tag: 'div', text: { tag: 'lark_md', content: `**${head}**${notes}${degraded}` } },
       { tag: 'hr' },
-      ...res.candidates.map((c, i) => ({ tag: 'div', text: { tag: 'lark_md', content: '**' + (i + 1) + '. ' + (c.role ? '[' + c.role + '] ' : '') + c.text + '**' } })),
+      ...res.candidates.map((c, i) => ({
+        tag: 'div',
+        text: { tag: 'lark_md', content: '**' + (i + 1) + '. ' + (c.role ? '[' + c.role + '] ' : '') + (typeof c.p === 'number' ? '拟用 ' + Math.round(c.p * 100) + '%　' : '') + c.text + '**' },
+      })),
       { tag: 'hr' },
       { tag: 'action', actions: items },
       { tag: 'note', elements: [{ tag: 'plain_text', content: '点一条即以其身份原文发出，不加水印；同一张卡每条只能发一次' }] },
