@@ -7,6 +7,8 @@
  */
 import { readStore, type DeConfig, type DecisionConfig, type LlmConfig, type PromptOptimizeConfig } from '../config-center/store.js';
 import { readCredentialKey } from '../config-center/render.js';
+// 三条候选的「分歧轴」词表（真源在 dsh-input-tools 插件，改词表先改那边再同步）
+import { pickAxes, hasNumberedOptions } from './de-axes.js';
 
 // ───────────────────────── OpenAI 兼容底座 ─────────────────────────
 
@@ -163,28 +165,15 @@ export interface DeResult {
   degraded: { judge: boolean; draft: boolean; rank: boolean };
 }
 
-const AI_ROLES = ['推进', '收窄', '叫停'];
-const AI_ROLES_LARGE = ['方案A', '方案B', '叫停'];
 /**
- * [2026-09-25 老大定方案一] 三条不再固定"推进/收窄/叫停"（他实测"方向太死，都不好用"），
- * 改成按**当前场合**现场派角色；判不准才退回老三条。大改动仍强制给两个可比方案（他早前定的硬规则），
- * 场合只决定这两条各自往哪个方向写。
+ * [2026-09-26 老大选 C] 三条候选不再固定"推进/收窄/叫停"（那三个是**态度**不是**分歧点**，
+ * 实测三条容易写成同一态度换三种语气，且装不下"换人做 / 换工具 / 先回答我 / 等条件"这些真实分歧）。
+ * 改成从 8 条「分歧轴」里按八维判断挑 3 条**不同轴**；对面给了编号选项则「表态」必须排第一
+ * （他的回法铁律：你给 A/B/C，回话就得是 A/B/C 之一或"都不选 + 我的要求"，不许另起一套）。
+ * 词表与判定在 ./de-axes.ts —— 真源是 dsh-input-tools 插件那一份（带 24 项单测），别在这边单独加词。
  */
-export function rolesForJudge(j: Record<string, unknown>): string[] {
-  const intent = String(j?.intent ?? '');
-  const mood = String(j?.mood ?? '');
-  const large = String(j?.scope ?? '') === 'large';
-  const third = large ? '叫停' : AI_ROLES[2];
-  let pair: [string, string] | null = null;
-  if (intent === 'question' || intent === 'ask_info') pair = ['直接答', '先要证据再答'];
-  else if (intent === 'decide') pair = ['就按它说的干', '换个更稳的做法'];
-  else if (intent === 'accept') pair = ['认账收尾', '挑一点让它证明'];
-  else if (intent === 'verify' || mood === 'doubtful' || mood === 'annoyed') pair = ['顶回去要理由', '先退回安全点'];
-  else if (intent === 'assign') pair = ['派下一步', '只做一半先验证'];
-  else if (intent === 'narrow' || intent === 'stop') pair = ['砍范围', '干脆停手'];
-  if (!pair) return large ? AI_ROLES_LARGE : AI_ROLES;
-  if (large) return [pair[0] + '（方案A）', pair[1] + '（方案B）', third];
-  return [pair[0], pair[1], third];
+export function rolesForJudge(j: Record<string, unknown>, convoForOptions?: string): string[] {
+  return pickAxes(j, { hasOptions: hasNumberedOptions(convoForOptions || '') });
 }
 
 /** 会话拼文本（最近的必须在最后：模型对尾部最敏感，历史上保头砍尾出过大事故） */
@@ -359,7 +348,7 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
 
   const large = judge.scope === 'large';
   const riskHigh = judge.risk === 'high';
-  const roles = rolesForJudge(judge);
+  const roles = rolesForJudge(judge, convo);
   // 🔴 与网页侧同一招（09-25 老大「这三条我一样看不懂」）：候选老照着助手的腔写（提交号、diff、
   // 黑话一堆），把他自己的原话当语气样本喂进去才像他说的话。
   const voice = convo.split('\n').filter((l) => l.startsWith('我:')).slice(-3).map((l) => l.slice(0, 160));
@@ -414,11 +403,13 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
   }
 
   const out: DeResult['candidates'] = candidates.map((text, i) => ({ text, p: 0, role: roles[i] ?? '' }));
-  // [2026-09-25 老大实测「满屏拟用 0%」] 原来只认 {probabilities:{c1:…}} 一种形状，形状不对就静默算失败，
-  // 既不报错也不标降级 → 卡片上三条 0% 是假数据。现在：① 宽容解析聊天模型的各种形状；
-  // ② 还不行就交给决策模型选最优（dsh 侧同一招）；③ 全失败就 ranked=false，卡片干脆不显示百分比。
+  // [2026-09-26 老大选 C] 不再排序、不再算「拟用 %」。原来这段先问聊天模型要概率、不通再问决策模型
+  // 选最优，两边都只喂候选前 120 字、八维判断一个字没喂 —— 那个分布没有预测力，还把硬凑的数
+  // 伪装成数据（09-25 他就抓到过"满屏拟用 0%"的假数据）。三条并列按起草顺序给，ranked 恒为 false，
+  // 卡片干脆不显示百分比。下面那套排序代码整块停用，不删是为了方便你回看当初怎么错的。
   let ranked = false;
-  if (candidates.length >= 2) {
+  const RANKING_DISABLED = true;
+  if (!RANKING_DISABLED && candidates.length >= 2) {
     const draftMap: Record<string, string> = {};
     candidates.forEach((t, i) => { draftMap[`c${i + 1}`] = t; });
     const applyProbs = (probs: Record<string, number>): boolean => {
