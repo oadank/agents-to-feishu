@@ -372,7 +372,14 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
         // 🔴 光靠提示词拦不住"自述"（09-25 实测模型写出「用户要三条：…」「所以三条要针对这句：…」当候选），
         // 代码里再兜一道：这种句子直接判废，不够 3 条就走已有的重试循环重写，绝不发上卡片。
         if (/用户要三条|三条要?针对|所以三条|第一条是|角色[:：]|拟用\s*\d|^\s*(推进|收窄|叫停|认账收尾|挑一点让它证明|直接答|先要证据再答|方案[AB])\s*[:：]/.test(t)) continue;
-        if (t.length >= 1 && !candidates.includes(t)) candidates.push(t);
+        // 🔴 实测卡片上出现过 `["…","…"]` 残渣：模型把两条塞进一个 JSON 数组字符串里，旧代码整坨当一条。
+        // 先摊平成多条，再逐条走上面的判废与去重。
+        const pieces = (t.startsWith('[') || t.includes('","') ? t.replace(/^\[|\]$/g, '').split('","') : [t])
+          .map((x) => x.replace(/^["'「『\s,]+|["'」』\s,]+$/g, '').trim()).filter((x) => x !== '');
+        for (const piece of pieces) {
+          if (piece.length < 1 || candidates.includes(piece)) continue;
+          candidates.push(piece);
+        }
       }
     } catch (e) { draftErr = (e as Error).message.slice(0, 160); break; }
   }
