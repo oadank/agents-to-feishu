@@ -44,6 +44,18 @@ function resolveMiMoCommand(): { command: string; args: string[]; cwd: string } 
   return { command, args: ['acp', '--hostname', '127.0.0.1', '--cwd', configCwd], cwd: configCwd };
 }
 
+/**
+ * [2026-09-25 老大令·失忆根治] 引擎会话 id 落盘（对齐 workbuddy sessions-wb-acp.json 先例）：
+ * 桥侧重启/引擎换代后先用 session/load 赎回旧会话（实测 mimocode 跨进程 resume 记忆完好），
+ * 不再一醒就 session/new 开空白会话失忆。
+ */
+function acpMapFile(): string {
+  return path.join(
+    process.env.CTI_USER_HOME || os.homedir(),
+    '.agents-to-feishu', 'runtime', 'sessions-mimo-acp.json',
+  );
+}
+
 /** 补齐 Windows 必需系统变量（NSSM 环境残缺） */
 function buildSpawnEnv(): NodeJS.ProcessEnv {
   const clean: NodeJS.ProcessEnv = {};
@@ -87,6 +99,9 @@ export class MiMoProvider implements RuntimeProvider {
   private currentStreamEnd: Promise<void> | null = null;
   private interruptedSessionIds = new Set<string>();
   private sessions = new Map<string, AcpSession>();
+  // [09-25] sessionKey → 引擎 sessionId 落盘账本（赎回通道，见 acpMapFile 注释）
+  private diskSids: Record<string, string> = {};
+  private diskLoaded = false;
   private spawnPromise: Promise<ChildProcess> | null = null;
 
   private static IDLE_TIMEOUT_MS = parseInt(process.env.CTI_MIMO_IDLE_TIMEOUT_MS || '0', 10); // 🔴 09-20 老大令：默认永不回收（不主动/new 不许断），env CTI_MIMO_IDLE_TIMEOUT_MS 可覆盖
@@ -114,7 +129,11 @@ export class MiMoProvider implements RuntimeProvider {
   }
 
   async resetSession(sessionKey?: string): Promise<void> {
-    if (sessionKey) { this.sessions.delete(sessionKey); rtLog(`[mimo] resetSession key=${sessionKey.slice(0, 8)}`); }
+    if (sessionKey) {
+      this.sessions.delete(sessionKey);
+      this.diskDelete(sessionKey); // [09-25] 用户 /new 同步销掉落盘赎回记录，重启后不被"复活"（09-20 裁决：绝不复活）
+      rtLog(`[mimo] resetSession key=${sessionKey.slice(0, 8)}`);
+    }
   }
 
   async interrupt(): Promise<void> {
@@ -361,6 +380,44 @@ export class MiMoProvider implements RuntimeProvider {
     return { sessionId, cwd, lastUsed: Date.now(), personaInjected: false };
   }
 
+  /**
+   * [2026-09-25 老大令·失忆根治] 赎回通道：对引擎发 session/load 复活旧会话。
+   * 实测（09-25 探针）：mimocode 引擎 loadSession=true，杀进程后全新进程 load 旧 sid 记忆完好；
+   * load 期间引擎回放的 session/update 广播此时 activePrompt 未挂，自然丢弃，不污染本轮。
+   */
+  private async resumeSession(sessionId: string, cwd: string): Promise<AcpSession> {
+    const child = await this.ensureProcess();
+    const loadId = this.nextId++;
+    if (!this.writeStdin(child, {
+      jsonrpc: '2.0', id: loadId, method: 'session/load',
+      params: { sessionId, cwd, mcpServers: readSessionMcpServers('mimo', 'stdioOnly') },
+    }, 'session/load')) throw new Error('session/load 写入失败（引擎管道已断）');
+    const msg = await this.waitResponse(loadId, 60_000);
+    if (!msg.result) throw new Error(msg.error?.message || 'MiMo ACP session/load 被引擎拒绝');
+    return { sessionId: (msg.result.sessionId as string) || sessionId, cwd, lastUsed: Date.now(), personaInjected: true };
+  }
+
+  // ── [09-25] 引擎 sid 落盘账本（懒加载，写失败只留痕不阻塞消息） ──
+  private loadDisk(): void {
+    if (this.diskLoaded) return;
+    this.diskLoaded = true;
+    try {
+      const raw = JSON.parse(fs.readFileSync(acpMapFile(), 'utf8')) as unknown;
+      if (raw && typeof raw === 'object') this.diskSids = raw as Record<string, string>;
+      rtLog(`[mimo] acp sid map loaded from disk (${Object.keys(this.diskSids).length})`);
+    } catch { this.diskSids = {}; }
+  }
+  private saveDisk(): void {
+    try {
+      const f = acpMapFile();
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, JSON.stringify(this.diskSids), 'utf8');
+    } catch (e) { rtLog(`[mimo] acp sid map persist failed: ${e instanceof Error ? e.message : String(e)}`); }
+  }
+  private diskSid(k: string): string | undefined { this.loadDisk(); return this.diskSids[k]; }
+  private diskSet(k: string, sid: string): void { this.loadDisk(); this.diskSids[k] = sid; this.saveDisk(); }
+  private diskDelete(k: string): void { this.loadDisk(); if (this.diskSids[k]) { delete this.diskSids[k]; this.saveDisk(); } }
+
   private pruneOldSessions(): void {
     try {
       const root = path.join(os.homedir(), '.mimocode', 'sessions');
@@ -373,33 +430,59 @@ export class MiMoProvider implements RuntimeProvider {
   async *streamChat(params: StreamChatParams): AsyncGenerator<StreamEvent> {
     const { sessionKey } = params;
     let session = this.sessions.get(sessionKey);
+    const cwd = process.env.CTI_DEFAULT_WORKDIR || process.cwd();
 
     if (this.sessions.size >= MiMoProvider.MAX_SESSIONS && !this.sessions.has(sessionKey)) {
       let oldestKey: string | null = null, oldestAt = Infinity;
       for (const [k, s] of this.sessions) { if (s.lastUsed < oldestAt) { oldestAt = s.lastUsed; oldestKey = k; } }
-      if (oldestKey) { this.sessions.delete(oldestKey); rtLog(`[mimo] LRU evict ${oldestKey.slice(0, 8)}`); }
+      if (oldestKey) { this.sessions.delete(oldestKey); this.diskDelete(oldestKey); rtLog(`[mimo] LRU evict ${oldestKey.slice(0, 8)}`); }
     }
 
-    const sessionInterrupted = session ? this.interruptedSessionIds.has(session.sessionId) : false;
-    // [2026-09-17] 跨消息失忆修复（对齐 reasonix）：history 此前仅 sessionInterrupted 注入，
-    // 而 session 可能因空闲回收/进程重启/LRU 被清——这些路径新建会话却不带历史 ⇒ 失忆。
-    // 现统一为「本轮新建了会话 && bridge 有历史」就注入。/new 时 context 已清空天然空白。
-    const isNewSession = !session || params.freshSession || sessionInterrupted;
-    if (!session || params.freshSession || sessionInterrupted) {
-      if (session && sessionInterrupted) {
-        this.interruptedSessionIds.delete(session.sessionId);
-        this.sessions.delete(sessionKey);
-        rtLog(`[mimo] interrupted, opening new session`);
+    // [2026-09-25 老大令·失忆根治①] 打断≠换会话：实测 mimocode session/cancel 后同一会话
+    // 照常可用且记忆完好（09-25 探针），旧家法"打断必弃会话重开"正是本次失忆三连的直接元凶，废除。
+    if (session && this.interruptedSessionIds.has(session.sessionId)) {
+      this.interruptedSessionIds.delete(session.sessionId);
+      rtLog(`[mimo] post-cancel: reusing session ${session.sessionId.slice(0, 8)}`);
+    }
+
+    // [2026-09-25 老大令·失忆根治②] 桥侧重启/引擎换代：优先 session/load 赎回旧会话（记忆引擎自持，
+    // 无损续聊）。唯一例外 freshReason='user-new'——用户显式 /new 及等效自动 /new 绝不复活（09-20 裁决）。
+    let resumeTried = false;
+    if (!session && params.freshReason !== 'user-new') {
+      const oldSid = this.diskSid(sessionKey);
+      if (oldSid) {
+        resumeTried = true;
+        try {
+          session = await this.resumeSession(oldSid, cwd);
+          this.sessions.set(sessionKey, session);
+          this.startCleanupTimer();
+          rtLog(`[mimo] ✅ resumed ${oldSid.slice(0, 8)} via session/load（引擎侧记忆延续）`);
+        } catch (e) {
+          rtLog(`[mimo] resume ${oldSid.slice(0, 8)} failed: ${e instanceof Error ? e.message : String(e)} → 退化为新建`);
+        }
       }
+    }
+
+    let isNewSession = false;
+    const mustNew = !session || (params.freshSession === true && params.freshReason !== 'restore');
+    if (mustNew) {
+      if (session) this.sessions.delete(sessionKey); // 用户 /new：覆盖任何残留
       try {
-        session = await this.createSession(process.env.CTI_DEFAULT_WORKDIR || process.cwd());
+        session = await this.createSession(cwd);
         this.sessions.set(sessionKey, session);
+        this.diskSet(sessionKey, session.sessionId); // [09-25] 新 sid 立即落盘，下次换代就靠它赎回
         this.startCleanupTimer();
+        isNewSession = true;
       } catch (e) {
         yield { type: 'error', message: `MiMo ACP 会话创建失败: ${e instanceof Error ? e.message : String(e)}` };
         yield { type: 'done' };
         return;
       }
+    }
+    if (!session) { // 理论不可达（resume/mustNew 必居其一给出手），防空挂兜底
+      yield { type: 'error', message: 'MiMo ACP 会话初始化失败（未知路径）' };
+      yield { type: 'done' };
+      return;
     }
 
     session.lastUsed = Date.now();
@@ -410,11 +493,13 @@ export class MiMoProvider implements RuntimeProvider {
       fullPrompt = `${params.systemPrompt || ''}\n\n${params.text}`;
       session.personaInjected = true;
     }
-    // [2026-09-17] history 注入条件改为 isNewSession（见上方注释）。
-    // 🔴 老大令 2026-09-19：非 /new 的丢失性新建 → 自动 /new（回调桥清 shadow 并告知），影子回灌废除
+    // [2026-09-17] history 注入条件为新建会话（见上方注释）。
+    // 🔴 老大令 2026-09-19：非 /new 的丢失性新建 → 自动 /new（回调桥清 shadow 并告知），影子回灌废除。
+    // [09-25] 走到这里说明 load 通道没兜住（无旧 sid 或引擎拒绝）——把原因传准（票 claude-2 同款），
+    // 桥侧卡片不再冒"原因无法判定"的重警告。成功赎回的会话根本不会进这个分支。
     if (isNewSession && !params.freshSession && params.history && params.history.length > 0) {
-      rtLog(`[mimo] engine session lost (shadow ${params.history.length}) → auto /new`);
-      params.onSessionLost?.();
+      rtLog(`[mimo] engine session lost (shadow ${params.history.length}${resumeTried ? ', resume rejected' : ''}) → auto /new`);
+      params.onSessionLost?.(resumeTried ? 'resume-failed-library-intact' : 'restart');
     }
     const historyText = isNewSession && params.freshSession && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
