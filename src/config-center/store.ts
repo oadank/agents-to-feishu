@@ -236,7 +236,14 @@ export const DEFAULT_SKILLS: SkillConfig = {
  * 别人拿到这套 agents-to-feishu 单独部署，填上自己的 base/key/model 就能用。
  */
 export interface LlmConfig {
-  /** OpenAI 兼容根地址，例 https://api.deepseek.com/v1（无 /v1 会自动补） */
+  /**
+   * [2026-09-25 老大明说] 模型是**直接选的**，别再让用户填：
+   * providerId + modelId 指向「总配置」里已有的服务商与模型，地址与密钥自动解析
+   * （密钥走本机凭证层，前端永不明文回显）。下面三个手填字段退化为「高级兜底」。
+   */
+  providerId?: string;
+  modelId?: string;
+  /** OpenAI 兼容根地址，例 https://api.deepseek.com/v1（无 /v1 会自动补）；选了服务商就留空 */
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -283,12 +290,35 @@ export const DEFAULT_PROMPT_OPTIMIZE: PromptOptimizeConfig = {
  * [2026-09-25 新增] 副驾 /de：读本会话历史 → 判断局面 → 起草 3 条候选 → 排序 → 交互卡片三选一
  * → 点哪条就用 user 令牌把**原文**发回该会话（不加署名，老大显式豁免）。全程不碰 dsh。
  */
+/**
+ * [2026-09-25 老大追问「13600 没有 /de 的决策模型」] 决策模型 = 快判断那一族（jev / SystemOne 同族）：
+ * 协议是 POST {base}/systemone，body 用 state+questions，**只回概率/选项，不生成文本**，单次几十毫秒。
+ * /de 的「判断局面」这一环用它比用聊天模型又快又稳；起草和排序仍需会写人话的模型。
+ * 老规矩：只选不填——preset 选定后地址与模型名都写死在代码里，密钥从「总配置」那家的凭证层取。
+ */
+export interface DecisionConfig {
+  /** 'aliyun'(默认) | 'bocha' | 'vercel' | 'opencode' */
+  preset: string;
+  /** 取 key 用哪家服务商的凭证（默认 'litellm'，即本机 :4000 那套） */
+  providerId: string;
+  /** 留空=按 preset 拼地址；手填则优先（高级用法） */
+  url: string;
+  /** 留空=按 preset 的模型名 */
+  model: string;
+  /** 留空=从 providerId 那家的凭证层取；手填则优先 */
+  apiKey: string;
+}
+
 export interface DeConfig {
   enabled: boolean;
   /** 触发词，默认 /de */
   command: string;
   /** 拉多少条会话历史进判断（老大 09-25 明说 10~15 够，50 是浪费 token） */
   historyTurns: number;
+  /** 判断局面走哪条路：'decision'=决策模型（快，默认）；'chat'=用下面的 judge/draft 聊天模型 */
+  judgeEngine?: 'decision' | 'chat';
+  /** 决策模型配置（judgeEngine='decision' 时用） */
+  decision?: DecisionConfig;
   /** 起草模型（写那三条） */
   draft: LlmConfig;
   /** 判断+排序模型（可指更便宜的；留空 = 复用 draft） */
@@ -305,6 +335,8 @@ export const DEFAULT_DE: DeConfig = {
   enabled: true,
   command: '/de',
   historyTurns: 15,
+  judgeEngine: 'decision',
+  decision: { preset: 'aliyun', providerId: 'litellm', url: '', model: '', apiKey: '' },
   draft: { baseUrl: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-chat', temperature: 0.95, maxTokens: 900, thinking: 'disabled', timeoutMs: 45000 },
   judge: { baseUrl: '', apiKey: '', model: '', temperature: 0.2, maxTokens: 600, thinking: 'disabled', timeoutMs: 12000 },
   useOpenmem: false,

@@ -37,7 +37,7 @@ import { writeAgentArtifacts, readCredentialKey, readOldEnvKey, assertModelProto
 // 即重启」等于亲手打死一个还能跑的 bot —— 2026-09-15 早上就是这么全线瘫痪的。
 import { checkSrcSyntax, formatSyntaxErrors } from './syntax-check.js';
 // [2026-09-25] 设置页「试一下/试跑」要能直接跑本仓引擎（不绕 dsh、也不经 bot 进程）
-import { localOptimize, localDe } from '../bridge/local-engines.js';
+import { localOptimize, localDe, resolveDecision, askSystemOne } from '../bridge/local-engines.js';
 import { startAgent as pmStart, stopAgent as pmStop, restartAgent as pmRestart, statusAll as pmStatus } from './process-manager.js';
 import { syncDeepTutorModel, syncDeepTutorMcp } from './sync-deeptutor.js';
 import { scanChatsMap } from './chats-map-scan.js';
@@ -1312,10 +1312,27 @@ export function createConfigServer(opts: ConfigServerOptions) {
           return json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
         }
       }
+      // POST /api/de/decision-test：只测决策模型那一环（判断局面），页面「测一下」用。
+      // 返回耗时与七维答案；地址/模型/密钥是否取到只出结论不出明文。
+      if (p === '/api/de/decision-test' && method === 'POST') {
+        const store = load();
+        const cfg = { ...DEFAULT_DE, ...(store.de ?? {}) };
+        const dc = { ...DEFAULT_DE.decision!, ...(cfg.decision ?? {}) };
+        try {
+          const info = resolveDecision(dc);
+          const t0 = Date.now();
+          const answers = await askSystemOne('我: 那个截断的问题修好了吗\n助手: 改了参数，还差重启\n我: 继续，走完', dc);
+          const ms = Date.now() - t0;
+          return json(res, 200, { ok: Object.keys(answers).length > 0, ms, answers, preset: info.preset, label: info.label, url: info.url, model: info.model, hasKey: info.key !== '' });
+        } catch (e) {
+          return json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
       // POST /api/de/test：拿几轮假对话直接跑一遍 /de，页面「试跑」用（不发消息）
       if (p === '/api/de/test' && method === 'POST') {
         const store = load();
-        const cfg = store.de ?? DEFAULT_DE;
+        // DEFAULT_DE 兜底：老 store 里没有 decision/judgeEngine 字段时，这里补出默认值（决策模型默认开）
+        const cfg = { ...DEFAULT_DE, ...(store.de ?? {}) };
         const body = JSON.parse((await readBody(req)) || '{}');
         const turns = Array.isArray(body.turns) ? body.turns.slice(-40) : [];
         if (turns.length === 0) return json(res, 400, { ok: false, error: 'turns is required' });
@@ -1325,6 +1342,24 @@ export function createConfigServer(opts: ConfigServerOptions) {
         } catch (e) {
           return json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
         }
+      }
+      // GET /api/model-catalog：设置页「直接选模型」的数据源（老大：别再让用户填地址密钥）。
+      // 只出服务商/模型/密钥是否已取到——密钥值绝不出前端。agents 供一键跟随某个 bot 的主模型。
+      if (p === '/api/model-catalog' && method === 'GET') {
+        const store = load();
+        const providers = (store.providers ?? []).map((pr) => ({
+          id: pr.id,
+          displayName: pr.displayName,
+          baseURL: pr.baseURL ?? '',
+          keyEnv: pr.apiKeyEnv,
+          hasKey: (readCredentialKey(pr.apiKeyEnv) || readOldEnvKey(pr.apiKeyEnv) || process.env[pr.apiKeyEnv] || '').trim() !== '',
+          models: (pr.models ?? []).map((m) => ({ id: m.id, label: m.label || m.displayName || m.id })),
+        }));
+        const agents = (store.agents ?? []).map((a) => {
+          const rec = a as unknown as { id?: string; agentId?: string; displayName?: string; name?: string; providerId?: string; modelId?: string };
+          return { id: rec.id ?? rec.agentId ?? '', displayName: rec.displayName ?? rec.name ?? '', providerId: rec.providerId ?? '', modelId: rec.modelId ?? '' };
+        }).filter((a) => a.id !== '' && a.providerId !== '' && a.modelId !== '');
+        return json(res, 200, { ok: true, providers, agents });
       }
       // POST /api/llm-models：代拉某个 base+key 的模型清单，给页面下拉选（前端跨域，必须走服务端）
       if (p === '/api/llm-models' && method === 'POST') {

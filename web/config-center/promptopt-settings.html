@@ -16,9 +16,22 @@
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
     .row { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; align-items: center; }
     label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); flex: 1 1 45%; min-width: 220px; }
-    input[type=text], textarea {
+    input[type=text], textarea, select, input[type=number], input[type=password] {
       background: #0f1419; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12.5px; width: 100%; font-family: inherit;
     }
+    /* [2026-09-25 老大：排版乱七八糟] 原页面只给 input/textarea 写了样式，select/number/password 是浏览器白底默认控件，
+       扔在深色卡片里就是一坨——所以脏的不是布局，是缺样式。这里补齐，并给 select 固定高度与聚焦态。 */
+    select { height: 32px; cursor: pointer; appearance: none; -webkit-appearance: none;
+      background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%), linear-gradient(135deg, var(--dim) 50%, transparent 50%);
+      background-position: calc(100% - 14px) 14px, calc(100% - 9px) 14px; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; padding-right: 26px; }
+    select:disabled { opacity: .45; cursor: not-allowed; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+    input[type=number] { max-width: 100px; }
+    label.cb { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); cursor: pointer; }
+    label.cb input { width: 15px; height: 15px; accent-color: var(--accent); flex: none; margin: 0; }
+    h2 { font-size: 14px; margin: 0 0 4px; color: var(--text); }
+    h2 + .dim { margin-bottom: 6px; }
+    .kbd { background: #0f1419; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 12px; color: var(--dim); margin-top: 8px; }
     textarea { resize: vertical; }
     .btn { background: rgba(128,128,128,.15); border: none; border-radius: 6px; color: var(--text); padding: 5px 14px; font-size: 12px; cursor: pointer; font-weight: 600; }
     .btn:hover { background: rgba(128,128,128,.28); }
