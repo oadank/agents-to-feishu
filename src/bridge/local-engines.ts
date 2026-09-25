@@ -358,6 +358,14 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
 
   const large = judge.scope === 'large';
   const riskHigh = judge.risk === 'high';
+  // 🔴 与网页侧同一道代码闸门（老大硬要求"每条带验收"，光写在提示词里不算落实）：
+  // 模型漏写就补一句，且补的句子自己必须能被同一条正则认出，否则补了等于没补（09-25 自查抓出的乌龙）。
+  {
+    const hasCheck = /算完|算数|给我看|贴出来|贴过来|贴给我|发我|发过来|列出来|证明|核对|截图|日志原文/
+    for (let i = 0; i < candidates.length; i++) {
+      if (!hasCheck.test(candidates[i])) candidates[i] = candidates[i].replace(/[。！.]+$/, '') + '。做完把证据贴出来给我看。'
+    }
+  }
   const roles = rolesForJudge(judge);
   // 🔴 与网页侧同一招（09-25 老大「这三条我一样看不懂」）：候选老照着助手的腔写（提交号、diff、
   // 黑话一堆），把他自己的原话当语气样本喂进去才像他说的话。
