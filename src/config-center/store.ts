@@ -475,9 +475,19 @@ export function readStore(file?: string): ConfigStore {
       speech: parsed.speech ?? DEFAULT_SPEECH,
       injection: parsed.injection ?? DEFAULT_INJECTION,
       skills: parsed.skills,
-      promptOptimize: parsed.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE,
+      // 深合并：老 store 里的 promptOptimize 没有 llm/engine 字段，直接 ?? 会把默认模型整块丢掉
+      promptOptimize: {
+        ...DEFAULT_PROMPT_OPTIMIZE,
+        ...(parsed.promptOptimize ?? {}),
+        llm: { ...DEFAULT_PROMPT_OPTIMIZE.llm!, ...(parsed.promptOptimize?.llm ?? {}) },
+      },
       // 老 store 里没有 de：补默认（默认 draft 模型可跑，judge 留空=复用 draft）
-      de: { ...DEFAULT_DE, ...(parsed.de ?? {}) },
+      de: {
+        ...DEFAULT_DE,
+        ...(parsed.de ?? {}),
+        draft: { ...DEFAULT_DE.draft, ...(parsed.de?.draft ?? {}) },
+        judge: { ...DEFAULT_DE.judge!, ...(parsed.de?.judge ?? {}) },
+      },
       defaultWorkdir: parsed.defaultWorkdir ?? '',
       settings: parsed.settings ?? { groupMentionOnly: true },
     };

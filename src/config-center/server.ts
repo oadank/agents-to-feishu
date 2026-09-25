@@ -30,11 +30,14 @@ import {
   type ConfigStore, type AgentDef, type ProviderDef, type McpDef, type SpeechConfig,
   readStore, writeStore, findProvider, DEFAULT_SPEECH, DEFAULT_INJECTION, defaultStorePath,
   DEFAULT_PROMPT_OPTIMIZE,
+  DEFAULT_DE,
 } from './store.js';
 import { writeAgentArtifacts, readCredentialKey, readOldEnvKey, assertModelProtocolAllowed } from './render.js';
 // [根治 C 2026-09-15] 语法闸门。bot 服务由 tsx 直读 src，代码带语法错时「保存即 apply
 // 即重启」等于亲手打死一个还能跑的 bot —— 2026-09-15 早上就是这么全线瘫痪的。
 import { checkSrcSyntax, formatSyntaxErrors } from './syntax-check.js';
+// [2026-09-25] 设置页「试一下/试跑」要能直接跑本仓引擎（不绕 dsh、也不经 bot 进程）
+import { localOptimize, localDe } from '../bridge/local-engines.js';
 import { startAgent as pmStart, stopAgent as pmStop, restartAgent as pmRestart, statusAll as pmStatus } from './process-manager.js';
 import { syncDeepTutorModel, syncDeepTutorMcp } from './sync-deeptutor.js';
 import { scanChatsMap } from './chats-map-scan.js';
@@ -1262,21 +1265,32 @@ export function createConfigServer(opts: ConfigServerOptions) {
         save(store);
         return json(res, 200, { ok: true, vision: store.vision });
       }
-      // ── 内建 ⚡ 提示词优化（勾选即用，与语音/看图同定位）──
-      // GET /api/prompt-optimize：读配置
+      // ── 内建 ⚡ 提示词优化 + /de 副驾（本地引擎，不依赖 dsh；页面上两块配置共用一张卡）──
       if (p === '/api/prompt-optimize' && method === 'GET') {
         const store = load();
-        return json(res, 200, { ok: true, promptOptimize: store.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE });
+        return json(res, 200, { ok: true, promptOptimize: store.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE, de: store.de ?? DEFAULT_DE });
       }
-      // PUT /api/prompt-optimize：写配置（bot 侧 5 秒缓存自动跟进，无需重启）
+      // PUT /api/prompt-optimize：只写传了的字段；llm 深合并，避免前端漏传把模型清空
       if (p === '/api/prompt-optimize' && method === 'PUT') {
         const store = load();
         const body = JSON.parse((await readBody(req)) || '{}');
-        store.promptOptimize = { ...(store.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE), ...body };
+        const cur = store.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE;
+        store.promptOptimize = {
+          ...cur, ...body,
+          llm: { ...cur.llm!, ...((body.llm ?? {}) as object) },
+        };
+        if (body.de !== undefined) {
+          const dcur = store.de ?? DEFAULT_DE;
+          store.de = {
+            ...dcur, ...body.de,
+            draft: { ...dcur.draft, ...((body.de.draft ?? {}) as object) },
+            judge: { ...dcur.judge!, ...((body.de.judge ?? {}) as object) },
+          };
+        }
         save(store);
-        return json(res, 200, { ok: true, promptOptimize: store.promptOptimize });
+        return json(res, 200, { ok: true, promptOptimize: store.promptOptimize, de: store.de });
       }
-      // POST /api/prompt-optimize/test：试优化（body {text} → {ok,optimized|error}），设置页「试一下」按钮用
+      // POST /api/prompt-optimize/test：试优化（engine=local 走本仓引擎；endpoint 走外部地址）
       if (p === '/api/prompt-optimize/test' && method === 'POST') {
         const store = load();
         const cfg = store.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE;
@@ -1284,12 +1298,47 @@ export function createConfigServer(opts: ConfigServerOptions) {
         const text = String(body.text ?? '').trim();
         if (text === '') return json(res, 400, { ok: false, error: 'text is required' });
         try {
+          if ((cfg.engine ?? 'local') === 'local') {
+            const optimized = await localOptimize(text, cfg);
+            return json(res, 200, { ok: true, optimized });
+          }
           const r = await fetch(cfg.endpoint, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text }), signal: AbortSignal.timeout(60_000),
           });
           const j = (await r.json()) as { ok?: boolean; optimized?: string; error?: string };
           return json(res, 200, j.ok && j.optimized ? { ok: true, optimized: j.optimized } : { ok: false, error: j.error || '优化端点返回空' });
+        } catch (e) {
+          return json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      // POST /api/de/test：拿几轮假对话直接跑一遍 /de，页面「试跑」用（不发消息）
+      if (p === '/api/de/test' && method === 'POST') {
+        const store = load();
+        const cfg = store.de ?? DEFAULT_DE;
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const turns = Array.isArray(body.turns) ? body.turns.slice(-40) : [];
+        if (turns.length === 0) return json(res, 400, { ok: false, error: 'turns is required' });
+        try {
+          const out = await localDe(turns, { ...cfg, historyTurns: turns.length });
+          return json(res, 200, { ok: true, ...out });
+        } catch (e) {
+          return json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      // POST /api/llm-models：代拉某个 base+key 的模型清单，给页面下拉选（前端跨域，必须走服务端）
+      if (p === '/api/llm-models' && method === 'POST') {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const base = String(body.baseUrl ?? '').trim().replace(/\/+$/, '');
+        const key = String(body.apiKey ?? '').trim();
+        if (base === '' || key === '') return json(res, 400, { ok: false, error: 'baseUrl 与 apiKey 必填' });
+        const url = /\/v\d+$/.test(base) ? `${base}/models` : `${base}/v1/models`;
+        try {
+          const r = await fetch(url, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(20_000) });
+          const j = (await r.json()) as { data?: Array<{ id?: string }>; error?: { message?: string } };
+          if (!r.ok) return json(res, 200, { ok: false, error: j?.error?.message || `HTTP ${r.status}` });
+          const models = (j.data ?? []).map((m) => String(m.id ?? '')).filter(Boolean).sort();
+          return json(res, 200, { ok: true, models });
         } catch (e) {
           return json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
         }

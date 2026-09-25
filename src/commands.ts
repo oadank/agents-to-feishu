@@ -54,6 +54,13 @@ export async function handleCommand(
   const arg = rest.join(' ');
 
   switch (cmd) {
+    case '/de': {
+      // [2026-09-25 老大定调] 副驾三选一：读本会话历史 → 本仓引擎判断/起草/排序 → 交互卡片。
+      // 刻意不 import dsh 的任何东西：dsh-web 挂了、插件没装，这里照样出候选（模型在配置中心 :13600 各配各的）。
+      console.log(`[agents-to-feishu] 执行 /de chat=${chatId.slice(0, 12)}`);
+      await engine.runDeCommand(chatId);
+      break;
+    }
     case '/new':
     case '/new:default': {
       // 真正新建空白会话：新 id + 清上下文 + provider 开新 ACP session（不杀进程）

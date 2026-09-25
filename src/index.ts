@@ -649,6 +649,12 @@ async function handleIncoming(
   // 命令？isCommand 已在去重段算出（已 trim 并判 / 开头）。鉴权已前移到去重之后。
   // [2026-09-21] ⚡ 优化触发前缀（/p 等）不是命令：放行到普通消息链，由 engine.handleText 精炼处理
   if (isCommand && !engine.isOptimizeTrigger(text)) {
+    // [2026-09-25] /de 的触发词可在配置中心改（命令表里只有写死的 '/de'）：自定义词在这儿认。
+    const head = text.trim().split(/\s+/)[0] ?? '';
+    if (engine.isDeCommand(text) && !/^\/de$/i.test(head)) {
+      await engine.runDeCommand(chatId);
+      return;
+    }
     await handleCommand(text, chatId, engine, sessions);
     return;
   }
@@ -784,6 +790,11 @@ async function handleCardAction(
   };
   const callback = d?.action?.value?.callback || '';
   const parts = callback.split(':');
+  // [2026-09-25] 副驾卡片按钮：de:<chatId>:<uid>:<idx> → 以用户身份把那条原文发回本会话（不加署名，老大显式豁免）
+  if (parts[0] === 'de') {
+    console.log(`[agents-to-feishu] de card action chatId=${parts[1]} uid=${parts[2]} idx=${parts[3]}`);
+    return engine.handleDeAction(callback);
+  }
   if (parts[0] !== 'interrupt' || parts.length < 4) {
     console.warn(`[agents-to-feishu] unknown card callback: ${callback}`);
     return {};

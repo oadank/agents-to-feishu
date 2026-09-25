@@ -15,7 +15,10 @@ import type { FeishuClient } from '../feishu/client.js';
 import type { RuntimeProvider, StreamEvent } from '../providers/types.js';
 import { SessionManager, type Session } from './session.js';
 import { synthesize, toOpus, type TtsConfig } from '../voice/tts.js';
-import { readStore, DEFAULT_PROMPT_OPTIMIZE, type PromptOptimizeConfig, type SpeechConfig } from '../config-center/store.js';
+import { readStore, DEFAULT_PROMPT_OPTIMIZE, DEFAULT_DE, type PromptOptimizeConfig, type DeConfig, type SpeechConfig } from '../config-center/store.js';
+// [2026-09-25 老大定调] /p 与 /de 的本地引擎与飞书流程：不依赖 dsh-web，也不依赖 dsh-input-tools 插件
+import { localOptimize } from './local-engines.js';
+import { runDe, onDeAction, type DeFeishuClient } from './de-flow.js';
 import {
   buildStreamingCardSkeleton,
   buildSimpleCard,
@@ -528,6 +531,66 @@ export class MessageEngine {
 
   private _poCache: { cfg: PromptOptimizeConfig; at: number } | null = null;
 
+  /**
+   * [2026-09-25] /p 分流：engine=local 用本仓引擎（默认，不碰 dsh）；engine=endpoint 才打外部地址。
+   * 失败返回 null，由调用方按原文继续 —— 绝不让副功能把主链卡住。
+   */
+  private async optimizeBody(po: PromptOptimizeConfig, body: string): Promise<string | null> {
+    if ((po.engine ?? 'local') === 'local') {
+      try {
+        return await localOptimize(body, po);
+      } catch (e) {
+        console.warn(`[engine] /p 本地引擎失败: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      }
+    }
+    if (!po.endpoint) return null;
+    return this.callOptimizeEndpoint(po.endpoint, body);
+  }
+
+  /** 这条消息是不是 /de 触发（触发词可在配置中心改；关掉时不认，避免抢用户正常文本） */
+  isDeCommand(text: string): boolean {
+    let cfg: DeConfig;
+    try { cfg = readStore().de ?? DEFAULT_DE; } catch { cfg = DEFAULT_DE; }
+    if (!cfg.enabled) return false;
+    const cmd = (cfg.command || '/de').trim().toLowerCase();
+    if (cmd === '') return false;
+    const head = text.trim().split(/\s+/)[0]?.toLowerCase() ?? '';
+    return head === cmd;
+  }
+
+  /**
+   * [2026-09-25] 飞书 /de：读本会话最近 N 条 → 本仓引擎判断+起草三条+排序 → 发三选一卡片。
+   * 点按钮的动作在 handleDeAction 里，用 user 令牌把原文发回本会话（不加署名，老大显式豁免）。
+   */
+  async runDeCommand(chatId: string): Promise<void> {
+    let cfg: DeConfig;
+    try { cfg = readStore().de ?? DEFAULT_DE; } catch { cfg = DEFAULT_DE; }
+    if (!cfg.enabled) {
+      await this.sendCommandCard(chatId, '⚙ /de 未启用：配置中心「⚡ 提示词优化 / 副驾」页里勾上并保存（5 秒内自动生效）');
+      return;
+    }
+    try {
+      const { mid, res } = await runDe(this.opts.feishu as unknown as DeFeishuClient, cfg, chatId);
+      if (!mid) {
+        // 卡片发不出去（权限/网络）至少把三条给出去，别白跑一趟模型
+        await this.sendCommandCard(chatId, '📋 卡片没发出去，候选如下（复制想用那条）：\n' + res.candidates.map((c, i) => (i + 1) + '. ' + (c.role ? '[' + c.role + '] ' : '') + c.text).join('\n'));
+      }
+    } catch (e) {
+      await this.sendCommandCard(chatId, `⚠ /de 失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** 卡片按钮回调（de:chatId:uid:idx）：以用户身份原文发出；同一条点第二次由 de-flow 拒绝。 */
+  async handleDeAction(callback: string): Promise<{ toast: { type: string; content: string } }> {
+    try {
+      const r = await onDeAction(callback);
+      return { toast: r.toast };
+    } catch (e) {
+      return { toast: { type: 'error', content: e instanceof Error ? e.message : String(e) } };
+    }
+  }
+
   /** 是否 ⚡ 优化触发消息（启用+前缀命中+正文非空）：index.ts 命令分发据此放行，不进斜杠命令表 */
   isOptimizeTrigger(text: string): boolean {
     const po = this.promptOptimizeCfg();
@@ -631,7 +694,7 @@ export class MessageEngine {
     if (po.enabled) {
       const body = stripOptimizePrefix(text, po.prefixes);
       if (body !== null) {
-        const optimized = await this.callOptimizeEndpoint(po.endpoint, body);
+        const optimized = await this.optimizeBody(po, body);
         if (optimized !== null) {
           try { await this.sendText(chatId, `⚡ 优化后提示词：\n${optimized}`); } catch { /* 回执失败不拦正文 */ }
           text = optimized;
