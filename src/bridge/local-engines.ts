@@ -82,8 +82,12 @@ export async function chatOnce(o: ChatOpts): Promise<string> {
   if (!r.ok) throw new Error(`${llm.model} HTTP ${r.status}: ${(await r.text().catch(() => '')).slice(0, 200)}`);
   const j = (await r.json()) as { choices?: Array<{ message?: { content?: string; reasoning_content?: string } }> };
   const c = j?.choices?.[0]?.message?.content ?? '';
-  // 有些推理模型把正文塞 reasoning_content（额度被思考吃光时 content 为空）——兜一手，别白等
-  return typeof c === 'string' && c.trim() !== '' ? c : (j?.choices?.[0]?.message?.reasoning_content ?? '');
+  // 有些推理模型把正文塞 reasoning_content（额度被思考吃光时 content 为空）——兜一手，别白等。
+  // 🔴 但**要 JSON 的环节不许兜**（09-25 实测：起草 content 空 → 把思考过程当答案返回，
+  // 卡片上就出现「> 💭」「让我仔细看这个对话…」这种句子）。空就交回上层重试，绝不拿思考稿上卡。
+  const txt = typeof c === 'string' && c.trim() !== '' ? c : '';
+  if (txt === '' && o.json) return '';
+  return txt !== '' ? txt : (j?.choices?.[0]?.message?.reasoning_content ?? '');
 }
 
 /** 稳健 JSON 抽取：容忍 ```json 围栏、前后废话、对象包数组 */
@@ -375,7 +379,7 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
         const t = s.replace(/^["'「『\s]+|["'」』\s]+$/g, '').replace(/^[-*·]\s*/, '').replace(/^\d+\s*[.、)）:：]\s*/, '').trim();
         // 🔴 光靠提示词拦不住"自述"（09-25 实测模型写出「用户要三条：…」「所以三条要针对这句：…」当候选），
         // 代码里再兜一道：这种句子直接判废，不够 3 条就走已有的重试循环重写，绝不发上卡片。
-        if (/用户要三条|三条要?针对|所以三条|第一条是|角色[:：]|拟用\s*\d|^\s*(推进|收窄|叫停|认账收尾|挑一点让它证明|直接答|先要证据再答|方案[AB])\s*[:：]/.test(t)) continue;
+        if (/用户要三条|三条要?针对|所以三条|第一条是|角色[:：]|拟用\s*\d|^\s*>|💭|让我(们)?(先|再|仔细)?看|我需要|用户在和|助手刚说|替他写|作为\s*AI|^\s*(推进|收窄|叫停|认账收尾|挑一点让它证明|直接答|先要证据再答|方案[AB])\s*[:：]/.test(t)) continue;
         // 🔴 实测卡片上出现过 `["…","…"]` 残渣：模型把两条塞进一个 JSON 数组字符串里，旧代码整坨当一条。
         // 先摊平成多条，再逐条走上面的判废与去重。
         const pieces = (t.startsWith('[') || t.includes('","') ? t.replace(/^\[|\]$/g, '').split('","') : [t])
