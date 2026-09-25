@@ -385,6 +385,10 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
         // 🔴 老大 09-25 抓的铁证：「用户情绪不耐烦，风险无，改动量级轻」——这是模型把**判断小抄**
         // 当回复抄上卡片（小抄内部管他叫"用户"）。他永远不会用"用户"称呼自己 ⇒ 第三者视角 = 直接判废，
         // 不靠模型自觉。连同"角色/验收/量级/情绪/接住/三条"这些元词一起拦。
+        // 🔴 候选必须是中文人话（09-25 第二次翻车：模型改成英文自言自语「Wait — the assistant leaked its
+        // thinking…」「So the three replies: …」，我的断言只盯中文元词，全绿放行还提交上去，同一个错犯第二遍）。
+        const zhCount = (t.match(/[\u4e00-\u9fa5]/g) || []).length;
+        if (zhCount < 4 || zhCount / Math.max(1, t.length) < 0.45 || /\b(the|and|but|wait|also|so|must|rule|reply|replying)\b/i.test(t)) continue;
         if (/用户|对方|角色|验收|量级|情绪|接住|语气样本|三条|照这个语气|每条|^\s*>|💭|让我(们)?(先|再|仔细)?看|我需要|助手刚说|替他写|作为\s*AI|风险\s*(无|低|中|高)|^\s*(推进|收窄|叫停|认账收尾|挑一点让它证明|直接答|先要证据再答|方案[AB])\s*[:：]/.test(t)) continue;
         // 🔴 实测卡片上出现过 `["…","…"]` 残渣：模型把两条塞进一个 JSON 数组字符串里，旧代码整坨当一条。
         // 先摊平成多条，再逐条走上面的判废与去重。
