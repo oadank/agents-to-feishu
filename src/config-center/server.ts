@@ -212,6 +212,25 @@ export function createConfigServer(opts: ConfigServerOptions) {
   }
 
   /**
+   * [2026-09-26 根治 config-center「保存断链」] 批量 apply：逐个渲染 env + 重启对应 bot 进程。
+   * 技能/注入这类全局配置改完要让全部 bot 生效；MCP/新建 bot/删 provider 只影响相关 bot。
+   * 串行逐家重启，单家失败不阻塞其余，汇总 applied/errors。参照 agents-by-runtime 的批量循环。
+   */
+  async function applyAgents(ids: string[]): Promise<{ ok: boolean; applied: string[]; errors: string[] }> {
+    const applied: string[] = [];
+    const errors: string[] = [];
+    for (const id of ids) {
+      try {
+        const r = await applyAgent(id);
+        if (r.ok) applied.push(id); else errors.push(`${id}: ${r.error || '失败'}`);
+      } catch (e) {
+        errors.push(`${id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    return { ok: errors.length === 0, applied, errors };
+  }
+
+  /**
    * 测试一个 provider 的连通性：拿真实 key（凭证层/老 config.env 兜底），
    * 按协议（OpenAI 聊天 / Responses / Anthropic）打对应端点 1-token 请求，
    * 返回耗时与错误明细。
@@ -962,7 +981,9 @@ export function createConfigServer(opts: ConfigServerOptions) {
         }
         store.agents.push(agent);
         save(store);
-        return json(res, 201, agent);
+        // [2026-09-26 根治保存断链] 新建 bot 也写 env（否则只落库、前端忘调 /apply 就是空壳）；重启 best-effort（服务可能还没注册）
+        const apNew = await applyAgent(agent.id);
+        return json(res, 201, { ...agent, apply: apNew });
       }
 
       // PUT/DELETE /api/agents/:id
@@ -1020,7 +1041,8 @@ export function createConfigServer(opts: ConfigServerOptions) {
           // 现在保存即 apply：精准合并 env/cordis + CLI 模型联动 + 重启该 agent 服务。
           try {
             const ap = await applyAgent(id);
-            return json(res, 200, { ...store.agents[idx], apply: ap });
+            // [2026-09-26 绿灯改诚实] apply 失败别再返 200 骗人（前端只看顶层 ok 就弹"已保存"）；失败给 500 + apply 明细
+            return json(res, ap.ok ? 200 : 500, { ...store.agents[idx], apply: ap });
           } catch (e) {
             return json(res, 500, { error: `保存成功但 apply 失败: ${e instanceof Error ? e.message : String(e)}` });
           }
@@ -1200,9 +1222,12 @@ export function createConfigServer(opts: ConfigServerOptions) {
         }
         if (method === 'DELETE') {
           const store = load();
+          const affected = store.agents.filter((a) => a.providerId === id).map((a) => a.id);
           store.providers = store.providers.filter((x) => x.id !== id);
           save(store);
-          return json(res, 200, { ok: true });
+          // [2026-09-26 根治保存断链] 删 provider → 重启引用它的 bot（清理其配置里的悬挂引用）
+          const apProvDel = await applyAgents(affected);
+          return json(res, apProvDel.ok ? 200 : 500, { ok: apProvDel.ok, apply: apProvDel });
         }
       }
 
@@ -1238,13 +1263,17 @@ export function createConfigServer(opts: ConfigServerOptions) {
           if (idx < 0) return json(res, 404, { error: 'not found' });
           store.mcps[idx] = { ...store.mcps[idx], ...body, id };
           save(store);
-          return json(res, 200, store.mcps[idx]);
+          // [2026-09-26 根治保存断链] MCP 定义改动会烧进引用它的 bot env，重启那几家生效（只影响引用方，不惊动其余）
+          const apMcp = await applyAgents(store.agents.filter((a) => (a.mcps || []).includes(id)).map((a) => a.id));
+          return json(res, apMcp.ok ? 200 : 500, { ...store.mcps[idx], apply: apMcp });
         }
         if (method === 'DELETE') {
           const store = load();
           store.mcps = store.mcps.filter((x) => x.id !== id);
           save(store);
-          return json(res, 200, { ok: true });
+          // [2026-09-26 根治保存断链] MCP 删除 → 重启引用它的 bot（其配置里还挂着这个 id）
+          const apMcpDel = await applyAgents(store.agents.filter((a) => (a.mcps || []).includes(id)).map((a) => a.id));
+          return json(res, apMcpDel.ok ? 200 : 500, { ok: apMcpDel.ok, apply: apMcpDel });
         }
       }
 
@@ -1844,7 +1873,9 @@ export function createConfigServer(opts: ConfigServerOptions) {
         next.add(name);
         store.skills = { enabled: Array.from(next), marketUrl: store.skills?.marketUrl ?? '' };
         save(store);
-        return json(res, 200, { ok: true, name });
+        // [2026-09-26 根治保存断链] 技能是全局配置（apply 时烧进每家 env），保存即重启全部 bot 生效
+        const apSkill = await applyAgents(store.agents.map((a) => a.id));
+        return json(res, apSkill.ok ? 200 : 500, { ok: apSkill.ok, name, apply: apSkill });
       }
 
       // POST /api/skills/delete {name}：删除 skills/<name> 目录 + 白名单移除
@@ -1861,7 +1892,9 @@ export function createConfigServer(opts: ConfigServerOptions) {
           store.skills = { enabled: store.skills.enabled.filter((x) => x !== name), marketUrl: store.skills.marketUrl ?? '' };
           save(store);
         }
-        return json(res, 200, { ok: true, name });
+        // [2026-09-26 根治保存断链] 技能删除也是全局配置变更（技能目录已删），重启全部 bot 生效
+        const apDel = await applyAgents(store.agents.map((a) => a.id));
+        return json(res, apDel.ok ? 200 : 500, { ok: apDel.ok, name, apply: apDel });
       }
 
       // POST /api/skills/toggle {name, enabled}：启停技能（写 skills.enabled 白名单）
@@ -1878,7 +1911,9 @@ export function createConfigServer(opts: ConfigServerOptions) {
         else { en = en.filter((x) => x !== name); }
         store.skills = { enabled: en, marketUrl: store.skills?.marketUrl ?? '' };
         save(store);
-        return json(res, 200, { ok: true, enabled: en });
+        // [2026-09-26 根治保存断链] 技能启停是全局配置变更，重启全部 bot 生效
+        const apTog = await applyAgents(store.agents.map((a) => a.id));
+        return json(res, apTog.ok ? 200 : 500, { ok: apTog.ok, enabled: en, apply: apTog });
       }
 
       // GET /api/skills/market：本地市场 + 远程市场（config.skills.marketUrl 非空时拉取索引）
@@ -1936,7 +1971,9 @@ export function createConfigServer(opts: ConfigServerOptions) {
         next.add(name);
         store.skills = { enabled: Array.from(next), marketUrl: store.skills?.marketUrl ?? '' };
         save(store);
-        return json(res, 200, { ok: true, name });
+        // [2026-09-26 根治保存断链] 技能是全局配置（apply 时烧进每家 env），保存即重启全部 bot 生效
+        const apSkill = await applyAgents(store.agents.map((a) => a.id));
+        return json(res, apSkill.ok ? 200 : 500, { ok: apSkill.ok, name, apply: apSkill });
       }
 
       // POST /api/skills/save-market-url {url}：保存远程市场索引 URL
@@ -1968,7 +2005,9 @@ export function createConfigServer(opts: ConfigServerOptions) {
           global: typeof body.global === 'string' ? body.global : (store.injection?.global ?? ''),
         };
         save(store);
-        return json(res, 200, { ok: true, enabled: store.injection.enabled, global: store.injection.global });
+        // [2026-09-26 根治保存断链] 注入是全局配置（apply 时烧进每家 persona.md/env），保存即重启全部 bot 生效（老大选 1）
+        const ap = await applyAgents(store.agents.map((a) => a.id));
+        return json(res, ap.ok ? 200 : 500, { ok: ap.ok, enabled: store.injection.enabled, global: store.injection.global, apply: ap });
       }
 
       // ── 内建 ComfyUI 生图（转发 8090，项目内建让 AI 会生图）──
