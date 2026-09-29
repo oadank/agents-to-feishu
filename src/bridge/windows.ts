@@ -38,6 +38,12 @@ export const WINDOW_DEFAULTS = {
   echoWindowMs: 60 * 60_000,
   /** 回声指纹表的清扫周期（必须明显短于上面所有存活窗口） */
   echoPruneMs: 5 * 60_000,
+  /**
+   * 票 T-0021：在途轮次的信任期（毫秒）。超过这个时长还挂着"没跑完"的轮次，判为僵尸/已死，
+   * 不再拦重启；期内则一律认为"锅里还炖着东西"，precheck-turns 会点名"这家先别动"。
+   * 出厂 90min 的依据：现网真实长轮次（mimo 下 132MB 安装包 + 装 + 跑 RPC）实测跨了 ~70min。
+   */
+  turnStaleMs: 90 * 60_000,
 } as const;
 
 export type EchoMode = 'enforce' | 'shadow' | 'off';
@@ -50,6 +56,7 @@ export interface Windows {
   imageMs: number;
   echoWindowMs: number;
   echoPruneMs: number;
+  turnStaleMs: number;
   echoMode: EchoMode;
 }
 
@@ -62,6 +69,7 @@ export const WINDOW_ENV_KEYS = {
   imageMs: 'CTI_IMAGE_TTL_MS',
   echoWindowMs: 'CTI_ECHO_WINDOW_MS',
   echoPruneMs: 'CTI_ECHO_PRUNE_MS',
+  turnStaleMs: 'CTI_TURN_STALE_MS',
 } as const;
 
 type NumField = keyof typeof WINDOW_ENV_KEYS;
@@ -75,6 +83,7 @@ const CN: Record<NumField, string> = {
   imageMs: '图片磁盘保留',
   echoWindowMs: '回声判重窗口',
   echoPruneMs: '回声表清扫周期',
+  turnStaleMs: '在途轮次信任期',
 };
 
 function parseMs(raw: string | undefined, field: NumField): number {
@@ -100,6 +109,7 @@ export function readWindows(env: Record<string, string | undefined> = process.en
     imageMs: parseMs(env[WINDOW_ENV_KEYS.imageMs], 'imageMs'),
     echoWindowMs: parseMs(env[WINDOW_ENV_KEYS.echoWindowMs], 'echoWindowMs'),
     echoPruneMs: parseMs(env[WINDOW_ENV_KEYS.echoPruneMs], 'echoPruneMs'),
+    turnStaleMs: parseMs(env[WINDOW_ENV_KEYS.turnStaleMs], 'turnStaleMs'),
     echoMode: (() => {
       const m = (env.CTI_ECHO_MODE || 'enforce').trim();
       if (m !== 'enforce' && m !== 'shadow' && m !== 'off') {
@@ -133,6 +143,12 @@ export function checkInvariants(w: Windows): string[] {
   }
   if (w.imageMs > 0 && w.pendingImgMs > w.imageMs) {
     bad.push(`W4 等补文本窗口(${s(w.pendingImgMs)}) 必须 ≤ 图片磁盘保留(${s(w.imageMs)})：内存登记先过期，磁盘清理不再认它在途，图被删，后补的文字只能对着不存在的路径。`);
+  }
+  // W5（票 T-0021）：在途轮次信任期 ≥ 待回执存活。
+  // 待回执登记还活着 = 这条派活**仍在等回复**；若信任期更短，precheck-turns 会在"还在等它交付"的时刻
+  // 就把那轮判成僵尸并放行重启 —— 那正是 2026-09-29 我打断 mimo 那轮下载活的翻版。
+  if (w.turnStaleMs < w.receiptPendingMs) {
+    bad.push(`W5 在途轮次信任期(${s(w.turnStaleMs)}) 必须 ≥ 待回执存活(${s(w.receiptPendingMs)})：登记还在等回复，precheck 却已把这轮判僵尸放行重启，等于亲手打断别家在途的活（T-0021 治的就是这个）。`);
   }
   return bad;
 }
@@ -180,4 +196,5 @@ export const WINDOW_LABELS: Record<string, string> = {
   [WINDOW_ENV_KEYS.imageMs]: CN.imageMs + '（毫秒，0=永不清理）：收图/TTS 落盘保留',
   [WINDOW_ENV_KEYS.echoWindowMs]: CN.echoWindowMs + '（毫秒）：同内容二现判回声，须 ≥ 待回执存活',
   [WINDOW_ENV_KEYS.echoPruneMs]: CN.echoPruneMs + '（毫秒）：回声指纹表清扫周期，须 < 最短存活',
+  [WINDOW_ENV_KEYS.turnStaleMs]: CN.turnStaleMs + '（毫秒）：在途轮次超过它才判僵尸；precheck-turns 用，须 ≥ 待回执存活',
 };

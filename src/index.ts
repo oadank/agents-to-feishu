@@ -36,6 +36,7 @@ import { sendAsUserToBot } from './tools/lark-tools.js';
 import { registerPending, consumePending, manualReceiptRecent, peekPending } from './bridge/auto-receipt.js';
 import { assertWindows, windows, type Windows } from './bridge/windows.js';
 import { classifyEcho, newEchoLedger, prune as pruneEchoLedger, echoStats, markWake, isAckOnly, normalizeBody } from './bridge/echo-guard.js';
+import { markTurn, clearTurn, readTurnFile, turnLogFile } from './bridge/turn-ledger.js';
 
 // ── 票 T-0019③：窗口单一真源（src/bridge/windows.ts）──
 // main() 里在 config.env 灌回 process.env **之后**才校验，此处先留空由 windows() 兜底。
@@ -47,6 +48,36 @@ function win(): Windows {
 // ── 票 T-0019①：回声账（同内容窗口内二现 = 回声）──
 const echoLedger = newEchoLedger();
 let lastEchoPruneAt = 0;
+
+/**
+ * 票 T-0021（2026-09-29 dsh）：启动时点名"上次进程退出时仍未完成的轮次"，并把现场归档。
+ * 治的是真实事故：重启杀掉正在跑的 turn 后**什么痕迹都不留**，只剩一句"这 bot 挂了"。
+ * 归档后删除台账本体，避免同一条现场被反复报（观测面失败只 warn，绝不阻塞启动）。
+ */
+function reportInterruptedTurnsOnBoot(): void {
+  const bot = process.env.CTI_BOT || 'unknown';
+  const file = turnLogFile(process.env.CTI_RT_LOG, bot);
+  const f = readTurnFile(process.env.CTI_RT_LOG, bot);
+  if (!f || f.turns.length === 0) return;
+  const now = Date.now();
+  for (const t of f.turns) {
+    rtLog(
+      `[turn:interrupted] 上次进程退出时这一轮没跑完：chat=${t.chatId} mid=${t.mid} ` +
+      `已炖 ${Math.round((now - t.startedAt) / 60000)}min（台账停更于 ${Math.round((now - f.updatedAt) / 60000)}min 前，` +
+      `旧 pid=${f.pid}）摘要="${t.preview}"` +
+      ` —— 若刚有人重启过本服务，这就是那轮的下场：它不是"挂了"，是被打断了，别再猜`
+    );
+  }
+  console.log(`[agents-to-feishu] ⚠️ 发现上次未完成轮次 ${f.turns.length} 条（旧 pid=${f.pid}），已点名进 rt.log`);
+  try {
+    const dest = file.replace(/\.json$/, `-interrupted-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.json`);
+    fs.writeFileSync(dest, JSON.stringify({ recordedAt: new Date().toISOString(), note: '进程退出时仍未完成的轮次现场（票 T-0021）', ...f }, null, 2), 'utf-8');
+    fs.unlinkSync(file);
+    console.log(`[agents-to-feishu] 现场已归档：${path.basename(dest)}`);
+  } catch (e) {
+    console.warn(`[agents-to-feishu] 现场归档失败（不阻塞启动）: ${(e as Error).message}`);
+  }
+}
 
 // ── pending 图片（对齐 agents-to-im：先发图，文本到达后合并）──
 // key = chatId；收到图片先挂号提醒补文本，收到文本时把图片路径合并给 agent（agent 用 look_image 按需求看图）
@@ -230,8 +261,13 @@ async function main(): Promise<void> {
   // 绝不静默回落默认值继续跑（静默降级是 2026-09-19 配置回写那类事故的同型温床）。
   WIN = assertWindows();
   rtLog(`[windows] 启动校验通过：echoMode=${WIN.echoMode} 待回执=${WIN.receiptPendingMs}ms 抑制窗=${WIN.manualReceiptMs}ms ` +
-    `/de卡=${WIN.dePendingMs}ms 等补文=${WIN.pendingImgMs}ms 图片保留=${WIN.imageMs}ms 判重窗=${WIN.echoWindowMs}ms 清扫=${WIN.echoPruneMs}ms`);
-  console.log(`[agents-to-feishu] 窗口表 OK（echoMode=${WIN.echoMode}，已按 W1~W4 自查通过）`);
+    `/de卡=${WIN.dePendingMs}ms 等补文=${WIN.pendingImgMs}ms 图片保留=${WIN.imageMs}ms 判重窗=${WIN.echoWindowMs}ms 清扫=${WIN.echoPruneMs}ms 在途信任期=${WIN.turnStaleMs}ms`);
+  console.log(`[agents-to-feishu] 窗口表 OK（echoMode=${WIN.echoMode}，已按 W1~W5 自查通过）`);
+  // 🔴 票 T-0021（2026-09-29 dsh）：上一次进程退出时若还有未完成轮次，这里就是"被打断时留个条"的落点。
+  // 起因是真实事故：dsh 一把梭重启 12 家，杀掉 mimo 正在跑的 Motrix 下载轮次（prompt id=103），
+  // 那一轮**永久没有回包也没留任何痕迹**，老大只看到"mimo 挂了"。现在把现场归档并点名进 rt.log，
+  // 让人一眼看出"这个 bot 上次是被打断的、当时在干什么、炖了多久"，而不是靠猜。
+  reportInterruptedTurnsOnBoot();
   // USERPROFILE 兜底：nssm 以 LocalSystem 跑时 os.homedir() 指向 systemprofile
   if (process.env.USERPROFILE === undefined || process.env.USERPROFILE?.includes('systemprofile')) {
     process.env.USERPROFILE = process.env.CTI_USER_HOME || 'C:\\Users\\oadan';
@@ -744,9 +780,19 @@ async function handleIncoming(
       console.log(`[agents-to-feishu] queued message ${msg.message_id.slice(0, 12)} cancelled via interrupt card, skipped`);
       return;
     }
-    await engine.handleText(chatId, text, msg.message_id, {
-      replyAudio: isAudio || wantsVoiceReply(text),
-    });
+    // 🔴 票 T-0021（2026-09-29 dsh）：这一轮开跑 = 登记在途，落盘 logs/<bot>-turn.json 并每 60s 心跳。
+    // 外部脚本 scripts/precheck-turns.mts 据此判断"这家锅里还炖着东西"，重启前该躲开它
+    // （治的就是我 09-29 一把梭重启杀掉 mimo 正在跑的下载轮次那次事故）。
+    markTurn(chatId, msg.message_id || '', text);
+    try {
+      await engine.handleText(chatId, text, msg.message_id, {
+        replyAudio: isAudio || wantsVoiceReply(text),
+      });
+    } finally {
+      // 正常收尾 / 异常 / 被取消都必须销账，否则台账会把已结束的轮次一直报成"在途"，
+      // 反过来让 precheck 永远拦着重启（宁可偶尔多拦一次，也不能漏拦 —— 但销账漏了是长期故障，要杜绝）。
+      clearTurn(chatId);
+    }
   });
 }
 

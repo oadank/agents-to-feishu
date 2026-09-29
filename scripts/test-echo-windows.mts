@@ -21,12 +21,12 @@ const envOf = (over: Partial<Record<string, string>>): Record<string, string | u
 const wOf = (over: Partial<Windows>): Windows => ({ ...WINDOW_DEFAULTS, echoMode: 'enforce', ...over }) as Windows;
 
 // ───────────────────────── ③ 窗口单一真源 ─────────────────────────
-console.log('\n[1] 出厂默认值必须自己过得了四条不变量');
+console.log('\n[1] 出厂默认值必须自己过得了五条不变量');
 {
   const w = readWindows(envOf({}));
   ok('默认值无违反项', checkInvariants(w).length === 0, JSON.stringify(checkInvariants(w)));
   ok('assertWindows 不抛', (() => { try { assertWindows(envOf({})); return true; } catch { return false; } })());
-  ok('factoryEnvLines 下发 8 键', factoryEnvLines().length === 8, `实际 ${factoryEnvLines().length}`);
+  ok('factoryEnvLines 下发 9 键（含 CTI_TURN_STALE_MS）', factoryEnvLines().length === 9, `实际 ${factoryEnvLines().length}`);
   ok('下发键都能被读回（无孤儿键）', factoryEnvLines().every((l) => {
     const [k, v] = l.split('=');
     return readWindows(envOf({ [k]: v, CTI_ECHO_MODE: 'enforce' })) !== null;
@@ -63,8 +63,18 @@ console.log('\n[5] 破坏 W4：等补文本 > 图片磁盘保留 → 必须点�
   ok('W4 在 image=0 时豁免', !off.some((b) => b.startsWith('W4')), JSON.stringify(off));
 }
 
+console.log('\n[5b] 破坏 W5（票 T-0021）：在途信任期 < 待回执存活 → 必须点名');
+{
+  // 待回执还活着 = 这条派活仍在等回复；信任期更短就会在这时候判僵尸并放行重启 = 亲手打断别家的活
+  const bad = checkInvariants(wOf({ turnStaleMs: 10 * 60_000, receiptPendingMs: 60 * 60_000 }));
+  ok('W5 命中', bad.some((b) => b.startsWith('W5')), JSON.stringify(bad));
+  const eq = checkInvariants(wOf({ turnStaleMs: 60 * 60_000, receiptPendingMs: 60 * 60_000 }));
+  ok('W5 相等算合格（≥ 语义）', !eq.some((b) => b.startsWith('W5')), JSON.stringify(eq));
+  ok('出厂 turnStale 覆盖实测最长轮次(70min)', WINDOW_DEFAULTS.turnStaleMs >= 70 * 60_000, `实际 ${WINDOW_DEFAULTS.turnStaleMs / 60000}min`);
+}
+
 console.log('\n[6] 畸形 env 必须当场抛（🔴 绝不静默回落默认值）');
-for (const [key, raw] of [['CTI_ECHO_WINDOW_MS', 'abc'], ['CTI_RECEIPT_PENDING_TTL_MS', '-1'], ['CTI_IMAGE_TTL_MS', '1.5h'], ['CTI_ECHO_MODE', 'ture']]) {
+for (const [key, raw] of [['CTI_ECHO_WINDOW_MS', 'abc'], ['CTI_RECEIPT_PENDING_TTL_MS', '-1'], ['CTI_IMAGE_TTL_MS', '1.5h'], ['CTI_ECHO_MODE', 'ture'], ['CTI_TURN_STALE_MS', '1h']]) {
   let threw = '';
   try { readWindows(envOf({ [key]: raw })); } catch (e) { threw = (e as Error).message; }
   ok(`${key}="${raw}" 被拒`, threw.includes(key) || threw.includes('回声档位'), threw.slice(0, 60));
