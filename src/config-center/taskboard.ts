@@ -52,8 +52,16 @@ export interface TaskRecord {
   rev: number;
   /** 幂等号：同一件事重复提交只算一次（堵重复派活） */
   dedupeKey: string;
-  /** 交付证据（文件/commit/链接），交活回填 */
+  /** 交付证据（文件/commit/链接），交活回填 —— 这里只放 500 字**摘要**（列表/体检口径） */
   evidence: string;
+  /**
+   * 票 T-0025（09-29 老大验收口径「不失忆」）：证据**只追加、不覆盖、不静默砍尾**的全文轨。
+   * 旧口径每次回填把上一条 evidence 整个盖掉，且第 501 个字起**无声丢弃** —— 09-29 一晚我自己
+   * 中两次（540 字与 517 字各被砍掉尾巴，指针那句直接没了），codex 交 T-0022 也被迫自砍到 500。
+   * 摘要仍留 evidence（UI 与 audit 不用改），全文进这里：列表与更新返回里剥掉，
+   * 只在 GET /api/tasks/<id> 详情口下发，防 2000 条 × 轨迹撑爆载荷。
+   */
+  evidenceTrail?: { at: string; by: string; text: string }[];
   /** 状态倒退次数与原因 */
   reopens: { at: string; by: string; from: string; to: string; why: string }[];
   createdAt: string;
@@ -161,10 +169,30 @@ export interface BoardResult {
   stale?: { id: string; title: string; owner: string; hours: number }[];
   noEvidence?: { id: string; title: string; owner: string }[];
   reopened?: { id: string; title: string; count: number; last: TaskRecord['reopens'][number] }[];
+  /**
+   * 票 T-0025：写成功了但有代价（证据超摘要上限被折进全文轨、或超全文上限尾部真的丢弃），
+   * **必须回给调用方看**，不再像以前那样静默砍完还回 ok:true。
+   */
+  warn?: string;
+  /** 更新返回里带上全文轨条数（正文不下发，取详情口），让调用方知道"东西都在" */
+  evidenceTrailCount?: number;
 }
 
 const now = () => new Date().toISOString();
 const clampText = (s: unknown, n: number) => String(s ?? '').replace(/\r/g, '').trim().slice(0, n);
+
+// ── 票 T-0025：证据双轨（摘要进列表，全文进轨迹，超限必出声） ──
+const EVIDENCE_HEAD_CAP = 500;
+const EVIDENCE_FULL_CAP = 2000;
+const EVIDENCE_TRAIL_KEEP = 10;
+
+/** 列表/更新返回里剥掉全文轨（只在详情口给），避免把载荷撑爆 */
+function withoutTrail(t: TaskRecord): TaskRecord {
+  if (!t.evidenceTrail || t.evidenceTrail.length === 0) return t;
+  const c: TaskRecord = { ...t };
+  delete c.evidenceTrail;
+  return c;
+}
 
 function find(b: TaskBoard, id: string): TaskRecord | undefined {
   return b.tasks.find((t) => t.id === id);
@@ -299,16 +327,48 @@ export function updateTask(id: string, input: UpdateInput): BoardResult {
     const intent = clampText(input.intent, 1000); if (intent) { changed.push('改意图'); t.intent = intent; }
     const owner = clampText(input.owner, 40); if (owner) { changed.push(`换人→${owner}`); t.owner = owner; }
     const shard = clampText(input.shard, 80).toLowerCase(); if (shard) { changed.push(`换地盘→${shard}`); t.shard = shard; }
-    const ev = clampText(input.evidence, 500); if (ev) { changed.push('回填证据'); t.evidence = ev; }
+    // [票 T-0025 09-29] 证据不再「覆盖上一条 + 第 501 字起静默丢弃」。
+    // 摘要（≤500）留在 evidence 供列表/体检用；全文进 evidenceTrail，**只追加**。
+    // 超限时在返回体明说 warn —— 以前 ok:true 却悄悄砍尾，交活的人以为自己写全了（09-29 我自己中两次）。
+    let evWarn = '';
+    const evRaw = typeof input.evidence === 'string' ? input.evidence.replace(/\r/g, '').trim() : '';
+    if (evRaw) {
+      const head = evRaw.slice(0, EVIDENCE_HEAD_CAP);
+      const full = evRaw.slice(0, EVIDENCE_FULL_CAP);
+      const trail = t.evidenceTrail ?? [];
+      const sameAsLast = trail.length > 0 && trail[trail.length - 1].text === full;
+      if (!sameAsLast) t.evidenceTrail = [...trail, { at: now(), by, text: full }].slice(-EVIDENCE_TRAIL_KEEP);
+      t.evidence = head;
+      changed.push(sameAsLast ? '回填证据(与轨迹末条同文，未重复记)' : `回填证据(全文轨第 ${(t.evidenceTrail ?? []).length} 条)`);
+      const n = (t.evidenceTrail ?? []).length;
+      if (evRaw.length > EVIDENCE_FULL_CAP) {
+        evWarn = `evidence 原文 ${evRaw.length} 字，超全文上限 ${EVIDENCE_FULL_CAP} 字的尾部 ${evRaw.length - EVIDENCE_FULL_CAP} 字**已丢弃** —— 请改写「结论+指针」，成品全文放产物文件（本次截尾原因已记入返回，不再静默）。`;
+      } else if (evRaw.length > EVIDENCE_HEAD_CAP) {
+        evWarn = `evidence 原文 ${evRaw.length} 字：列表摘要只留前 ${EVIDENCE_HEAD_CAP} 字，但**全文 ${full.length} 字已存进全文轨第 ${n} 条，一个字没丢**，取 GET /api/tasks/${t.id} 可看。`;
+      }
+    }
     if (next === 'done' && !t.evidence && !input.evidence) {
       return { ok: false, error: '交活被拒：标 done 必须带 evidence（证据：文件/commit/链接），空口说完成不算完' };
     }
-    if (!changed.length && !input.note) return { ok: true, globalRev: b.globalRev, task: t };
+    // 同文重填 = 没有新信息：不推 rev（免得白白让别人手里的 baseRev 失效）、不落历史噪音，
+    // 但照旧回 ok + warn，让调用方知道自己那次没写坏。混合了别的字段（如同时改状态）则照常走。
+    const onlySameEvidence = changed.length === 1 && changed[0].startsWith('回填证据(与轨迹末条同文') && !input.note;
+    if ((!changed.length && !input.note) || onlySameEvidence) {
+      return {
+        ok: true, globalRev: b.globalRev, task: withoutTrail(t),
+        ...(evWarn ? { warn: evWarn } : {}),
+        ...((t.evidenceTrail?.length ?? 0) > 0 ? { evidenceTrailCount: t.evidenceTrail!.length } : {}),
+      };
+    }
 
     t.rev += 1;
     touch(b, t, { by, action: 'update', from: undefined, to: next, note: `${changed.join('、')}${input.note ? ` | ${clampText(input.note, 300)}` : ''}${input.why ? ` | 倒退原因：${clampText(input.why, 200)}` : ''}` });
     saveBoard(b);
-    return { ok: true, globalRev: b.globalRev, task: t };
+    return {
+      ok: true, globalRev: b.globalRev, task: withoutTrail(t),
+      ...(evWarn ? { warn: evWarn } : {}),
+      ...((t.evidenceTrail?.length ?? 0) > 0 ? { evidenceTrailCount: t.evidenceTrail!.length } : {}),
+    };
   });
 }
 
@@ -329,7 +389,8 @@ export function listTasks(q: { status?: string; owner?: string; shard?: string; 
   if (q.owner) tasks = tasks.filter((t) => t.owner === q.owner);
   if (q.shard) { const sh = q.shard.toLowerCase(); tasks = tasks.filter((t) => t.shard === sh); }
   const limit = Math.max(1, Math.min(Number(q.limit) || 200, MAX_TASKS));
-  return { ok: true, globalRev: b.globalRev, tasks: tasks.slice(0, limit) };
+  // 票 T-0025：列表不下发全文轨（详情口 GET /api/tasks/<id> 才给），2000 条也不撑爆载荷
+  return { ok: true, globalRev: b.globalRev, tasks: tasks.slice(0, limit).map(withoutTrail) };
 }
 
 /** 体检：谁抢同一块地盘、谁卡太久、谁标完成没证据 */
