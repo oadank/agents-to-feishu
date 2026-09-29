@@ -184,3 +184,34 @@ export function resetTurnLedger(): void {
   beatTimers.clear();
   inflight.clear();
 }
+
+/** 日志面取证结果 */
+export interface RtLogPlan {
+  /** 最终该用的 rt.log 路径 */
+  file: string;
+  /** kept=配置本来就对 / created=没配按 bot 名兜底 / cross-wired=配成别家的文件，已纠回本家 */
+  action: 'kept' | 'created' | 'cross-wired';
+  /** 原始配置值（created 时为空串），给告警文案用 */
+  raw: string;
+}
+
+/**
+ * 🔴 票 T-0024（缺口③，2026-09-29 dsh）：CTI_RT_LOG 必须落在**本家同名**的文件上。
+ * 现网实测抓到真案例：workbuddy 的这个键手工塞成了 `logs\mimo-rt.log` —— 两家实时证据互写同一个文件，
+ * 于是 workbuddy 自己没有 rt.log（观测面全瞎），而 mimo 的"最后接活时刻"里混着 workbuddy 写的行。
+ * 09-20 终册（openmem `9203d662`）当时就记了"该键是否已正位未复核"，一直没人复核，一等 9 天。
+ *
+ * 为什么必须由代码兜：这键**没有下发路径**（配置中心 render.ts 不生成它，全靠 nssm 注册表手工逐个设），
+ * 手工就会写错，而写错是**静默**的——旧代码只兜"没设"（票 claude-2），设错照写不误。
+ * 规则：只改文件名、不改目录（目录若本来就指错别处，由调用方的日志告警提示人工正位），
+ * 保证任何一家都不止 out.log 一只眼，也让台账路径推导（turnLogFile 用它的 dirname）不再漂到别家目录去。
+ */
+export function resolveOwnRtLog(bot: string, raw: string | undefined, fallbackDir: string): RtLogPlan {
+  const wantBase = `${bot}-rt.log`;
+  const v = (raw || '').trim();
+  if (!v) return { file: path.join(fallbackDir, wantBase), action: 'created', raw: '' };
+  if (path.basename(v) === wantBase) return { file: v, action: 'kept', raw: v };
+  const dir = path.dirname(v);
+  // dirname 对 "mimo-rt.log"（无目录段）会返回 "."：这种裸文件名一律落回 fallbackDir，别把台账推导带歪
+  return { file: path.join(dir && dir !== '.' ? dir : fallbackDir, wantBase), action: 'cross-wired', raw: v };
+}

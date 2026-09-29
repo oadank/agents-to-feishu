@@ -36,7 +36,7 @@ import { sendAsUserToBot } from './tools/lark-tools.js';
 import { registerPending, consumePending, manualReceiptRecent, peekPending } from './bridge/auto-receipt.js';
 import { assertWindows, windows, type Windows } from './bridge/windows.js';
 import { classifyEcho, newEchoLedger, prune as pruneEchoLedger, echoStats, markWake, isAckOnly, normalizeBody } from './bridge/echo-guard.js';
-import { markTurn, clearTurn, readTurnFile, turnLogFile } from './bridge/turn-ledger.js';
+import { markTurn, clearTurn, readTurnFile, turnLogFile, resolveOwnRtLog } from './bridge/turn-ledger.js';
 
 // ── 票 T-0019③：窗口单一真源（src/bridge/windows.ts）──
 // main() 里在 config.env 灌回 process.env **之后**才校验，此处先留空由 windows() 兜底。
@@ -248,12 +248,24 @@ async function main(): Promise<void> {
   // gemini/zcode/deeptutor-bot 有、claude/codex/hermes/deeptutor 没有（openclaw 靠手工塞进 config.env）
   // ⇒ claude-rt.log 自 08-29 起零写入。别指望手工了：上面两级（nssm 注册表 → config.<bot>.env）注入
   // 完之后仍空，就按 bot 名兜底 <repo>/logs/<bot>-rt.log；已有值一律不覆盖，dsh/reasonix 等现状不变。
-  if (!process.env.CTI_RT_LOG) {
+  {
     // index.ts 位于 src/ 直下：src/../logs = <repo>/logs（别学 patch-apply 跳两级，那文件在 src/config-center/）
     const logsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'logs');
-    try { fs.mkdirSync(logsDir, { recursive: true }); } catch { /* 建不出目录就算了，rtLog 内部自带静默 */ }
-    process.env.CTI_RT_LOG = path.join(logsDir, `${botName}-rt.log`);
-    console.log(`[agents-to-feishu] CTI_RT_LOG 未配置，按票 claude-2 兜底: ${process.env.CTI_RT_LOG}`);
+    const plan = resolveOwnRtLog(botName, process.env.CTI_RT_LOG, logsDir);
+    if (plan.action !== 'kept') {
+      try { fs.mkdirSync(path.dirname(plan.file), { recursive: true }); } catch { /* 建不出目录就算了，rtLog 内部自带静默 */ }
+    }
+    if (plan.action === 'created') {
+      console.log(`[agents-to-feishu] CTI_RT_LOG 未配置，按票 claude-2 兜底: ${plan.file}`);
+    } else if (plan.action === 'cross-wired') {
+      // 🔴 这条告警必须在 out.log 里也看得见（此刻本家 rt.log 可能还不存在）：
+      // 现网实测 workbuddy 的键被手工塞成 logs\mimo-rt.log（09-20 终册 9203d662 记的"未复核"，一等 9 天），
+      // 后果是它自己没有实时证据面，而 mimo 的证据里混进别人写的行 —— 判活/取证两头都脏。
+      console.log(`[agents-to-feishu] ⚠️⚠️ CTI_RT_LOG 串账已纠正：本家 bot=${botName}，配置写的却是 "${plan.raw}"` +
+        ` → 改用 ${plan.file}（T-0024 缺口③）。这键没有下发路径、全靠 nssm 注册表手工设，请顺手把真源改正位；` +
+        `代码纠正只是兜底，不是替手工配置擦屁股。`);
+    }
+    process.env.CTI_RT_LOG = plan.file;
   }
   // 🔴 票 T-0019③（2026-09-29 dsh）：窗口启动闸门。位置有讲究——必须在 config.env 灌回 process.env
   // 之后（否则读不到配置中心下发的值）、RT_LOG 定位之后（否则报错进不了日志）。

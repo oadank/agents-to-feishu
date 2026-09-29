@@ -11,7 +11,7 @@ import path from 'node:path';
 import os from 'node:os';
 import {
   markTurn, clearTurn, inflightTurns, readTurnFile, judgeTurns, turnLogFile,
-  setTurnBotName, resetTurnLedger, BEAT_FRESH_MS,
+  setTurnBotName, resetTurnLedger, resolveOwnRtLog, BEAT_FRESH_MS,
 } from '../src/bridge/turn-ledger.js';
 
 let pass = 0; let fail = 0;
@@ -102,6 +102,38 @@ console.log('\n[5] 读盘的容错（台账坏掉绝不能拖垮 precheck / 桥�
   fs.unlinkSync(file);
   ok('文件不存在 → null', readTurnFile(rtLog, 'ttest') === null);
   ok('没设 CTI_RT_LOG 时路径回落 cwd/logs（不会算出 undefined 路径）', turnLogFile(undefined, 'zz').endsWith(path.join('logs', 'zz-turn.json')) || turnLogFile(undefined, 'zz').includes('zz-turn.json'));
+}
+
+// [7] CTI_RT_LOG 串账守卫（票 T-0024 缺口③ · 现网实测 workbuddy 的键指到 mimo-rt.log）
+{
+  const FB = path.join(tmp, 'logs');
+  const own = path.join(FB, 'workbuddy-rt.log');
+  const other = path.join(FB, 'mimo-rt.log');
+
+  const kept = resolveOwnRtLog('workbuddy', own, FB);
+  ok('本来就对 → kept，路径一字不改', kept.action === 'kept' && kept.file === own, JSON.stringify(kept));
+
+  const xw = resolveOwnRtLog('workbuddy', other, FB);
+  ok('指到别家 → cross-wired（这是 09-29 抓到的真案例）', xw.action === 'cross-wired', JSON.stringify(xw));
+  ok('纠正后落在本家同名文件', path.basename(xw.file) === 'workbuddy-rt.log', xw.file);
+  ok('纠正只改文件名、不搬目录（还在原目录里）', path.dirname(xw.file) === FB, xw.file);
+  ok('原始脏值被留着（告警文案要说清配成了什么）', xw.raw === other);
+
+  const cre = resolveOwnRtLog('workbuddy', '', FB);
+  ok('没配 → created 兜底本家名（票 claude-2 的原行为不变）', cre.action === 'created' && cre.file === own, JSON.stringify(cre));
+  ok('undefined 也走 created（不把 undefined 拼进路径）', resolveOwnRtLog('workbuddy', undefined, FB).file === own);
+
+  const bare = resolveOwnRtLog('workbuddy', 'mimo-rt.log', FB);
+  ok('裸文件名（无目录段）不落在 "." 上，回退到 logs 目录', bare.action === 'cross-wired' && path.dirname(bare.file) === FB, bare.file);
+
+  const subdir = resolveOwnRtLog('workbuddy', path.join(FB, '2026', 'workbuddy-rt.log'), FB);
+  ok('本家名但换了目录 → 仍 kept（守卫只管串账，不强行搬家）', subdir.action === 'kept', JSON.stringify(subdir));
+
+  const noSelf = resolveOwnRtLog('mimo', other, FB);
+  ok('反过来 mimo 配着 mimo-rt.log = kept（不误伤被串的那家）', noSelf.action === 'kept');
+
+  // 台账路径推导必须跟着纠正后的值走：串账时如果 turn.json 也漂进别家目录就全瞎了
+  ok('纠正后的路径仍推得出本家 turn.json', turnLogFile(xw.file, 'workbuddy').endsWith(path.join('logs', 'workbuddy-turn.json')), turnLogFile(xw.file, 'workbuddy'));
 }
 
 resetTurnLedger();
