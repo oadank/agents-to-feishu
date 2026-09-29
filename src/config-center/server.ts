@@ -1077,7 +1077,10 @@ export function createConfigServer(opts: ConfigServerOptions) {
           try {
             const ap = await applyAgent(id);
             // [2026-09-26 绿灯改诚实] apply 失败别再返 200 骗人（前端只看顶层 ok 就弹"已保存"）；失败给 500 + apply 明细
-            return json(res, ap.ok ? 200 : 500, { ...store.agents[idx], apply: ap });
+            // [T-0022] blocked = store 这次确实保存成功了，只是那一家在途、不能此刻重启生效。
+            // 若照旧返 500，前端会显示"保存失败"（实际已存），老大以为啥也没发生而重试 = 新漂移。
+            // 明细留在 apply.blocked / apply.error（人话），由前端随后的 /apply 调用拿 409 走确认与强推。
+            return json(res, (ap.ok || ap.blocked) ? 200 : 500, { ...store.agents[idx], apply: ap });
           } catch (e) {
             return json(res, 500, { error: `保存成功但 apply 失败: ${e instanceof Error ? e.message : String(e)}` });
           }
