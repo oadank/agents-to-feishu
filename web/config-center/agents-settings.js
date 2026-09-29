@@ -120,6 +120,11 @@
         setSaving(false);
         if (ap.ok) {
           props.onSaved();
+        } else if (ap.status === 409 && ap.data && ap.data.blocked) {
+          // 票 T-0022：配置已存进 store，但那一家锅里还炖着活 ⇒ 未写盘、未重启。
+          // 必须说清"现在是什么状态、下一步怎么办"，否则老大以为改动已经生效（实际没有）。
+          setErr("⚠️ 已保存，但被重启门禁拦下、**配置尚未生效**（未写盘未重启）：" + (ap.data.error || "")
+            + " —— 等那家交付完再点「应用」，或在列表里点「重启服务」并按提示强行打断。");
         } else {
           setErr("已保存，但应用失败：" + (ap.data?.error || "未知错误") + "（可稍后手动点「应用」重试）");
         }
@@ -315,17 +320,32 @@
       const m = p && p.models && p.models.find((x) => x.id === a.modelId);
       return m ? (m.label || m.id) : a.modelId;
     }
-    async function applyAgent(id) {
+    async function applyAgent(id, force) {
       setApplying(id);
-      const r = await api("/api/agents/" + encodeURIComponent(id) + "/apply", "POST");
+      // 票 T-0022：?force=1 = 人已确认可以打断在途轮次；不带则后端 409 拦下（此时未写盘、未重启）
+      const r = await api("/api/agents/" + encodeURIComponent(id) + "/apply" + (force ? "?force=1" : ""), "POST");
       setApplying("");
+      if (r.status === 409 && r.data && r.data.blocked) {
+        // 被重启门禁拦下 = 锅里还炖着活。摊开原因由人决定打不打断，绝不静默替人决定，
+        // 也绝不让老大只看到"应用失败"四个字（他不知道等一会儿再点、还是现在就能强推）。
+        if (!window.confirm((r.data.error || "重启门禁拦下") + "\n\n【现在点确定 = 强行打断那一轮并立刻应用】\n【点取消 = 什么都没改（未写盘未重启），等它交付完再点「应用」即可】")) return;
+        return applyAgent(id, true);
+      }
       if (!r.ok) setErr("应用失败: " + (r.data?.error || ""));
+      else setErr(null);
     }
-    async function restartAgent(id) {
+    async function restartAgent(id, force) {
       setRestarting(id);
-      const r = await api("/api/agents/" + encodeURIComponent(id) + "/restart", "POST");
+      // 票 T-0022：?force=1 = 人已确认可以打断在途轮次；不带则后端 409 拦下
+      const r = await api("/api/agents/" + encodeURIComponent(id) + "/restart" + (force ? "?force=1" : ""), "POST");
       setRestarting("");
+      if (r.status === 409 && r.data && r.data.blocked) {
+        // 门禁拦下：把「这家正在炖什么」原样摊开给人看，由人决定打不打断（不替人静默决定）
+        if (!window.confirm((r.data.error || "重启门禁拦下") + "\n\n确定要强行打断并重启吗？\n点「取消」= 先等它交付完。")) return;
+        return restartAgent(id, true);
+      }
       if (!r.ok) setErr("重启失败: " + (r.data?.error || ""));
+      else setErr(null);
     }
     async function deleteAgent(a) {
       if (!window.confirm("确认删除 Agent " + (a.displayName || a.id) + "?")) return;

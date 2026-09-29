@@ -211,10 +211,11 @@ const app = createApp({
       ElMessage.success('已删除');
       reloadAll();
     }
-    async function applyAgent(id) {
+    async function applyAgent(id, force) {
       applying.value = id;
+      // 票 T-0022：?force=1 = 人已确认可以打断在途轮次；不带则后端 409 拦下（未写盘、未重启）
       try {
-        const r = await api('POST', `/api/agents/${encodeURIComponent(id)}/apply`);
+        const r = await api('POST', `/api/agents/${encodeURIComponent(id)}/apply${force ? '?force=1' : ''}`);
         if (r.ok) {
           ElMessage.success(`Agent ${id} 已应用${r.cordisYmlPath ? '（配置已写入）' : ''}`);
           refreshRuntime(id);
@@ -222,16 +223,27 @@ const app = createApp({
           ElMessage.error('应用失败: ' + (r.error || ''));
         }
       } catch (e) {
+        if (e.status === 409) {
+          // 重启门禁拦下：锅里还炖着活。摊开原因由人决定打不打断，不静默替人决定
+          try {
+            await ElMessageBox.confirm(String(e.message) + '\n\n【确定 = 强行打断那一轮并立刻应用】\n【取消 = 什么都没改，等它交付完再点「应用」】', '⛔ 重启门禁：这家正在干活', {
+              type: 'warning', confirmButtonText: '强行打断并应用', cancelButtonText: '先等它交付',
+            });
+          } catch { return; }
+          return applyAgent(id, true);
+        }
         ElMessage.error('应用失败: ' + e.message);
       } finally {
         applying.value = '';
       }
     }
 
-    async function restartAgent(id) {
+    async function restartAgent(id, force) {
       restarting.value = id;
+      // 票 T-0022：force=1 才允许打断在途轮次（后端 409 会带人话原因）
+      const qs = force ? '?force=1' : '';
       try {
-        const r = await api('POST', `/api/agents/${encodeURIComponent(id)}/restart`);
+        const r = await api('POST', `/api/agents/${encodeURIComponent(id)}/restart${qs}`);
         if (r.ok) {
           ElMessage.success(r.skipped ? `Agent ${id} 重启已跳过（测试模式）` : `Agent ${id} 服务已重启`);
           refreshRuntime(id);
@@ -239,6 +251,15 @@ const app = createApp({
           ElMessage.error('重启失败: ' + (r.error || ''));
         }
       } catch (e) {
+        if (e.status === 409) {
+          // 重启门禁拦下：锅里还炖着活。把原因摊开，由人决定是否强行打断（不静默替人决定）。
+          try {
+            await ElMessageBox.confirm(String(e.message), '⛔ 重启门禁：这家正在干活', {
+              type: 'warning', confirmButtonText: '确认打断并强行重启', cancelButtonText: '先等它交付',
+            });
+          } catch { return; }
+          return restartAgent(id, true);
+        }
         ElMessage.error('重启失败: ' + e.message);
       } finally {
         restarting.value = '';

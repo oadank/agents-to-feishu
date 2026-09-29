@@ -40,6 +40,9 @@ import { checkSrcSyntax, formatSyntaxErrors } from './syntax-check.js';
 import { localOptimize, localDe, resolveDecision, askSystemOne } from '../bridge/local-engines.js';
 import { startAgent as pmStart, stopAgent as pmStop, restartAgent as pmRestart, statusAll as pmStatus } from './process-manager.js';
 import { syncDeepTutorModel, syncDeepTutorMcp } from './sync-deeptutor.js';
+// 重启门禁（票 T-0022）：让「重启」这个动作自己先看锅里炖着没。判据一律复用 T-0021 的
+// precheck-turns + turn-ledger（见 restart-gate.ts），配置中心侧不写第二套五态机、不写第二套阈值。
+import { gateAgent, turnStatus, humanReason, isBlockingState } from './restart-gate.js';
 import { scanChatsMap } from './chats-map-scan.js';
 import { buildAgentRuntimeState, type AgentRuntimeState } from './runtime.js';
 // 团队任务账（2026-09-20）：一本账 + 版本号 + 状态机，见 taskboard.ts。独立落盘，不碰 config-store。
@@ -153,11 +156,27 @@ export function createConfigServer(opts: ConfigServerOptions) {
     return idx >= 0 ? decodeURIComponent(pa[idx] ?? '') : '';
   }
 
-  /** 应用一个 agent：渲染写盘 + 重启进程 */
-  async function applyAgent(agentId: string): Promise<{ ok: boolean; configEnvPath?: string; cordisYmlPath?: string; error?: string }> {
+  /** 应用一个 agent：渲染写盘 + 重启进程（重启前过在途门禁，票 T-0022） */
+  async function applyAgent(
+    agentId: string, opts: { force?: boolean } = {},
+  ): Promise<{ ok: boolean; configEnvPath?: string; cordisYmlPath?: string; error?: string; blocked?: boolean; turn?: unknown }> {
     const store = load();
     const agent = store.agents.find((a) => a.id === agentId);
     if (!agent) return { ok: false, error: `agent ${agentId} 不存在` };
+    // 重启门禁（票 T-0022）：apply 末尾必然重启该家进程 ⇒ 必须判在**动盘之前**。
+    // 写完盘才发现不能重启 = 留下「store 已改 / env 已写 / 进程还是旧的」三不像，
+    // 与语法闸门「不过就整体拒绝」同一口径：宁可这次不下发，也不制造静默漂移。
+    // blocked ≠ 失败：配置改动是合法的，只是不能现在把人家的活打断。
+    if (restartOnApply) {
+      const gate = await gateAgent(agentId, !!opts.force);
+      if (gate.block) {
+        log(`apply ${agentId}: 被重启门禁拦下（state=${gate.status.state}）——未写盘、未重启`);
+        return { ok: false, blocked: true, error: gate.reason, turn: gate.status };
+      }
+      if (opts.force && gate.status.state !== 'idle') {
+        log(`apply ${agentId}: force=1 强行放行（state=${gate.status.state}），现场：${gate.reason}`);
+      }
+    }
     // [根治 C 2026-09-15] 兜底：POST /api/agents/:id/apply 与 /api/agents-by-runtime/:runtime
     // 不经过 PUT 就直达这里（后者还会 for 循环逐个重启，最多连崩 12 个 bot），所以闸门必须
     // 也堵在 applyAgent 上，光堵 PUT 不够。
@@ -218,12 +237,12 @@ export function createConfigServer(opts: ConfigServerOptions) {
    * 技能/注入这类全局配置改完要让全部 bot 生效；MCP/新建 bot/删 provider 只影响相关 bot。
    * 串行逐家重启，单家失败不阻塞其余，汇总 applied/errors。参照 agents-by-runtime 的批量循环。
    */
-  async function applyAgents(ids: string[]): Promise<{ ok: boolean; applied: string[]; errors: string[] }> {
+  async function applyAgents(ids: string[], opts: { force?: boolean } = {}): Promise<{ ok: boolean; applied: string[]; errors: string[] }> {
     const applied: string[] = [];
     const errors: string[] = [];
     for (const id of ids) {
       try {
-        const r = await applyAgent(id);
+        const r = await applyAgent(id, opts);
         if (r.ok) applied.push(id); else errors.push(`${id}: ${r.error || '失败'}`);
       } catch (e) {
         errors.push(`${id}: ${e instanceof Error ? e.message : String(e)}`);
@@ -1071,11 +1090,33 @@ export function createConfigServer(opts: ConfigServerOptions) {
         }
       }
 
+      // GET /api/turn-status?bot=<id> —— 只读：某家（不传 bot = 全部）现在锅里炖着什么（票 T-0022）
+      // 判据一律复用 precheck-turns + readTurnFile/judgeTurns，本路由零副作用、零第二套阈值。
+      if (p === '/api/turn-status' && method === 'GET') {
+        const bot = String(u.searchParams.get('bot') || '').trim();
+        if (bot) {
+          const st = await turnStatus(bot);
+          return json(res, 200, { ok: true, ...st, reason: humanReason(st), blocking: isBlockingState(st.state) });
+        }
+        const store = load();
+        const all = [];
+        for (const a of store.agents) {
+          const st = await turnStatus(a.id);
+          all.push({ bot: st.bot, agentId: st.agentId, state: st.state, via: st.via, turns: st.turns.length, detail: st.detail });
+        }
+        return json(res, 200, {
+          ok: true, checkedAt: Date.now(), count: all.length,
+          blocked: all.filter((x) => isBlockingState(x.state)).map((x) => x.bot), rows: all,
+        });
+      }
+
       // POST /api/agents/:id/apply
       if (routeMatch(p, '/api/agents/:id/apply') && method === 'POST') {
         const id = param(p, '/api/agents/:id/apply', 'id');
-        const r = await applyAgent(id);
-        return json(res, r.ok ? 200 : 400, r);
+        // force=1 = 人已确认可以打断在途轮次（门禁放行并记留痕）
+        const r = await applyAgent(id, { force: u.searchParams.get('force') === '1' });
+        // blocked = 被重启门禁拦下（锅里还炖着）→ 409：语义是「现在不行」，不是「你做错了」
+        return json(res, r.ok ? 200 : r.blocked ? 409 : 400, r);
       }
 
       // POST /api/agents-by-runtime/:runtime —— 穿透应用：对使用该 runtime 的所有 agent 重新 apply（重生成 env + 重启进程）
@@ -1095,6 +1136,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
       }
 
       // POST /api/agents/:id/restart —— 只重启该 agent 的服务（nssm 短名），不重新生成配置
+      // 重启门禁（票 T-0022）：锅里还炖着东西 → 默认 409 拒绝，带 force=1 才放行并记留痕。
       if (routeMatch(p, '/api/agents/:id/restart') && method === 'POST') {
         const id = param(p, '/api/agents/:id/restart', 'id');
         const store = load();
@@ -1103,9 +1145,17 @@ export function createConfigServer(opts: ConfigServerOptions) {
         if (!restartOnApply) {
           return json(res, 200, { ok: true, skipped: true, message: 'restartOnApply=false（测试模式），跳过重启' });
         }
+        const gate = await gateAgent(id, u.searchParams.get('force') === '1');
+        if (gate.block) {
+          log(`restart ${id}: 被门禁拦下（state=${gate.status.state}）：${gate.reason}`);
+          return json(res, 409, { ok: false, blocked: true, error: gate.reason, turn: gate.status });
+        }
+        if (gate.status.state !== 'idle') {
+          log(`restart ${id}: force=1 强行放行（state=${gate.status.state}），现场：${gate.reason}`);
+        }
         try {
           const mode = await pmRestart(id);
-          return json(res, 200, { ok: true, service: id, mode });
+          return json(res, 200, { ok: true, service: id, mode, turn: gate.status.state });
         } catch (e) {
           return json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
         }
