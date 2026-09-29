@@ -46,6 +46,8 @@ import { buildAgentRuntimeState, type AgentRuntimeState } from './runtime.js';
 import { createTask, claimTask, updateTask, listTasks, getTask, boardSummary } from './taskboard.js';
 // 派活闸门计数与档位（桥侧强制执行，中心只管看总账和切档）
 import { readAllGateStats, currentMode, type GateMode } from '../bridge/task-gate.js';
+// 票 T-0019（2026-09-29 dsh）：桥接层窗口单一真源 + 回声档（运行时页可见可改；桥启动即自查不变量）
+import { factoryEnvLines, WINDOW_LABELS } from '../bridge/windows.js';
 import { lookImage } from '../vision/look.js';
 import {
   synthesize, synthesizeVoiceClone, AUDIO8_DIR, AUDIO8_VOICES_DIR, AUDIO8_PY, type TtsConfig,
@@ -388,6 +390,18 @@ export function createConfigServer(opts: ConfigServerOptions) {
       'CTI_DEEPTUTOR_TOKEN': '',           // 多用户鉴权部署的 Bearer Token（本机免鉴权留空）
     },
   };
+  /**
+   * 票 T-0019（2026-09-29 dsh）：桥接层「窗口单一真源」8 个键的出厂模板。
+   * 它们不是某个 runtime 的参数，是**桥进程自己**的存活/判重/清理窗口与回声档 ⇒ 并入每个 runtime
+   * 的模板，运行时页统一可见可改。值来自 src/bridge/windows.ts（单一真源），此处只搬运不另写数字，
+   * 避免"页面上一个数、代码里另一个数"。桥启动时会按 W1~W4 自查，不合格直接拒绝起进程。
+   */
+  const BRIDGE_WINDOW_TPL: Record<string, string> = Object.fromEntries(
+    factoryEnvLines().map((l) => {
+      const i = l.indexOf('=');
+      return [l.slice(0, i), l.slice(i + 1)] as [string, string];
+    }),
+  );
   /** 开关型 env（网页渲染成打勾开关；值非空 = 勾选）。其余 envTpl 键渲染成文本输入。 */
   const ENV_FLAG_KEYS: Record<string, string[]> = {
     claude: ['ANTHROPIC_PERMISSION_MODE', 'CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT'],
@@ -426,6 +440,8 @@ export function createConfigServer(opts: ConfigServerOptions) {
     'CTI_DSH_HARNESS_PATH': 'DeepSeek Harness 根目录',
     'CTI_DEEPTUTOR_TOKEN': 'Bearer Token（多用户鉴权部署才填）',
   };
+  // 票 T-0019：桥接窗口 8 键的中文说明由 windows.ts 单处维护，这里并进来（不在两处各写一遍）
+  for (const [k, v] of Object.entries(WINDOW_LABELS)) ENV_LABELS[k] = v;
 
   /** 读取 config-open.json 里用户配置的 runtime 启动环境覆盖 { runtime: { ENV: value } } */
   function readRuntimeEnvOverrides(): Record<string, Record<string, string>> {
@@ -815,7 +831,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
           const probe = await probeRuntimeCli(rt, configured || undefined);
           const detected = probe.detected, resolvedPath = probe.resolvedPath;
           // 启动 env：默认模板 + 用户覆盖合并（用户优先；空字符串 = 剔除该键 → 不返回它）
-          const tpl = ENV_TPL[rt.runtime] || {};
+          const tpl = { ...(ENV_TPL[rt.runtime] || {}), ...BRIDGE_WINDOW_TPL };
           const over = envMap[rt.runtime] || {};
           const env: Record<string, string> = {};
           for (const [k, v] of Object.entries(tpl)) { if (v !== '') env[k] = v; }

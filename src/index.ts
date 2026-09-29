@@ -33,12 +33,25 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sendAsUserToBot } from './tools/lark-tools.js';
-import { registerPending, consumePending, manualReceiptRecent } from './bridge/auto-receipt.js';
+import { registerPending, consumePending, manualReceiptRecent, peekPending } from './bridge/auto-receipt.js';
+import { assertWindows, windows, type Windows } from './bridge/windows.js';
+import { classifyEcho, newEchoLedger, prune as pruneEchoLedger, echoStats, markWake, isAckOnly, normalizeBody } from './bridge/echo-guard.js';
+
+// ── 票 T-0019③：窗口单一真源（src/bridge/windows.ts）──
+// main() 里在 config.env 灌回 process.env **之后**才校验，此处先留空由 windows() 兜底。
+let WIN: Windows | null = null;
+function win(): Windows {
+  return WIN ?? windows();
+}
+
+// ── 票 T-0019①：回声账（同内容窗口内二现 = 回声）──
+const echoLedger = newEchoLedger();
+let lastEchoPruneAt = 0;
 
 // ── pending 图片（对齐 agents-to-im：先发图，文本到达后合并）──
 // key = chatId；收到图片先挂号提醒补文本，收到文本时把图片路径合并给 agent（agent 用 look_image 按需求看图）
 const pendingImages = new Map<string, { imagePath: string; messageId: string; ts: number }>();
-const PENDING_IMG_TTL_MS = 10 * 60 * 1000; // 10 分钟未补文本自动过期
+const PENDING_IMG_TTL_MS = () => win().pendingImgMs; // 票 T-0019③：值收口 windows.ts，此处不再写死
 /** 下载中的图片任务（chatId → job）：修复"文字跑在图片下载前面"的竞态，文字先到时等它落盘 */
 const pendingImageJobs = new Map<string, Promise<string | null>>();
 /** 文字侧已决定等待/合并的 chat：图片落盘后跳过"请发送文字需求"提醒（避免答案之后才收到提醒） */
@@ -47,7 +60,7 @@ const pendingImageConsumed = new Set<string>();
 /** 清理过期的 pending 图片 */
 function prunePendingImages(now = Date.now()): void {
   for (const [k, v] of pendingImages) {
-    if (now - v.ts > PENDING_IMG_TTL_MS) pendingImages.delete(k);
+    if (now - v.ts > PENDING_IMG_TTL_MS()) pendingImages.delete(k);
   }
 }
 
@@ -89,14 +102,16 @@ function imageDir(): string {
   // 🔴 老大令 2026-09-19：与工作区同源收图目录（feishu/client.ts downloadResource 同改），%TEMP% 沙箱读不进
   return path.join(process.cwd(), 'inbox', 'feishu-img');
 }
-/** 图片文件保留时长，默认 24 小时（0 = 永不自动清理） */
-const IMAGE_TTL_MS = parseInt(process.env.CTI_IMAGE_TTL_MS || String(24 * 60 * 60 * 1000), 10);
+/** 图片文件保留时长：票 T-0019③ 收口到 windows.ts（CTI_IMAGE_TTL_MS 经配置中心下发，0 = 永不清理）。
+ *  🔴 不再在模块顶层 parseInt(process.env)——那行在 config.env 灌回 process.env **之前**就求值了，
+ *  配置中心改的值根本读不到（本次顺带修掉这个隐性失联）。 */
 
 /**
  * 删除超过 TTL 的收图文件。保留 pendingImages 里正在用的（在途会话不能删）。
  * 调用时机：每次成功下载后顺带清 + 进程内每 30 分钟定时清。
  */
 function pruneImageFiles(): void {
+  const IMAGE_TTL_MS = win().imageMs; // 票 T-0019③：每次清理时现取，配置改动无需重启即生效
   if (!Number.isFinite(IMAGE_TTL_MS) || IMAGE_TTL_MS <= 0) return;
   const dir = imageDir();
   try {
@@ -209,6 +224,14 @@ async function main(): Promise<void> {
     process.env.CTI_RT_LOG = path.join(logsDir, `${botName}-rt.log`);
     console.log(`[agents-to-feishu] CTI_RT_LOG 未配置，按票 claude-2 兜底: ${process.env.CTI_RT_LOG}`);
   }
+  // 🔴 票 T-0019③（2026-09-29 dsh）：窗口启动闸门。位置有讲究——必须在 config.env 灌回 process.env
+  // 之后（否则读不到配置中心下发的值）、RT_LOG 定位之后（否则报错进不了日志）。
+  // 四条不变量任一条不合格就当场抛：nssm 下表现为「该 bot 起不来 + 日志点名是哪条、当前值多少」，
+  // 绝不静默回落默认值继续跑（静默降级是 2026-09-19 配置回写那类事故的同型温床）。
+  WIN = assertWindows();
+  rtLog(`[windows] 启动校验通过：echoMode=${WIN.echoMode} 待回执=${WIN.receiptPendingMs}ms 抑制窗=${WIN.manualReceiptMs}ms ` +
+    `/de卡=${WIN.dePendingMs}ms 等补文=${WIN.pendingImgMs}ms 图片保留=${WIN.imageMs}ms 判重窗=${WIN.echoWindowMs}ms 清扫=${WIN.echoPruneMs}ms`);
+  console.log(`[agents-to-feishu] 窗口表 OK（echoMode=${WIN.echoMode}，已按 W1~W4 自查通过）`);
   // USERPROFILE 兜底：nssm 以 LocalSystem 跑时 os.homedir() 指向 systemprofile
   if (process.env.USERPROFILE === undefined || process.env.USERPROFILE?.includes('systemprofile')) {
     process.env.USERPROFILE = process.env.CTI_USER_HOME || 'C:\\Users\\oadan';
@@ -267,6 +290,18 @@ async function main(): Promise<void> {
       const fromBot = consumePending(chatId);
       if (!fromBot) return;
       const me = process.env.CTI_BOT || 'unknown';
+      // 🔴 票 T-0019① 自环闸·第一刀：待回执对象是自己（模型 to=自己 / 回执原路弹回）→ 绝不转发。
+      if (fromBot === me) {
+        rtLog(`[echo] skip 自环转发：本 bot(${me}) 的回复对象登记成了自己（chat=${chatId.slice(0, 12)}）`);
+        return;
+      }
+      // 🔴 票 T-0019① 自环闸·第二刀：我这句只是点了个头（纯确认）→ 不值得把对面叫醒。
+      // 09-18 那场七家互刷"收到/好的"，传播单位就是这句；拦在这里比拦在收方更早、更省一次引擎唤醒。
+      const w = win();
+      if (w.echoMode !== 'off' && isAckOnly(normalizeBody(replyText))) {
+        rtLog(`[echo] skip 纯点头转发 → ${fromBot}：reply="${replyText.replace(/\s+/g, ' ').slice(0, 30)}"（档=${w.echoMode}）`);
+        return;
+      }
       const trimmed = replyText.length > 2000 ? replyText.slice(0, 2000) + '…' : replyText;
       try {
         await sendAsUserToBot(fromBot, `[${me}]（自动回执）
@@ -281,6 +316,8 @@ ${trimmed}`);
 
   // 收图磁盘清理：进程内每 30 分钟跑一次（CTI_IMAGE_TTL_MS=0 可关闭）
   setInterval(pruneImageFiles, 30 * 60 * 1000).unref?.();
+  // 票 T-0019①：回声指纹表清扫（周期来自 windows.ts，W1 已强制它 < 最短存活窗口）
+  setInterval(() => { pruneEchoLedger(echoLedger, win()); }, win().echoPruneMs).unref?.();
 
   // WebSocket 长连接（事件订阅）
   const dispatcher = new lark.EventDispatcher({}).register({
@@ -507,6 +544,35 @@ async function handleIncoming(
   if (!(allowedUsers.includes('*') || allowedUsers.includes(senderId))) {
     console.warn(`[agents-to-feishu] 拒绝未授权用户 ${senderId}`);
     return;
+  }
+
+  // 🔴 票 T-0019①（2026-09-29 dsh）：自我回声抑制闸门 —— 在叫醒引擎**之前**判。
+  // 背景：09-18 七家 bot 互刷"收到/好的"那场风暴，根因是纪律只写在提示词里（"别手工回执"），
+  // 模型不听话就照刷；而它一被叫醒就必然回一句，于是互相把对方点亮。本闸把纪律挪到门上：
+  // 认得出是回音（自己写给自己 / 纯点头 / 同内容窗口内二现）就不叫醒，只在日志留痕。
+  // 判据全是物理痕迹（`(from-bot:X)` 尾注 + 剥标记后的正文），不靠猜内容；**无尾注 = 老大本人 = 永不吞**。
+  // 三档 CTI_ECHO_MODE：enforce=真吞（出厂）/ shadow=只记账不吞（灰度）/ off=停用；
+  // CTI_ECHO_WAKE=1 则判为回声仍放行，只加 `[回声]` 标记（排查"是不是误杀了真消息"用）。
+  {
+    const me = process.env.CTI_BOT || '';
+    const w = win();
+    const echo = classifyEcho({ text, me, seen: echoLedger }, w);
+    if (echo.suppress) {
+      rtLog(`[echo] SKIP 唤醒（不叫醒引擎）: reason=${echo.reason} from=${echo.fromBot} me=${me} ` +
+        `fp=${echo.fp} chat=${chatId.slice(0, 12)} mid=${fullId.slice(0, 18)} text="${text.replace(/\s+/g, ' ').slice(0, 40)}"`);
+      console.log(`[agents-to-feishu] 回声抑制命中: ${echo.reason} from=${echo.fromBot}（累计吞 ${echoStats().enforce} 条 / 放行 ${echoStats().pass} 条）`);
+      return;
+    }
+    if (echo.reason !== 'fresh' && echo.reason !== 'human-no-trailer') {
+      // shadow 档命中 或 off 档命中：记账但不吞
+      const wakeTag = process.env.CTI_ECHO_WAKE === '1' ? ' wake=1' : '';
+      rtLog(`[echo:shadow] 判为回声但放行: reason=${echo.reason} from=${echo.fromBot} mode=${w.echoMode}${wakeTag} ` +
+        `mid=${fullId.slice(0, 18)} text="${text.replace(/\s+/g, ' ').slice(0, 40)}"`);
+      if (process.env.CTI_ECHO_WAKE === '1') {
+        text = `[回声] ${text}`; // 分清回声与真信（agent-mailbox 的 [echo] 前缀语义）
+        markWake();
+      }
+    }
   }
 
   // 2026-08-31 自动回执登记：p2p 消息若带 (from-bot:X) 标记（send_as_user 派活），登记待回执；

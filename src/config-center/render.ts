@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import { resolveMcpArgPaths } from '../tools/mcp-path-resolve.js';
+import { factoryEnvLines } from '../bridge/windows.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -349,6 +350,12 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
     lines.push(`CTI_DSH_ACP_CONFIG=${path.join(botHome, 'cordis.yml')}`);
     lines.push('');
   }
+  // ── 桥接层窗口单一真源 + 回声抑制档（票 T-0019，2026-09-29 dsh）──
+  // 出厂值取自 src/bridge/windows.ts（不在两处各写一遍）；下面 globalExtra 若含同名键在其后写入，
+  // 运行时页的"启动环境覆盖"天然优先。🔴 桥启动即按 W1~W4 自查这几行，不合格直接拒绝起进程。
+  lines.push('# ── 桥接窗口与回声抑制（票 T-0019：单一真源 src/bridge/windows.ts；改完须 apply 下发）──');
+  lines.push(...factoryEnvLines());
+  lines.push('');
   lines.push('# ── 子进程环境（provider key 由凭证层注入下方 globalExtra）──');
   lines.push(`CTI_USER_HOME=${process.env.CTI_USER_HOME || os.homedir()}`);
   lines.push('');
