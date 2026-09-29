@@ -39,11 +39,20 @@ export const WINDOW_DEFAULTS = {
   /** 回声指纹表的清扫周期（必须明显短于上面所有存活窗口） */
   echoPruneMs: 5 * 60_000,
   /**
-   * 票 T-0021：在途轮次的信任期（毫秒）。超过这个时长还挂着"没跑完"的轮次，判为僵尸/已死，
-   * 不再拦重启；期内则一律认为"锅里还炖着东西"，precheck-turns 会点名"这家先别动"。
+   * 票 T-0021：在途轮次的**僵尸判定**阈值（毫秒）。台账里挂着、但心跳已停且超过它 → 视为上次进程
+   * 留下的死现场（拦重启没意义，只点名"这是被打断的现场"）。
    * 出厂 90min 的依据：现网真实长轮次（mimo 下 132MB 安装包 + 装 + 跑 RPC）实测跨了 ~70min。
+   * 🔴 别拿它当"多久内有动静算在忙"——我 09-29 就这么混用过，结果把 4 家已完工的报成"别动"
+   *    （claude/codex/mimo/workbuddy 静默 26~67min 全被我拦），见 precheckQuietMs。
    */
   turnStaleMs: 90 * 60_000,
+  /**
+   * 票 T-0021：precheck 的**安静期**阈值（毫秒）——只给"没有台账的家（旧代码）"用。
+   * 距最后一次日志动静 ≤ 它 → 疑似在途（拦）；> 它 → **不可判定**（默认不拦，见 --strict）。
+   * 出厂 5min 的依据：桥在一轮里至少会写 handleIncoming，且 ws-keepalive 每 30s 一次；
+   * 静默超过 5min 基本可以断定"这一轮的日志期已经过去了"。旧代码拿不到权威信号，只能给概率。
+   */
+  precheckQuietMs: 5 * 60_000,
 } as const;
 
 export type EchoMode = 'enforce' | 'shadow' | 'off';
@@ -57,6 +66,7 @@ export interface Windows {
   echoWindowMs: number;
   echoPruneMs: number;
   turnStaleMs: number;
+  precheckQuietMs: number;
   echoMode: EchoMode;
 }
 
@@ -70,6 +80,7 @@ export const WINDOW_ENV_KEYS = {
   echoWindowMs: 'CTI_ECHO_WINDOW_MS',
   echoPruneMs: 'CTI_ECHO_PRUNE_MS',
   turnStaleMs: 'CTI_TURN_STALE_MS',
+  precheckQuietMs: 'CTI_PRECHECK_QUIET_MS',
 } as const;
 
 type NumField = keyof typeof WINDOW_ENV_KEYS;
@@ -84,6 +95,7 @@ const CN: Record<NumField, string> = {
   echoWindowMs: '回声判重窗口',
   echoPruneMs: '回声表清扫周期',
   turnStaleMs: '在途轮次信任期',
+  precheckQuietMs: 'precheck 安静期',
 };
 
 function parseMs(raw: string | undefined, field: NumField): number {
@@ -110,6 +122,7 @@ export function readWindows(env: Record<string, string | undefined> = process.en
     echoWindowMs: parseMs(env[WINDOW_ENV_KEYS.echoWindowMs], 'echoWindowMs'),
     echoPruneMs: parseMs(env[WINDOW_ENV_KEYS.echoPruneMs], 'echoPruneMs'),
     turnStaleMs: parseMs(env[WINDOW_ENV_KEYS.turnStaleMs], 'turnStaleMs'),
+    precheckQuietMs: parseMs(env[WINDOW_ENV_KEYS.precheckQuietMs], 'precheckQuietMs'),
     echoMode: (() => {
       const m = (env.CTI_ECHO_MODE || 'enforce').trim();
       if (m !== 'enforce' && m !== 'shadow' && m !== 'off') {
@@ -149,6 +162,13 @@ export function checkInvariants(w: Windows): string[] {
   // 就把那轮判成僵尸并放行重启 —— 那正是 2026-09-29 我打断 mimo 那轮下载活的翻版。
   if (w.turnStaleMs < w.receiptPendingMs) {
     bad.push(`W5 在途轮次信任期(${s(w.turnStaleMs)}) 必须 ≥ 待回执存活(${s(w.receiptPendingMs)})：登记还在等回复，precheck 却已把这轮判僵尸放行重启，等于亲手打断别家在途的活（T-0021 治的就是这个）。`);
+  }
+  // W6（票 T-0021 · 09-29 被老大当场纠正后补）：precheck 安静期 ≤ 在途信任期。
+  // 起因是我把这两个概念混成了一个：拿 90min 信任期当"多久内有动静算在忙"，结果 claude/codex/mimo/workbuddy
+  // 静默 26~67min 全被我误报成"别动"。安静期是**放行窗口**（静默够久就不拦），信任期是**容忍窗口**（这轮还不算死）；
+  // 放行窗口若比容忍窗口还长，就会出现"同一时刻一轮还在容忍期内、却已被放行重启"的自相矛盾。
+  if (w.precheckQuietMs > w.turnStaleMs) {
+    bad.push(`W6 precheck 安静期(${s(w.precheckQuietMs)}) 必须 ≤ 在途信任期(${s(w.turnStaleMs)})：静默超过安静期就放行，可放行时那轮还在信任期内没死透 —— 等于一边说"它可能还在跑"一边放重启（09-29 误判 4 家的同型混用）。`);
   }
   return bad;
 }
@@ -196,5 +216,6 @@ export const WINDOW_LABELS: Record<string, string> = {
   [WINDOW_ENV_KEYS.imageMs]: CN.imageMs + '（毫秒，0=永不清理）：收图/TTS 落盘保留',
   [WINDOW_ENV_KEYS.echoWindowMs]: CN.echoWindowMs + '（毫秒）：同内容二现判回声，须 ≥ 待回执存活',
   [WINDOW_ENV_KEYS.echoPruneMs]: CN.echoPruneMs + '（毫秒）：回声指纹表清扫周期，须 < 最短存活',
-  [WINDOW_ENV_KEYS.turnStaleMs]: CN.turnStaleMs + '（毫秒）：在途轮次超过它才判僵尸；precheck-turns 用，须 ≥ 待回执存活',
+  [WINDOW_ENV_KEYS.turnStaleMs]: CN.turnStaleMs + '（毫秒）：台账心跳停超过它才判"死现场"（僵尸），precheck-turns 用，须 ≥ 待回执存活',
+  [WINDOW_ENV_KEYS.precheckQuietMs]: CN.precheckQuietMs + '（毫秒）：没有台账的家（旧代码）静默超过它就判"不可判定"（默认不拦重启），须 ≤ 在途信任期',
 };

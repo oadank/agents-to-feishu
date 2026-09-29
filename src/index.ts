@@ -261,8 +261,8 @@ async function main(): Promise<void> {
   // 绝不静默回落默认值继续跑（静默降级是 2026-09-19 配置回写那类事故的同型温床）。
   WIN = assertWindows();
   rtLog(`[windows] 启动校验通过：echoMode=${WIN.echoMode} 待回执=${WIN.receiptPendingMs}ms 抑制窗=${WIN.manualReceiptMs}ms ` +
-    `/de卡=${WIN.dePendingMs}ms 等补文=${WIN.pendingImgMs}ms 图片保留=${WIN.imageMs}ms 判重窗=${WIN.echoWindowMs}ms 清扫=${WIN.echoPruneMs}ms 在途信任期=${WIN.turnStaleMs}ms`);
-  console.log(`[agents-to-feishu] 窗口表 OK（echoMode=${WIN.echoMode}，已按 W1~W5 自查通过）`);
+    `/de卡=${WIN.dePendingMs}ms 等补文=${WIN.pendingImgMs}ms 图片保留=${WIN.imageMs}ms 判重窗=${WIN.echoWindowMs}ms 清扫=${WIN.echoPruneMs}ms 在途信任期=${WIN.turnStaleMs}ms 安静期=${WIN.precheckQuietMs}ms`);
+  console.log(`[agents-to-feishu] 窗口表 OK（echoMode=${WIN.echoMode}，已按 W1~W6 自查通过）`);
   // 🔴 票 T-0021（2026-09-29 dsh）：上一次进程退出时若还有未完成轮次，这里就是"被打断时留个条"的落点。
   // 起因是真实事故：dsh 一把梭重启 12 家，杀掉 mimo 正在跑的 Motrix 下载轮次（prompt id=103），
   // 那一轮**永久没有回包也没留任何痕迹**，老大只看到"mimo 挂了"。现在把现场归档并点名进 rt.log，

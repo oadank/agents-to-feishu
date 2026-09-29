@@ -26,7 +26,7 @@ console.log('\n[1] 出厂默认值必须自己过得了五条不变量');
   const w = readWindows(envOf({}));
   ok('默认值无违反项', checkInvariants(w).length === 0, JSON.stringify(checkInvariants(w)));
   ok('assertWindows 不抛', (() => { try { assertWindows(envOf({})); return true; } catch { return false; } })());
-  ok('factoryEnvLines 下发 9 键（含 CTI_TURN_STALE_MS）', factoryEnvLines().length === 9, `实际 ${factoryEnvLines().length}`);
+  ok('factoryEnvLines 下发 10 键（含 CTI_TURN_STALE_MS 与 CTI_PRECHECK_QUIET_MS）', factoryEnvLines().length === 10, `实际 ${factoryEnvLines().length}`);
   ok('下发键都能被读回（无孤儿键）', factoryEnvLines().every((l) => {
     const [k, v] = l.split('=');
     return readWindows(envOf({ [k]: v, CTI_ECHO_MODE: 'enforce' })) !== null;
@@ -71,6 +71,19 @@ console.log('\n[5b] 破坏 W5（票 T-0021）：在途信任期 < 待回执存�
   const eq = checkInvariants(wOf({ turnStaleMs: 60 * 60_000, receiptPendingMs: 60 * 60_000 }));
   ok('W5 相等算合格（≥ 语义）', !eq.some((b) => b.startsWith('W5')), JSON.stringify(eq));
   ok('出厂 turnStale 覆盖实测最长轮次(70min)', WINDOW_DEFAULTS.turnStaleMs >= 70 * 60_000, `实际 ${WINDOW_DEFAULTS.turnStaleMs / 60000}min`);
+}
+
+console.log('\n[5c] 破坏 W6（票 T-0021 · 老大当场纠正后补）：安静期 > 在途信任期 → 必须点名');
+{
+  // 起因：我把"僵尸阈值 90min"当成"多久内有动静算在忙"，结果 claude/codex/mimo/workbuddy
+  // 静默 26~67min（全都已完工）被我误报成"别动"。安静期是放行窗口，必须 ≤ 容忍窗口，
+  // 否则会出现"一轮还在信任期内、却已被放行重启"的自相矛盾。
+  const bad = checkInvariants(wOf({ precheckQuietMs: 120 * 60_000, turnStaleMs: 90 * 60_000 }));
+  ok('W6 命中', bad.some((b) => b.startsWith('W6')), JSON.stringify(bad));
+  const eq = checkInvariants(wOf({ precheckQuietMs: 90 * 60_000, turnStaleMs: 90 * 60_000 }));
+  ok('W6 相等算合格（≤ 语义）', !eq.some((b) => b.startsWith('W6')), JSON.stringify(eq));
+  ok('出厂安静期是分钟级(5min)，不是把信任期当忙碌窗口', WINDOW_DEFAULTS.precheckQuietMs <= 10 * 60_000, `实际 ${WINDOW_DEFAULTS.precheckQuietMs / 60000}min`);
+  ok('出厂 quiet ≤ turnStale', WINDOW_DEFAULTS.precheckQuietMs <= WINDOW_DEFAULTS.turnStaleMs);
 }
 
 console.log('\n[6] 畸形 env 必须当场抛（🔴 绝不静默回落默认值）');

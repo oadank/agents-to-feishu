@@ -5,26 +5,33 @@
  * Motrix 下载轮次（老大亲派）。那一轮 `prompt sent id=103` 之后 rt.log 15 分钟无事件 ≠ 卡住——
  * **桥不把工具事件写进 rt.log，FINAL 走 stdout(out.log)**，所以肉眼看就是"没动静"。
  * 重启把引擎连那一轮一起杀掉 ⇒ 永久没有回包 ⇒ 老大的表象是"mimo 挂了"。
- * 本脚本就是那条本该存在的前置检查：**谁在忙，就先别动谁**。
+ *
+ * 【第二版·同日老大当场纠正】第一版把「没台账 + 90min 内有日志动静」一律判"别动"，
+ * 结果 claude/codex/mimo/workbuddy（静默 26~67min，**全都已完工**）被我误报成忙碌。
+ * 根因是概念混用：90min 是**僵尸判定阈值**（台账心跳停了多久算死现场），不是"多久内有动静算在忙"。
+ * 更要命的逻辑死结：**没台账恰恰是因为这些家还没装上新代码**——把它们一直拦着，就永远滚不动它们，
+ * 判据永远拿不到。所以本版把"不可判定"与"确认在忙"分开：前者默认不拦（但要说明风险与补救办法）。
  *
  * 【判据真源】src/bridge/turn-ledger.ts（桥自己在每轮开始/心跳/结束时落盘 logs/<bot>-turn.json）。
- * 本脚本只读不算第二套逻辑：judgeTurns() 直接从模块 import，阈值从 windows.ts 取，绝不在这里写死毫秒。
+ * 本脚本不写第二套逻辑：judgeTurns() 从模块 import，阈值从 windows.ts 取（turnStaleMs / precheckQuietMs）。
  *
  * 用法：
- *   npx tsx scripts/precheck-turns.mts                # 查全部 bot
- *   npx tsx scripts/precheck-turns.mts mimo claude    # 只查这几家（滚某几家前）
- *   npx tsx scripts/precheck-turns.mts --json         # 机读（给别的自动化/门禁用）
- * 退出码：0 = 全部空闲，可以滚；1 = 有家在途，先别动它们；2 = 取证本身失败
+ *   npx tsx scripts/precheck-turns.mts                 # 查全部 bot
+ *   npx tsx scripts/precheck-turns.mts mimo claude     # 只查这几家（滚某几家前）
+ *   npx tsx scripts/precheck-turns.mts --json          # 机读（给门禁/自动化用）
+ *   npx tsx scripts/precheck-turns.mts --strict        # 保守档：连"不可判定"也拦（升级运维时用）
+ * 退出码：0 = 可滚；1 = 有"确认在忙/疑似在忙"的家；2 = 取证本身失败
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { judgeTurns, readTurnFile, turnLogFile, type TurnVerdict } from '../src/bridge/turn-ledger.js';
 import { windows } from '../src/bridge/windows.js';
 
+type State = 'idle' | 'running' | 'likely-busy' | 'stale-leftover' | 'unknown';
 interface Row {
   bot: string;
-  state: 'idle' | 'running' | 'stale-leftover' | 'unknown';
-  /** 台账来源：turn-file（权威）/ heuristic（旧版本没台账时的兜底，仅供参考）/ no-file */
+  state: State;
+  /** 判据来源：turn-file(权威) / quiet-window(日志静默启发) / no-log */
   via: string;
   detail: string;
 }
@@ -78,17 +85,16 @@ async function listBots(): Promise<string[]> {
   }))].sort();
 }
 
-/** 抓日志尾部最后一条带 ISO 时间戳的行（rt.log 用 [2026-...Z]，out.log 里 FINAL 走 console.log 无戳） */
+/** 从日志尾部反向找最后一条带 ISO 时间戳且匹配 pattern 的行 */
 function lastStamp(file: string, pattern: RegExp): { at: number; line: string } | null {
   try {
     if (!fs.existsSync(file)) return null;
-    const text = fs.readFileSync(file, 'utf-8');
-    const lines = text.split('\n');
+    const lines = fs.readFileSync(file, 'utf-8').split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
       const m = lines[i].match(pattern);
       if (m) {
         const at = Date.parse(m[1]);
-        if (!Number.isNaN(at)) return { at, line: lines[i].trim().slice(0, 160) };
+        if (!Number.isNaN(at)) return { at, line: lines[i].trim().slice(0, 150) };
       }
     }
     return null;
@@ -97,45 +103,74 @@ function lastStamp(file: string, pattern: RegExp): { at: number; line: string } 
   }
 }
 
-/**
- * 兜底启发式（仅用于**还没带 T-0021 代码的旧进程**）。
- * 🔴 方向性铁律：宁可多拦一次重启，绝不放行打断别家在途的活（09-29 出的就是"放行"那次事故）。
- * 旧进程拿不到可靠收尾证据：FINAL 走 stdout 且不带时间戳，out.log 的 mtime 会被任何 console 输出刷新
- * —— 我第一版正是拿 mtime 当"有收尾迹象"，把还在跑 Motrix 那轮的 mimo 报成了"空闲"（假阴性）。所以：
- *   - 最后接活早于信任期 → idle（不可能还在跑）
- *   - 信任期内接过活   → **按在途对待**（保守拦，并明说是启发式不是台账）
- * 有 turn.json 时一律以它为准，本函数不参与。
- */
-function heuristicRunning(bot: string, now: number, staleMs: number): Row {
-  const rtFile = path.join(logsDir, `${bot}-rt.log`);
-  const incoming = lastStamp(rtFile, /\[([0-9T:.Z-]+)Z?\].*(?:\[handleIncoming\]|prompt sent)/);
-  // 🔴 没有 rt.log ≠ 空闲：workbuddy 这类家压根没配 CTI_RT_LOG（只有 out.log）。
-  // 若把它读成"无接活痕迹 → 空闲"，就是拿"我没看见"当"它没在干"——正是 09-29 那次打断的同型错。
-  if (!fs.existsSync(rtFile)) {
-    const outFile = path.join(logsDir, `${bot}-out.log`);
-    if (!fs.existsSync(outFile)) return { bot, state: 'unknown', via: 'no-log', detail: 'rt.log 与 out.log 都没有，无法取证（该家没起过？名字不对？）' };
-    const ageMin = Math.round((now - fs.statSync(outFile).mtimeMs) / 60000);
-    if (now - fs.statSync(outFile).mtimeMs > staleMs) {
-      return { bot, state: 'idle', via: 'heuristic(out.log mtime)', detail: `无 rt.log；out.log 已 ${ageMin}min 没被写过，超过信任期 → 判空闲` };
-    }
-    return { bot, state: 'running', via: 'heuristic(无 rt.log，out.log 仍在被写，保守当在途)', detail: `out.log ${ageMin}min 前还被写过（该家不写 rt.log，无法确认收尾）→ 按在途对待` };
+const mtime = (f: string): number => { try { return fs.existsSync(f) ? fs.statSync(f).mtimeMs : 0; } catch { return 0; } };
+
+/** 只读文件尾部（默认 64KB），避免为取几行把整份日志灌进内存 */
+function tailText(file: string, bytes = 65536): string {
+  try {
+    if (!fs.existsSync(file)) return '';
+    const st = fs.statSync(file);
+    const len = Math.min(bytes, st.size);
+    if (len <= 0) return '';
+    const buf = Buffer.alloc(len);
+    const fd = fs.openSync(file, 'r');
+    try { fs.readSync(fd, buf, 0, len, st.size - len); } finally { fs.closeSync(fd); }
+    return buf.toString('utf-8');
+  } catch {
+    return '';
   }
-  if (!incoming) return { bot, state: 'idle', via: 'heuristic(无在途台账)', detail: 'rt.log 存在但没有任何接活痕迹' };
-  const ageMin = Math.round((now - incoming.at) / 60000);
-  if (now - incoming.at > staleMs) {
-    return { bot, state: 'idle', via: 'heuristic(无在途台账)', detail: `最后接活 ${ageMin}min 前，已超信任期 ${(staleMs / 60000).toFixed(0)}min → 不可能还在跑` };
+}
+
+/**
+ * 这家跑的进程**有没有 turn 台账能力**（签名两路取，缺一不可）：
+ *   rt.log 的 `[windows] … 在途信任期=`（rtLog 写的，T-0021 起）
+ *   out.log 的 `窗口表 OK（… W1~W5/W1~W6）`（console.log 写的，T-0019 只有 W1~W4，故必须认 W1~W5 以上）
+ * 🔴 为什么要两路：workbuddy 这类家**没配 CTI_RT_LOG**，rtLog 那行压根不存在；
+ *    只查 rt.log 就把刚装上新代码的它当成"旧代码"，再叠上"重启刷新过 mtime"→ 误判"疑似在途"（09-29 连踩两次）。
+ */
+function hasLedgerCapability(rtFile: string, outFile: string): boolean {
+  return tailText(rtFile).includes('在途信任期')
+    || /窗口表 OK[^\n]*W1~W[5-9]/.test(tailText(outFile));
+}
+
+/**
+ * 无台账的家怎么判。🔴 先分清两种"没有台账"，别再一律说成旧代码（09-29 被老大纠正后第二处修正）：
+ *   A. **新代码在线但没台账文件** —— rt.log 最后一条 `[windows]` 行带"在途信任期"签名。
+ *      新代码只要接一次活就会写台账，所以"没文件" = 这个进程起来后**从没处理过消息** ⇒ 判 `idle`（强证据）。
+ *   B. **旧代码**（没有那行签名）—— 只能看日志静默：
+ *      静默 ≤ precheckQuietMs（出厂 5min）→ `likely-busy` 🟠 拦（刚有动静，很可能正跑着）
+ *      静默 > precheckQuietMs            → `unknown` ⚪ **不可判定，默认不拦**
+ * 🔴 为什么 B 不学第一版"拿不准就当忙"：那会把所有没装新代码的家永久拦在门外，
+ *    而装上台账才是让判据变可靠的唯一出路（09-29 我就被自己这条误判卡住，老大当场指出"其他全部完工了"）。
+ *    残留风险（长轮次跑到静默期之后）用 --strict 档 + "动它前先问一句"兜。
+ */
+function judgeNoLedger(bot: string, now: number, quietMs: number): Row {
+  const rtFile = path.join(logsDir, `${bot}-rt.log`);
+  const outFile = path.join(logsDir, `${bot}-out.log`);
+  if (!fs.existsSync(rtFile) && !fs.existsSync(outFile)) {
+    return { bot, state: 'unknown', via: 'no-log', detail: 'rt.log 与 out.log 都没有：无法取证（服务名/日志前缀对不上？还是没起过？）' };
+  }
+  if (hasLedgerCapability(rtFile, outFile)) {
+    return { bot, state: 'idle', via: 'signature(有台账能力·无台账=没接过活)', detail: '带 T-0021 台账签名的进程一接活就必写台账；现在没有台账 → 这个进程起来后没处理过任何消息，判空闲' };
+  }
+  const incoming = lastStamp(rtFile, /\[([0-9T:.Z-]+)Z?\].*(?:\[handleIncoming\]|prompt sent)/);
+  const lastTouch = Math.max(incoming?.at ?? 0, mtime(rtFile), mtime(outFile));
+  const quietMin = Math.round((now - lastTouch) / 60000);
+  if (now - lastTouch <= quietMs) {
+    return { bot, state: 'likely-busy', via: `quiet-window(静默≤${Math.round(quietMs / 60000)}min)`, detail: `${quietMin}min 内还有日志动静、且这台是旧代码（无签名无台账）→ 疑似在途，先别动：${incoming?.line ?? '(动静来自文件写入)'}` };
   }
   return {
-    bot, state: 'running', via: 'heuristic(无在途台账，保守当在途)',
-    detail: `${ageMin}min 前接过活，而这家没有 turn 台账（还没接活，或仍跑旧代码）、无法确认是否已收尾 → 按在途对待：${incoming.line}`
+    bot, state: 'unknown', via: `quiet-window(静默${quietMin}min>${Math.round(quietMs / 60000)}min)`,
+    detail: `这台没有台账能力签名（rt.log 的"在途信任期"与 out.log 的"窗口表 OK…W1~W5+"都没见到）+ 已静默 ${quietMin}min → **不可判定**，默认不拦；动它前先问一句有无在途，或者干脆滚上新代码（滚完就有台账，判据立刻变权威）`
   };
 }
 
 const rows: Row[] = [];
 const now = Date.now();
-const staleMs = windows().turnStaleMs;
+const w = windows();
 const argBots = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const wantJson = process.argv.includes('--json');
+const strict = process.argv.includes('--strict');
 
 const bots = argBots.length ? argBots : await listBots();
 if (!bots.length) {
@@ -144,45 +179,41 @@ if (!bots.length) {
 }
 
 for (const bot of bots) {
-  // 台账路径与桥同源：CTI_RT_LOG 各家不同，这里按 <repo>/logs/<bot>-rt.log 推
   const f = readTurnFile(turnLogFile(path.join(logsDir, `${bot}-rt.log`), bot), bot);
-  if (f) {
-    const v: TurnVerdict = judgeTurns(f, now, staleMs);
-    if (v.state === 'running') {
-      rows.push({ bot, state: 'running', via: 'turn-file(权威)', detail: `${v.turns.length} 轮在途，最长已炖 ${Math.round(v.oldestMs / 60000)}min（心跳 ${Math.round(v.beatAgoMs / 1000)}s 前）：${v.turns.map((t) => `"${t.preview}"`).join(' | ')}` });
-    } else if (v.state === 'stale-leftover') {
-      rows.push({ bot, state: 'stale-leftover', via: 'turn-file(权威)', detail: `有 ${v.turns.length} 条未完成现场但心跳停了 ${Math.round(v.beatAgoMs / 60000)}min（进程已死/刚被杀）→ 不拦重启，但这是**上次被打断的现场**，先读它：${v.turns.map((t) => `"${t.preview}"`).join(' | ')}` });
-    } else {
-      rows.push({ bot, state: 'idle', via: 'turn-file(权威)', detail: '空闲（台账在、无在途轮次）' });
-    }
-    continue;
+  if (!f) { rows.push(judgeNoLedger(bot, now, w.precheckQuietMs)); continue; }
+  const v: TurnVerdict = judgeTurns(f, now, w.turnStaleMs);
+  if (v.state === 'running') {
+    rows.push({ bot, state: 'running', via: 'turn-file(权威)', detail: `${v.turns.length} 轮在途，最长已炖 ${Math.round(v.oldestMs / 60000)}min（心跳 ${Math.round(v.beatAgoMs / 1000)}s 前）：${v.turns.map((t) => `"${t.preview}"`).join(' | ')}` });
+  } else if (v.state === 'stale-leftover') {
+    rows.push({ bot, state: 'stale-leftover', via: 'turn-file(权威)', detail: `${v.turns.length} 条未完成现场、心跳已停 ${Math.round(v.beatAgoMs / 60000)}min（进程已死/刚被杀）→ 不拦重启，但这是**上次被打断的现场**，先读它：${v.turns.map((t) => `"${t.preview}"`).join(' | ')}` });
+  } else {
+    rows.push({ bot, state: 'idle', via: 'turn-file(权威)', detail: '空闲（台账在、turns=0 = 上一轮已销账）' });
   }
-  rows.push(heuristicRunning(bot, now, staleMs));
 }
 
-const running = rows.filter((r) => r.state === 'running');
+const sure = rows.filter((r) => r.state === 'running' || r.state === 'likely-busy');
+const unknown = rows.filter((r) => r.state === 'unknown');
 const leftovers = rows.filter((r) => r.state === 'stale-leftover');
-// 🔴 无法取证（unknown）与"确认在途"同等对待：拿不准就当它在忙。
-// 放行的代价是打断别家在途的活（09-29 已付过一次），拦下的代价只是我多等一会儿。
-const blocked = rows.filter((r) => r.state === 'running' || r.state === 'unknown');
+const blocked = strict ? [...sure, ...unknown] : sure;
 
 if (wantJson) {
-  console.log(JSON.stringify({ checkedAt: Date.now(), turnStaleMs: staleMs, running: running.length, leftovers: leftovers.length, blocked: blocked.length, rows }, null, 2));
+  console.log(JSON.stringify({ checkedAt: Date.now(), turnStaleMs: w.turnStaleMs, precheckQuietMs: w.precheckQuietMs, strict, blocked: blocked.length, sureBusy: sure.length, unknownCount: unknown.length, rows }, null, 2));
 } else {
-  console.log(`\n重启前在途检查（判据：src/bridge/turn-ledger.ts，信任期 ${(staleMs / 60000).toFixed(0)}min）`);
+  console.log(`\n重启前在途检查 · 台账判据(src/bridge/turn-ledger.ts) 信任期 ${(w.turnStaleMs / 60000).toFixed(0)}min / 安静期 ${(w.precheckQuietMs / 60000).toFixed(0)}min${strict ? ' 【--strict：不可判定也拦】' : ''}`);
   console.log('─'.repeat(72));
-  for (const r of rows) {
-    const icon = r.state === 'running' ? '🔴 别动' : r.state === 'stale-leftover' ? '🟡 现场' : r.state === 'idle' ? '🟢 空闲' : '⚪ 取不到证';
-    console.log(`${icon}  ${r.bot.padEnd(15)} [${r.via}] ${r.detail}`);
-  }
+  const icon: Record<State, string> = { running: '🔴 在忙', 'likely-busy': '🟠 疑似', 'stale-leftover': '🟡 现场', idle: '🟢 空闲', unknown: '⚪ 不可判' };
+  for (const r of rows) console.log(`${icon[r.state]}  ${r.bot.padEnd(14)} [${r.via}] ${r.detail}`);
   console.log('─'.repeat(72));
   if (blocked.length) {
-    console.log(`结论：${blocked.length} 家不该动 → ${blocked.map((r) => `${r.bot}${r.state === 'unknown' ? '(取不到证)' : ''}`).join(' / ')}`);
-    console.log('      先别 nssm restart 它们；等交完活再滚，或先滚别的家。');
-  } else if (leftovers.length) {
-    console.log(`结论：没有在途；${leftovers.length} 家留有"上次被打断"的现场（${leftovers.map((r) => r.bot).join(' / ')}）→ 可以滚，但先读现场再动手。`);
+    console.log(`结论：${blocked.length} 家不该动 → ${blocked.map((r) => `${r.bot}${r.state === 'unknown' ? '(不可判)' : ''}`).join(' / ')}`);
   } else {
-    console.log('结论：全部空闲，可以滚（仍建议分批：先 1 家验活，再 3~4 家一批）。');
+    console.log('结论：没有"确认在忙/疑似在忙"的家，可以滚（仍建议分批：先 1 家验活，再 3~4 家一批）。');
   }
+  if (unknown.length && !strict) {
+    console.log(`提示：${unknown.length} 家没有台账、只能判"不可判定"（${unknown.map((r) => r.bot).join(' / ')}）——`);
+    console.log('      它们恰恰是**还没装 T-0021 新代码**的家；滚上新代码才会有台账，判据才从概率变权威。');
+    console.log('      要连这批也拦住：加 --strict。');
+  }
+  if (leftovers.length) console.log(`提示：${leftovers.length} 家留有"上次被打断"的现场（${leftovers.map((r) => r.bot).join(' / ')}）→ 动手前先读 logs/<bot>-turn*.json。`);
 }
 process.exit(blocked.length ? 1 : 0);
