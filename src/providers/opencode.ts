@@ -18,6 +18,7 @@ import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
 import { readSessionMcpServers } from './shared/per-session-mcp.js';
 import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
+import { AutoCompact, usedTokensOf } from '../bridge/auto-compact.js';
 
 // MCP 穿透收编（2026-09-18）：已上收 src/providers/shared/per-session-mcp.ts，
 // opencode 引擎行为 = 'stdioOnly'（首轮误判全拒实为 http 条目被拒；模型层终验待补，见模块注释矩阵）。
@@ -26,6 +27,24 @@ function rtLog(msg: string): void {
   const file = process.env.CTI_RT_LOG || '';
   if (!file) return;
   try { fs.appendFileSync(file, `[${new Date().toISOString()}] ${msg}\n`, 'utf-8'); } catch {}
+}
+
+/**
+ * [T-0030 09-30] opencode 原生 usage 字段是 cachedReadTokens（多个 d）/totalTokens——
+ * 直接 cast 会把缓存命中丢成 0。逐家字段映射在此收口（探针实测原文：
+ * {"inputTokens":365,"outputTokens":3,"totalTokens":22256,"cachedReadTokens":21888}）。
+ */
+function normalizeOpencodeUsage(u: Record<string, unknown>): UsageInfo {
+  const n = (...ks: string[]): number => { for (const k of ks) { const v = Number(u?.[k] ?? 0); if (Number.isFinite(v) && v > 0) return v; } return 0; };
+  const input = n('inputTokens', 'input_tokens');
+  const cacheRead = n('cachedReadTokens', 'cacheReadTokens', 'cache_read_input_tokens');
+  const total = n('totalTokens');
+  return {
+    inputTokens: input > 0 ? input : total,
+    outputTokens: n('outputTokens'),
+    cacheReadTokens: input > 0 ? cacheRead : 0,
+    requests: 1,
+  };
 }
 
 /** 解析 opencode ACP 启动命令 */
@@ -77,6 +96,10 @@ interface ActivePrompt {
 export class OpencodeProvider implements RuntimeProvider {
   readonly name = 'opencode';
 
+  // [T-0030 C 类 09-30] opencode 无压缩通道（探针实测 session/compact=Method not found；CLI 仅手动
+  // /compact + HTTP API，无 auto）→ 接公共模块兜底告警（HTTP API 升 A 变体老大已批不做）。
+  private readonly autoc = new AutoCompact({ log: (m) => rtLog(`[opencode] ${m}`) });
+
   private child: ChildProcess | null = null;
   private lineBuf = '';
   private nextId = 100;
@@ -90,7 +113,7 @@ export class OpencodeProvider implements RuntimeProvider {
 
   private static IDLE_TIMEOUT_MS = parseInt(process.env.CTI_OPENCODE_IDLE_TIMEOUT_MS || '0', 10); // 🔴 09-20 老大令：默认永不回收（不主动/new 不许断），env CTI_OPENCODE_IDLE_TIMEOUT_MS 可覆盖
   private static MAX_SESSIONS = parseInt(process.env.CTI_OPENCODE_MAX_SESSIONS || '20', 10);
-  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_OPENCODE_TIMEOUT_MS || '300000', 10);
+  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_OPENCODE_TIMEOUT_MS || '1200000', 10);
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   async prepare(): Promise<void> {
@@ -113,7 +136,11 @@ export class OpencodeProvider implements RuntimeProvider {
   }
 
   async resetSession(sessionKey?: string): Promise<void> {
-    if (sessionKey) { this.sessions.delete(sessionKey); rtLog(`[opencode] resetSession key=${sessionKey.slice(0, 8)}`); }
+    if (sessionKey) {
+      this.sessions.delete(sessionKey);
+      this.autoc.clear(sessionKey); // [T-0030] /new 清该会话的告警段号，重新起算
+      rtLog(`[opencode] resetSession key=${sessionKey.slice(0, 8)}`);
+    }
   }
 
   async interrupt(): Promise<void> {
@@ -380,17 +407,17 @@ export class OpencodeProvider implements RuntimeProvider {
       if (oldestKey) { this.sessions.delete(oldestKey); rtLog(`[opencode] LRU evict ${oldestKey.slice(0, 8)}`); }
     }
 
-    const sessionInterrupted = session ? this.interruptedSessionIds.has(session.sessionId) : false;
+    // [2026-09-29 失忆根治] 打断≠换会话（同 mimo 09-25 / dsh 09-29）：cancel 后原会话照常可用且
+    // 记忆完好，旧家法"interrupted, opening new session"是插话必失忆的直接元凶。只清标记续用。
+    if (session && this.interruptedSessionIds.has(session.sessionId)) {
+      this.interruptedSessionIds.delete(session.sessionId);
+      rtLog(`[opencode] post-cancel: reusing session ${session.sessionId.slice(0, 8)}（记忆连续，不换代）`);
+    }
     // [2026-09-17] 跨消息失忆修复（对齐 reasonix）：history 此前仅 sessionInterrupted 注入，
     // 而 session 可能因空闲回收/进程重启/LRU 被清——这些路径新建会话却不带历史 ⇒ 失忆。
     // 现统一为「本轮新建了会话 && bridge 有历史」就注入。/new 时 context 已清空天然空白。
-    const isNewSession = !session || params.freshSession || sessionInterrupted;
-    if (!session || params.freshSession || sessionInterrupted) {
-      if (session && sessionInterrupted) {
-        this.interruptedSessionIds.delete(session.sessionId);
-        this.sessions.delete(sessionKey);
-        rtLog(`[opencode] interrupted, opening new session`);
-      }
+    const isNewSession = !session || params.freshSession;
+    if (!session || params.freshSession) {
       try {
         session = await this.createSession(process.env.CTI_DEFAULT_WORKDIR || process.cwd());
         this.sessions.set(sessionKey, session);
@@ -436,6 +463,10 @@ export class OpencodeProvider implements RuntimeProvider {
     let wakeup: () => void = () => {};
     let wakeupP: Promise<void> = Promise.resolve();
     const poke = (): void => { wakeup(); };
+    // [T-0030 C 类] 本轮真实用量跟踪
+    let turnUsed = 0;
+    let turnSize = 0;
+    let lastUsageUsed = 0;
     let gotUsage = false;
     let gotText = false; // 已流出正文（watchdog 判定：有正文且超时=结束信号丢失，静默完成） // 本轮是否已收到 usage（防响应兜底重复记账）
     const promptHandler: ActivePrompt = {
@@ -444,11 +475,18 @@ export class OpencodeProvider implements RuntimeProvider {
       onUpdate: (msg) => {
         lastOutput = Date.now();
         const update = msg.params?.update;
-        if (update?.sessionUpdate === 'agent_message_chunk' && update?.content?.type === 'text') {
+        if (update?.sessionUpdate === 'usage_update') {
+          // [T-0030 C 类] 原生用量 {used,size}：只做兜底告警数据源（result 已供 stats，不双记）
+          const used = Number((update as { used?: number }).used || 0);
+          const size = Number((update as { size?: number }).size || 0);
+          if (used > 0) { turnUsed = Math.max(turnUsed, used); if (size > 0) turnSize = size; }
+        } else if (update?.sessionUpdate === 'agent_message_chunk' && update?.content?.type === 'text') {
           const delta = update.content.text;
           const metaUsage = (update as { _meta?: { usage?: unknown } })._meta?.usage as UsageInfo | undefined;
           if (metaUsage) {
-            queue.push({ type: 'usage', usage: metaUsage, sessionId: session.sessionId });
+            const mapped = normalizeOpencodeUsage(metaUsage as unknown as Record<string, unknown>);
+            lastUsageUsed = Math.max(lastUsageUsed, usedTokensOf(mapped));
+            queue.push({ type: 'usage', usage: mapped, sessionId: session.sessionId });
             gotUsage = true;
           } else if (delta) {
             queue.push({ type: 'text', text: delta }); gotText = true;
@@ -481,9 +519,25 @@ export class OpencodeProvider implements RuntimeProvider {
           const rr = msg.result as { usage?: UsageInfo; _meta?: { usage?: UsageInfo } } | undefined;
           const ru = rr?._meta?.usage ?? rr?.usage;
           if (ru && (Number(ru.inputTokens ?? 0) > 0 || Number(ru.outputTokens ?? 0) > 0)) {
-            queue.push({ type: 'usage', usage: ru, sessionId: session.sessionId });
+            const mapped = normalizeOpencodeUsage(ru as unknown as Record<string, unknown>);
+            lastUsageUsed = Math.max(lastUsageUsed, usedTokensOf(mapped));
+            queue.push({ type: 'usage', usage: mapped, sessionId: session.sessionId });
+            gotUsage = true;
             poke();
           }
+        }
+        // [T-0030 C 类] usage_update 是唯一来源的 CLI 变体兜底：整轮只在收尾记一次
+        if (!gotUsage && turnUsed > 0) {
+          gotUsage = true;
+          lastUsageUsed = Math.max(lastUsageUsed, turnUsed);
+          queue.push({ type: 'usage', usage: { inputTokens: turnUsed, outputTokens: 0, cacheReadTokens: 0, requests: 1 }, sessionId: session.sessionId });
+          poke();
+        }
+        // [T-0030 C 类] 轮末兜底告警：opencode 无压缩通道（探针实锤 -32601），used 达阈值播一次
+        const usedNow = Math.max(turnUsed, lastUsageUsed);
+        if (!msg.error && usedNow > 0) {
+          const warn = this.autoc.floorWarning(params.sessionKey, usedNow, turnSize || undefined);
+          if (warn) { queue.push({ type: 'text', text: AutoCompact.floorWarningText(warn.pct, warn.hoursDesc, 'OpenCode 引擎') }); poke(); }
         }
         if (msg.error) promptHandler.onDone(msg.error.message || JSON.stringify(msg.error));
         else promptHandler.onDone();
