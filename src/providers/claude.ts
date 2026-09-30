@@ -120,6 +120,9 @@ const STALL_FIRST_MS = Number(process.env.CTI_CLAUDE_STALL_FIRST_MS ?? 60_000); 
 // [2026-09-29] /compact 等斜杠命令轮：CLI 压缩大会话期间不吐正文事件（只发桥不透传的 status 心跳），
 // 实测 75 万 token 会话压缩要 135s+ —— 60s 首包阈值必杀。命令轮放宽到 10min（可调）。
 const SLASH_FIRST_MS = Number(process.env.CTI_CLAUDE_SLASH_FIRST_MS ?? 600_000);
+// [T-0031 批二] 放弃轮迟到事件对齐丢弃的时间预算：引擎死不透（result 永不来）时最迟这么久
+// 强制出队，防止 dead 队首永远挡后面轮次（宁可退化为旧行为，不可卡死全队列）。
+const DEAD_SINK_MS = Number(process.env.CTI_CLAUDE_DEAD_SINK_MS ?? 20 * 60_000);
 const PROCESS_LOST_RE = /引擎进程已退出|引擎本轮无响应|Claude 进程已释放/;
 /** 瞬态、可重试的错误特征（出现在 error 事件 message 里：gateway/SDK 原始细节） */
 const RETRYABLE_RE = /502|503|504|429|backend request failed|ECONNRESET|ETIMEDOUT|timed out|socket hang up|network error|gateway|rate.?limit/i;
@@ -183,7 +186,8 @@ class PushQueue<T> {
 
 interface ContentBlock { type?: string; text?: string; thinking?: string; name?: string; input?: unknown }
 
-interface RoundSink { chatId: string; emit: (ev: StreamEvent) => void }
+/** 一轮的接收器。dead=轮被放弃（stall）但引擎没死：其迟到事件按 FIFO 原位丢弃，防错位灌进排队下一轮 */
+interface RoundSink { chatId: string; emit: (ev: StreamEvent) => void; dead?: boolean; deadAt?: number }
 
 export class ClaudeProvider implements RuntimeProvider {
   readonly name = 'claude';
@@ -410,6 +414,25 @@ export class ClaudeProvider implements RuntimeProvider {
     this.pumpPromise = (async () => {
       try {
         for await (const msg of q as AsyncIterable<SDKMessage>) {
+          // [T-0031 批二] 放弃轮（看门狗判死）的迟到事件按原 FIFO 归属丢弃：旧代码在 finally
+          // 里 splice 出队，但引擎其实还在处理该 prompt，其后续 text/result 会错灌进排队的
+          // 下一轮卡片（跨 chat 串台一拍）。改为不摘队、标 dead 原位吞事件，直到该轮 result
+          // 到达（或超 DEAD_SINK_MS 强制出队，防引擎死不透卡死全队列）。
+          const head = this.sinks[0];
+          if (head?.dead) {
+            if (msg.type === 'result') {
+              const rr = msg as { session_id?: string };
+              if (rr.session_id) { try { writeSavedSessionId(rr.session_id); } catch { /* 忽略 */ } } // 会话 id 仍要落盘（resume 连续性）
+              this.sinks.shift();
+              this.reassignActiveChat();
+              rtLog(`[claude] 放弃轮迟到 result 已出队丢弃 chat=${head.chatId.slice(0, 8)}`);
+            } else if (Date.now() - (head.deadAt ?? 0) > DEAD_SINK_MS) {
+              this.sinks.shift();
+              this.reassignActiveChat();
+              rtLog(`[claude] 放弃轮超 ${Math.round(DEAD_SINK_MS / 60000)}min 无 result，放弃对齐直接出队（防卡死后续轮次）`);
+            }
+            continue;
+          }
           if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
             const blocks = msg.message.content as ContentBlock[];
             const sink = this.activeSink();
@@ -719,9 +742,11 @@ export class ClaudeProvider implements RuntimeProvider {
         }
       } finally {
         clearInterval(stallTimer);
-        // 兜底出队：正常路径由 pump 在收到 result 时 shift，异常/stall 时在此清理，防止泄漏
+        // 兜底出队：正常路径由 pump 在收到 result 时 shift。
+        // [T-0031 批二] 异常/stall 时不再 splice（摘队会把后续轮事件错位灌进别的卡片），
+        // 改为原位标 dead：pump 按 FIFO 丢弃该轮迟到事件，直到它的 result 或超时。
         const i = this.sinks.indexOf(sink);
-        if (i >= 0) this.sinks.splice(i, 1);
+        if (i >= 0) { sink.dead = true; sink.deadAt = Date.now(); }
         out.close();
       }
 
