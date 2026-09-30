@@ -121,7 +121,9 @@ export class MiMoProvider implements RuntimeProvider {
   private nextId = 100;
   /** 按 request id 等待的响应 resolver —— 存 {resolve,reject} 两把手：进程没了要能 reject 掉等待方 */
   private pending = new Map<number, { resolve: (msg: any) => void; reject: (e: Error) => void }>();
-  private activePrompt: ActivePrompt | null = null;
+  // [T-0031 批二] 按 ACP sessionId 路由（旧单槽 activePrompt 在两会话并发时，后注册的
+  // 会覆盖先注册的 ⇒ 先到会话的流式内容灌进后到会话的卡片=跨会话串台）。zcode 的 Map 模式照抄。
+  private activePrompts = new Map<string, ActivePrompt>();
   private currentStreamEnd: Promise<void> | null = null;
   private interruptedSessionIds = new Set<string>();
   private sessions = new Map<string, AcpSession>();
@@ -164,21 +166,23 @@ export class MiMoProvider implements RuntimeProvider {
   }
 
   async interrupt(): Promise<void> {
-    if (!this.activePrompt || !this.child) return;
-    const target = this.activePrompt;
-    try {
-      this.child.stdin!.write(JSON.stringify({
-        jsonrpc: '2.0', method: 'session/cancel',
-        params: { sessionId: target.sessionId },
-      }) + '\n');
-      rtLog(`[mimo] interrupt session=${target.sessionId.slice(0, 8)}`);
-    } catch {}
-    this.interruptedSessionIds.add(target.sessionId);
+    if (this.activePrompts.size === 0 || !this.child) return;
+    const targets = [...this.activePrompts.values()];
+    for (const target of targets) {
+      try {
+        this.child.stdin!.write(JSON.stringify({
+          jsonrpc: '2.0', method: 'session/cancel',
+          params: { sessionId: target.sessionId },
+        }) + '\n');
+        rtLog(`[mimo] interrupt session=${target.sessionId.slice(0, 8)}`);
+      } catch {}
+      this.interruptedSessionIds.add(target.sessionId);
+    }
     if (this.currentStreamEnd) {
       // [2026-09-25 自测实锤·失忆根治补充] mimocode 长文本生成中**无视 session/cancel**，
       // 实测中断后仍连写 6.5 分钟不停；原先此处无限 await 本轮收口 ⇒ 飞书"打断/插队"
       // 卡住数分钟，正是"像断线"的真实触发条件之一。改为有界等待 15s：
-      // 超时即本地强制收口（activePrompt 置空 ⇒ 引擎迟到的散串 update 自然丢弃；
+      // 超时即本地强制收口（摘除挂载 ⇒ 引擎迟到的散串 update 自然丢弃；
       // 会话已由 interruptedSessionIds 保留 ⇒ 记忆不丢，下轮原会话续聊）。
       const ended = await Promise.race([
         this.currentStreamEnd.then(() => true),
@@ -186,8 +190,10 @@ export class MiMoProvider implements RuntimeProvider {
       ]);
       rtLog(`[mimo] interrupt: current turn ${ended ? 'fully ended' : 'FORCED settle after 15s（引擎无视 cancel，本地收口，会话保留）'}`);
       if (!ended) {
-        if (this.activePrompt === target) this.activePrompt = null;
-        target.onDone(); // onDone 幂等（settled 首判），已流出正文按正常完成收口
+        for (const t of targets) {
+          this.activePrompts.delete(t.sessionId);
+          t.onDone(); // onDone 幂等（settled 首判），已流出正文按正常完成收口
+        }
       }
     }
   }
@@ -221,9 +227,9 @@ export class MiMoProvider implements RuntimeProvider {
     this.spawnPromise = null;
     this.sessions.clear();
     this.lineBuf = '';
-    const stranded = this.activePrompt;
-    this.activePrompt = null;
-    if (stranded) { try { stranded.onDone(`MiMo 引擎进程已退出，本条消息请重发（已自动复位，下条消息走新进程）`); } catch { /* 单条唤醒失败不阻塞收口 */ } }
+    const stranded = [...this.activePrompts.values()];
+    this.activePrompts.clear();
+    for (const s of stranded) { try { s.onDone(`MiMo 引擎进程已退出，本条消息请重发（已自动复位，下条消息走新进程）`); } catch { /* 单条唤醒失败不阻塞收口 */ } }
     // 票 hand-3 剩余（老大 09-20"别靠监控垃圾维持稳定，把代码写对"）：pending 过去只存
     // resolve，初始化/建会话阶段的等待方进程死了也不醒，只能干等各自兜底超时（prompt 更无超时=永生）。
     this.wakePending(`MiMo 引擎进程已退出`);
@@ -275,7 +281,7 @@ export class MiMoProvider implements RuntimeProvider {
     this.spawnPromise = null;
     this.sessions.clear();
     this.wakePending('引擎进程已关闭（主动杀，下条消息重建）');
-    this.activePrompt = null;
+    this.activePrompts.clear();
     this.lineBuf = '';
   }
 
@@ -298,7 +304,14 @@ export class MiMoProvider implements RuntimeProvider {
         continue;
       }
 
-      if (msg.method === 'session/update') { this.activePrompt?.onUpdate(msg); continue; }
+      if (msg.method === 'session/update') {
+        // [T-0031 批二] 按 ACP sessionId 路由（params 自带 sessionId，ACP 规范）：
+        // 无 id / 无挂载的 update 属于已放弃或未注册轮，丢弃——这正是防串台的本体。
+        const sid = (msg.params as { sessionId?: unknown } | undefined)?.sessionId;
+        const h = typeof sid === 'string' ? this.activePrompts.get(sid) : undefined;
+        h?.onUpdate(msg);
+        continue;
+      }
       if (msg.method === 'session/request_permission') {
         const options = msg.params?.options as Array<{ optionId: string }> | undefined;
         const allow = options?.find((o) => /allow/i.test(o.optionId))?.optionId || options?.[0]?.optionId || 'allow-once';
@@ -337,8 +350,14 @@ export class MiMoProvider implements RuntimeProvider {
           const sidMatch = /Session not found:\s*(\S+)/i.exec(s);
           const deadSid = sidMatch?.[1]?.replace(/["',].*$/, '');
           rtLog(`[mimo] ⚠️ 会话已失效（stderr: Session not found${deadSid ? ' ' + deadSid.slice(0, 12) : ''}）→ 收口在途轮次并弃用`);
-          if (this.activePrompt) {
-            try { this.activePrompt.onDone(`MiMo 会话已失效（引擎侧 Session not found），本条未能作答；下条消息自动开新会话，可直接重发`); } catch { /* 收口失败不阻塞 */ }
+          const h = deadSid ? this.activePrompts.get(deadSid) : undefined;
+          if (h) {
+            try { h.onDone(`MiMo 会话已失效（引擎侧 Session not found），本条未能作答；下条消息自动开新会话，可直接重发`); } catch { /* 收口失败不阻塞 */ }
+          } else if (!deadSid) {
+            // 拿不到 sid（stderr 没带）才退化为全员收口——有 sid 时只收当事会话，别误伤并发轮
+            for (const x of this.activePrompts.values()) {
+              try { x.onDone(`MiMo 会话已失效（引擎侧 Session not found），本条未能作答；下条消息自动开新会话，可直接重发`); } catch { /* 收口失败不阻塞 */ }
+            }
           }
           if (deadSid) {
             for (const [k, v] of this.sessions) { if (v.sessionId === deadSid || v.sessionId.startsWith(deadSid.slice(0, 12))) { this.sessions.delete(k); this.diskDelete(k); } }
@@ -371,7 +390,7 @@ export class MiMoProvider implements RuntimeProvider {
         rtLog(`[mimo] ACP exited code=${code}`);
         if (this.child === child) {
           this.child = null; this.spawnPromise = null;
-          this.sessions.clear(); this.wakePending(`引擎进程已 close（code=${code}）`); this.activePrompt = null; this.lineBuf = '';
+          this.sessions.clear(); this.wakePending(`引擎进程已 close（code=${code}）`); this.activePrompts.clear(); this.lineBuf = '';
         } else if (this.spawnPromise) {
           // 2026-09-01 修复（同 openclaw）：初始化完成前进程退出时清悬挂 spawnPromise
           this.spawnPromise = null;
@@ -647,11 +666,11 @@ export class MiMoProvider implements RuntimeProvider {
       },
       onDone: (err?: string) => { if (settled) return; /* 票 hand-3：首个终态为准（否则收口唤醒会被迟到事件盖成假错误） */ if (err) settleErr = err; settled = true; resolveSettled(); },
     };
-    this.activePrompt = promptHandler;
+    this.activePrompts.set(session.sessionId, promptHandler);
 
     this.waitResponse(promptId).then(
       (msg) => {
-        if (this.activePrompt === promptHandler) this.activePrompt = null;
+        if (this.activePrompts.get(session.sessionId) === promptHandler) this.activePrompts.delete(session.sessionId);
         // 2026-08-30 兜底：CLI 不发 _meta.usage 流事件时，从 prompt 响应捞 usage（保底命中率数据）
         if (!gotUsage) {
           const rr = msg.result as { usage?: unknown; _meta?: { usage?: unknown } } | undefined;
@@ -681,7 +700,7 @@ export class MiMoProvider implements RuntimeProvider {
         else promptHandler.onDone();
       },
       (err: unknown) => {
-        if (this.activePrompt === promptHandler) this.activePrompt = null;
+        if (this.activePrompts.get(session.sessionId) === promptHandler) this.activePrompts.delete(session.sessionId);
         // 票 hand-3④：原因说实话。原先不分起因一律写"ACP prompt 响应超时"，
         // 进程丢失/管道报错都被这句盖成谎话（老大 09-20 令：文案要说实话）。
         const em = err instanceof Error ? err.message : "";
