@@ -17,7 +17,9 @@ import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
 import { readSessionMcpServers } from './shared/per-session-mcp.js';
+import { isInFlightResumeError, reviveInFlightSession } from './shared/revive.js';
 import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
+import { AutoCompact, usedTokensOf } from '../bridge/auto-compact.js';
 
 // MCP 穿透收编（2026-09-18）：已上收 src/providers/shared/per-session-mcp.ts，
 // mimo 引擎行为 = 'stdioOnly'（首轮误判全拒实为 http 条目被拒，二轮 stdio 后真调 lark ✅，见模块注释矩阵）。
@@ -26,6 +28,26 @@ function rtLog(msg: string): void {
   const file = process.env.CTI_RT_LOG || '';
   if (!file) return;
   try { fs.appendFileSync(file, `[${new Date().toISOString()}] ${msg}\n`, 'utf-8'); } catch {}
+}
+
+/**
+ * [T-0030 09-30] mimo 原生 usage 字段是 cachedReadTokens（多个 d）/totalTokens——
+ * 直接 cast 成 UsageInfo 会把缓存命中丢成 0（命中率恒 0% 的假数据）。逐家字段映射在此收口，
+ * 禁止照抄 claude 的字段名（探针实测原文：{"totalTokens":47158,"inputTokens":1020,
+ * "outputTokens":3,"thoughtTokens":15,"cachedReadTokens":46080}）。
+ */
+function normalizeMimoUsage(u: Record<string, unknown>): UsageInfo {
+  const n = (...ks: string[]): number => { for (const k of ks) { const v = Number(u?.[k] ?? 0); if (Number.isFinite(v) && v > 0) return v; } return 0; };
+  const input = n('inputTokens', 'input_tokens');
+  const cacheRead = n('cachedReadTokens', 'cacheReadTokens', 'cache_read_input_tokens');
+  const total = n('totalTokens');
+  return {
+    inputTokens: input > 0 ? input : total,
+    outputTokens: n('outputTokens'),
+    // 只有 input 侧拿不到时才整体落到 total，此时不再叠 cacheRead（防双计）
+    cacheReadTokens: input > 0 ? cacheRead : 0,
+    requests: 1,
+  };
 }
 
 /** 解析 mimo ACP 启动命令 */
@@ -90,6 +112,10 @@ interface ActivePrompt {
 export class MiMoProvider implements RuntimeProvider {
   readonly name = 'mimo';
 
+  // [T-0030 C 类 09-30] mimo 无压缩通道（探针实测 session/compact=Method not found，CLI 仅手动
+  // /compact 无 auto）→ 接公共模块兜底告警：used/size 达阈值播一次，每会话每 10% 段一次防刷屏。
+  private readonly autoc = new AutoCompact({ log: (m) => rtLog(`[mimo] ${m}`) });
+
   private child: ChildProcess | null = null;
   private lineBuf = '';
   private nextId = 100;
@@ -106,7 +132,7 @@ export class MiMoProvider implements RuntimeProvider {
 
   private static IDLE_TIMEOUT_MS = parseInt(process.env.CTI_MIMO_IDLE_TIMEOUT_MS || '0', 10); // 🔴 09-20 老大令：默认永不回收（不主动/new 不许断），env CTI_MIMO_IDLE_TIMEOUT_MS 可覆盖
   private static MAX_SESSIONS = parseInt(process.env.CTI_MIMO_MAX_SESSIONS || '20', 10);
-  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_MIMO_TIMEOUT_MS || '300000', 10);
+  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_MIMO_TIMEOUT_MS || '1200000', 10);
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   async prepare(): Promise<void> {
@@ -132,6 +158,7 @@ export class MiMoProvider implements RuntimeProvider {
     if (sessionKey) {
       this.sessions.delete(sessionKey);
       this.diskDelete(sessionKey); // [09-25] 用户 /new 同步销掉落盘赎回记录，重启后不被"复活"（09-20 裁决：绝不复活）
+      this.autoc.clear(sessionKey); // [T-0030] /new 清该会话的告警段号，重新起算
       rtLog(`[mimo] resetSession key=${sessionKey.slice(0, 8)}`);
     }
   }
@@ -488,7 +515,31 @@ export class MiMoProvider implements RuntimeProvider {
           this.startCleanupTimer();
           rtLog(`[mimo] ✅ resumed ${oldSid.slice(0, 8)} via session/load（引擎侧记忆延续）`);
         } catch (e) {
-          rtLog(`[mimo] resume ${oldSid.slice(0, 8)} failed: ${e instanceof Error ? e.message : String(e)} → 退化为新建`);
+          // [T-0016 家法 09-27] "already active"=上一轮 turn 还在飞，不是档案丢了 → 摘掉再赎回。
+          // 命中不了就维持原样退化为新建（各家引擎错误措辞不同，不做投机分支）。
+          if (isInFlightResumeError(e)) {
+            const revived = await reviveInFlightSession<AcpSession>({
+              label: 'mimo',
+              sid: oldSid,
+              log: rtLog,
+              cancelInFlight: async () => {
+                const child = await this.ensureProcess();
+                const cid = this.nextId++;
+                this.writeStdin(child, {
+                  jsonrpc: '2.0', id: cid, method: 'session/cancel', params: { sessionId: oldSid },
+                }, 'session/cancel');
+              },
+              retryResume: () => this.resumeSession(oldSid, cwd),
+            });
+            if (revived) {
+              session = revived;
+              this.sessions.set(sessionKey, session);
+              this.startCleanupTimer();
+            }
+          }
+          if (!session) {
+            rtLog(`[mimo] resume ${oldSid.slice(0, 8)} failed: ${e instanceof Error ? e.message : String(e)} → 退化为新建`);
+          }
         }
       }
     }
@@ -553,17 +604,27 @@ export class MiMoProvider implements RuntimeProvider {
     const poke = (): void => { wakeup(); };
     let gotUsage = false;
     let gotText = false; // 已流出正文（watchdog 判定：有正文且超时=结束信号丢失，静默完成） // 本轮是否已收到 usage（防响应兜底重复记账）
+    // [T-0030 C 类] 本轮真实用量跟踪：usage_update{used,size} 只做兜底告警数据源（result 已供 stats，不双记）
+    let turnUsed = 0;
+    let turnSize = 0;
+    let lastUsageUsed = 0;
     const promptHandler: ActivePrompt = {
       promptId,
       sessionId: session.sessionId,
       onUpdate: (msg) => {
         lastOutput = Date.now();
         const update = msg.params?.update;
-        if (update?.sessionUpdate === 'agent_message_chunk' && update?.content?.type === 'text') {
+        if (update?.sessionUpdate === 'usage_update') {
+          const used = Number((update as { used?: number }).used || 0);
+          const size = Number((update as { size?: number }).size || 0);
+          if (used > 0) { turnUsed = Math.max(turnUsed, used); if (size > 0) turnSize = size; }
+        } else if (update?.sessionUpdate === 'agent_message_chunk' && update?.content?.type === 'text') {
           const delta = update.content.text;
           const metaUsage = (update as { _meta?: { usage?: unknown } })._meta?.usage as UsageInfo | undefined;
           if (metaUsage) {
-            queue.push({ type: 'usage', usage: metaUsage, sessionId: session.sessionId });
+            const mapped = normalizeMimoUsage(metaUsage as unknown as Record<string, unknown>);
+            lastUsageUsed = Math.max(lastUsageUsed, usedTokensOf(mapped));
+            queue.push({ type: 'usage', usage: mapped, sessionId: session.sessionId });
             gotUsage = true;
           } else if (delta) {
             queue.push({ type: 'text', text: delta }); gotText = true;
@@ -593,12 +654,28 @@ export class MiMoProvider implements RuntimeProvider {
         if (this.activePrompt === promptHandler) this.activePrompt = null;
         // 2026-08-30 兜底：CLI 不发 _meta.usage 流事件时，从 prompt 响应捞 usage（保底命中率数据）
         if (!gotUsage) {
-          const rr = msg.result as { usage?: UsageInfo; _meta?: { usage?: UsageInfo } } | undefined;
-          const ru = rr?._meta?.usage ?? rr?.usage;
+          const rr = msg.result as { usage?: unknown; _meta?: { usage?: unknown } } | undefined;
+          const ru = (rr?._meta?.usage ?? rr?.usage) as Record<string, unknown> | undefined;
           if (ru && (Number(ru.inputTokens ?? 0) > 0 || Number(ru.outputTokens ?? 0) > 0)) {
-            queue.push({ type: 'usage', usage: ru, sessionId: session.sessionId });
+            const mapped = normalizeMimoUsage(ru);
+            lastUsageUsed = Math.max(lastUsageUsed, usedTokensOf(mapped));
+            queue.push({ type: 'usage', usage: mapped, sessionId: session.sessionId });
+            gotUsage = true;
             poke();
           }
+        }
+        // [T-0030 C 类] usage_update 是唯一来源的 CLI 变体兜底：整轮只在收尾记一次（used=全上下文口径）
+        if (!gotUsage && turnUsed > 0) {
+          gotUsage = true;
+          lastUsageUsed = Math.max(lastUsageUsed, turnUsed);
+          queue.push({ type: 'usage', usage: { inputTokens: turnUsed, outputTokens: 0, cacheReadTokens: 0, requests: 1 }, sessionId: session.sessionId });
+          poke();
+        }
+        // [T-0030 C 类] 轮末兜底告警：mimo 无压缩通道（探针实锤 -32601），used 达阈值播一次（防刷屏在模块内）
+        const usedNow = Math.max(turnUsed, lastUsageUsed);
+        if (!msg.error && usedNow > 0) {
+          const warn = this.autoc.floorWarning(params.sessionKey, usedNow, turnSize || undefined);
+          if (warn) { queue.push({ type: 'text', text: AutoCompact.floorWarningText(warn.pct, warn.hoursDesc, 'MiMo 引擎') }); poke(); }
         }
         if (msg.error) promptHandler.onDone(msg.error.message || JSON.stringify(msg.error));
         else promptHandler.onDone();
