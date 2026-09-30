@@ -39,6 +39,7 @@ import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from '
 import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
 import { resolveMcpArgPaths } from '../tools/mcp-path-resolve.js';
 import { readCtiMcpDefs } from './shared/per-session-mcp.js';
+import { isInFlightResumeError, reviveInFlightSession } from './shared/revive.js';
 
 function rtLog(msg: string): void {
   const file = process.env.CTI_RT_LOG || '';
@@ -247,6 +248,13 @@ interface ZcodeSession {
   cwd: string;
   lastUsed: number;
   personaInjected: boolean;
+  /**
+   * 票 T-0026（09-29）：本轮的 sessionId 是从落盘账本**赎回**的（session/resume 成功），
+   * 不是新建的。true ⇒ 引擎档案里已经带着首条注入的人设、也已经记着上文，
+   * 于是：①人设不再灌第二遍；②bridge 的影子历史不再回灌（否则真历史+影子历史双份，
+   * 每步多喂数千到上万字符 —— 09-29 实测 zcode 每步请求体 122K~158K 字符、缓存命中恒 0）。
+   */
+  resumedFromLedger?: boolean;
 }
 
 interface TurnSink {
@@ -291,7 +299,7 @@ export class ZcodeProvider implements RuntimeProvider {
   private turns = new Map<string, TurnSink>();
   private spawnPromise: Promise<ChildProcess> | null = null;
 
-  private static STALL_MS = parseInt(process.env.CTI_ZCODE_STALL_MS || '300000', 10);
+  private static STALL_MS = parseInt(process.env.CTI_ZCODE_STALL_MS || '1200000', 10);
   /** 票 T-0003②（照 caf59ff 样板 60s 口径）：本轮连首包都没到就只等这个 —— 疑引擎进程/网关不在；
    *  已收到过引擎事件则按 STALL_MS 长阈值放行（工具执行期间本来就不出流事件，别误杀长任务）。 */
   private static STALL_FIRST_MS = parseInt(process.env.CTI_ZCODE_STALL_FIRST_MS || '60000', 10);
@@ -621,6 +629,23 @@ export class ZcodeProvider implements RuntimeProvider {
         this.turns.delete(sink.sessionId);
         break;
       }
+      case 'compact_boundary': {
+        // [T-0030 B 类 09-30] zcode 归 B：压缩归引擎自管（microcompact/compact，桥不触发、不记账）。
+        // 09-29 claude 家教训：压缩真发生了桥不吭声，老大无从验证——引擎的 compact_boundary
+        // 转成卡片播报；token 细节引擎不给就不编数字。
+        const bid = String((payload as { boundaryId?: string }).boundaryId ?? '');
+        sink.emit({ type: 'text', text: `\n✅ 上下文已压缩（自动·引擎）${bid ? `#${bid.slice(0, 8)}` : ''}\n` });
+        rtLog(`[zcode] compact_boundary session=${sink.sessionId.slice(0, 8)} payload=${JSON.stringify(payload).slice(0, 220)}`);
+        break;
+      }
+      case 'microcompact_boundary':
+        // 高频（工具输出裁剪级），只留痕不上卡防刷屏
+        rtLog(`[zcode] microcompact_boundary session=${sink.sessionId.slice(0, 8)} payload=${JSON.stringify(payload).slice(0, 220)}`);
+        break;
+      case 'compact_completed':
+      case 'compact_failed':
+        rtLog(`[zcode] ${type} session=${sink.sessionId.slice(0, 8)} payload=${JSON.stringify(payload).slice(0, 220)}`);
+        break;
       default:
         break; // turn.started / part.started / message.upserted 等暂无消费方
     }
@@ -677,8 +702,18 @@ export class ZcodeProvider implements RuntimeProvider {
       existing.lastUsed = Date.now();
       return existing;
     }
-    if (existing && params.freshSession) {
-      // /new：server 端 close + 丢映射
+    // [票 T-0026 09-29 失忆根治] freshSession 有两个来源，必须分道（这是 session.ts:151 那句
+    // 09-20 裁决「重启恢复≠用户 /new，provider 可据此走赎回通道」的本意）：
+    //   user-new = 人主动 /new ⇒ 旧档案作废，绝不复活；
+    //   restore  = 桥重启恢复 ⇒ 该赎回，不是该新建。
+    // 家族里 dsh.ts:1001 / mimo.ts:522 早就这么写了，zcode 家是漏网的那一个：它只看布尔位，
+    // 于是每次重启都把 restore 当成 /new —— 连账本都不读就直接 create，而 create 成功后
+    // persistSessionId 又用新 id **覆盖**旧 id ⇒ 旧档案从此永久赎回无门。
+    // 现行犯：09-29 18:51:42 服务重启 → 10:52:40Z `session created: sess_507`（不是 resumed），
+    // 前一夜的上下文被就地抹掉；日志里也没有第 764 行那条「resume 失败」——因为它根本没发起过赎回。
+    const reviveAllowed = !params.freshSession || params.freshReason === 'restore';
+    if (existing && params.freshSession && !reviveAllowed) {
+      // /new：server 端 close + 丢映射（restore 走不到这里：重启不该杀掉还活着的引擎会话）
       try { this.request('session/close', { sessionId: existing.sessionId }, 8000).catch(() => {}); } catch { /* 忽略 */ }
       this.turns.delete(existing.sessionId);
       this.sessions.delete(sessionKey);
@@ -693,9 +728,11 @@ export class ZcodeProvider implements RuntimeProvider {
     const mcpServers = buildMcpServers();
     const workspace = { workspaceKey: cwd, workspacePath: cwd };
     let sessionId = '';
+    let resumedFromLedger = false;
 
     // 断线续接：桥接重启后从落盘映射 resume（服务端会话持久化），失败回退 create
-    const savedId = !params.freshSession && !existing ? loadPersistedSessionId(sessionKey) : null;
+    // 票 T-0026：门槛从「非 fresh」放宽到「reviveAllowed」——restore 也算允许，否则重启必失忆。
+    const savedId = reviveAllowed && !existing ? loadPersistedSessionId(sessionKey) : null;
     if (savedId) {
       // 🔴 票 zcode-r：resume 的入参 schema（zcode.cjs `gKe`，dispatch 见 A8n→eo(gKe,t)）是
       // m.object({sessionId, workspace?, thoughtLevel?, mcpServers?, toolAllowlist?,
@@ -712,6 +749,7 @@ export class ZcodeProvider implements RuntimeProvider {
       try {
         const r = await this.request('session/resume', resumeParams, 30000);
         sessionId = String(r?.session?.sessionId || r?.sessionId || savedId);
+        resumedFromLedger = true; // 票 T-0026：真历史在引擎里，人设与影子历史都不得再灌第二遍
         // mode 判据：**用 settings.mode.current，不要用 session.mode**。实测 create 带
         // mode:'yolo' 成功时，快照里 session.mode 回的是 "build"（yme(): projection?.mode ??
         // app.getMode?.() ?? "build"，projection 在首轮前不刷新），而 settings.mode.current
@@ -732,13 +770,36 @@ export class ZcodeProvider implements RuntimeProvider {
           }
         }
       } catch (e) {
-        rtLog(`[zcode] resume 失败，回退新建: ${e instanceof Error ? e.message : String(e).slice(0, 120)}`);
-        // 🔴 老大令 09-19（票 hand-1 补接线）：resume 失败 = 引擎历史不可恢复 → 自动 /new
-        // （桥清影子并告知用户），不回灌。对齐 mimo.ts:338-341 —— 此前 zcode 全文件零
-        // onSessionLost，此处是它唯一的"丢失性新建"点。新建成功后 persistSessionId
-        // 覆盖落盘，不会每条消息反复踩同一个坏 id。
-        params.onSessionLost?.();
-        sessionId = '';
+        // [T-0016 家法 09-27] "上一轮还在飞"≠档案丢了 → session/stop 摘掉再赎回，记忆原样。
+        // 命中不了错误特征就维持原样退化为新建（zcode 与 dsh 错误措辞不同，不做投机分支）。
+        let revivedSid: string | null = null;
+        if (isInFlightResumeError(e)) {
+          revivedSid = await reviveInFlightSession<string>({
+            label: 'zcode',
+            sid: savedId,
+            log: rtLog,
+            cancelInFlight: async () => {
+              this.request('session/stop', { sessionId: savedId }, 8000).catch(() => {});
+            },
+            retryResume: async () => {
+              const r2 = await this.request('session/resume', resumeParams, 30000);
+              return String(r2?.session?.sessionId || r2?.sessionId || savedId);
+            },
+          });
+        }
+        if (revivedSid) {
+          sessionId = revivedSid;
+          resumedFromLedger = true; // 同上：救回来的就是原档案，记忆原样，不再喂影子
+          rtLog(`[zcode] resume 撞在飞 → 已救回 ${sessionId.slice(0, 8)}，记忆原样不弹卡`);
+        } else {
+          rtLog(`[zcode] resume 失败，回退新建: ${e instanceof Error ? e.message : String(e).slice(0, 120)}`);
+          // 🔴 老大令 09-19（票 hand-1 补接线）：resume 失败 = 引擎历史不可恢复 → 自动 /new
+          // （桥清影子并告知用户），不回灌。对齐 mimo.ts:338-341 —— 此前 zcode 全文件零
+          // onSessionLost，此处是它唯一的"丢失性新建"点。新建成功后 persistSessionId
+          // 覆盖落盘，不会每条消息反复踩同一个坏 id。
+          params.onSessionLost?.();
+          sessionId = '';
+        }
       }
     }
     if (!sessionId) {
@@ -762,7 +823,9 @@ export class ZcodeProvider implements RuntimeProvider {
       rtLog(`[zcode] subscribe 失败（继续，事件可能仍可达）: ${e instanceof Error ? e.message : String(e).slice(0, 120)}`);
     }
 
-    const session: ZcodeSession = { sessionId, cwd, lastUsed: Date.now(), personaInjected: false };
+    // 票 T-0026：赎回成功的那条路，引擎档案里已有首条人设 ⇒ personaInjected 直接置真，
+    // 不再往第一条消息灌第二遍（新建路仍是 false，照旧注入）。
+    const session: ZcodeSession = { sessionId, cwd, lastUsed: Date.now(), personaInjected: resumedFromLedger, resumedFromLedger };
     this.sessions.set(sessionKey, session);
     persistSessionId(sessionKey, sessionId);
     return session;
@@ -788,7 +851,10 @@ export class ZcodeProvider implements RuntimeProvider {
       session.personaInjected = true;
     }
     // /new 后注入历史上下文（含 /compact 摘要，对齐 claude/codex）
-    const historyText = params.freshSession && params.history && params.history.length > 0
+    // 票 T-0026：赎回成功时**绝不**再灌影子历史 —— 引擎档案里已有真历史，两份叠加等于每步
+    // 多喂一遍全部旧对话（09-29 实测每步请求体 12 万字符起）。赎回失败退回新建时
+    // resumedFromLedger=false，影子注入照旧，不会两头都丢（对齐 dsh.ts:1000 的口径）。
+    const historyText = params.freshSession && !session.resumedFromLedger && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
       : '';
     if (historyText) fullPrompt = `${historyText}\n\n---\n\n${fullPrompt}`;
