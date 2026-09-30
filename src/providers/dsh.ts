@@ -365,7 +365,9 @@ export class DshProvider implements RuntimeProvider {
   /** 按 request id 等待的响应 resolver —— 存 {resolve,reject} 两把手：进程没了要能 reject 掉等待方 */
   private pending = new Map<number, { resolve: (msg: any) => void; reject: (e: Error) => void }>();
   /** 当前活跃 prompt（流式事件分发目标） */
-  private activePrompt: ActivePrompt | null = null;
+  // [T-0031 批二] 按 ACP sessionId 路由（旧单槽并发串台，zcode Map 模式照抄）。
+  // dsh 本就多会话共用一个 ACP 进程（10 个对话 = 10 个 session），单槽是历史欠账。
+  private activePrompts = new Map<string, ActivePrompt>();
   /** 当前 streamChat 流的结束 promise（interrupt 等待它，确保 turn 完全结束后再放行下一条） */
   private currentStreamEnd: Promise<void> | null = null;
   /** 被 interrupt 取消过的 sessionId：下一条消息必须开新 session（cancel 后旧 turn 未释放，复用会 turn/start 冲突） */
@@ -514,20 +516,22 @@ export class DshProvider implements RuntimeProvider {
   }
 
   async interrupt(): Promise<void> {
-    if (!this.activePrompt || !this.child) return;
+    if (this.activePrompts.size === 0 || !this.child) return;
     // session/cancel 必须传真实 sessionId（空字符串 ACP 找不到会话 → 插队无效）
-    try {
-      this.child.stdin!.write(JSON.stringify({
-        jsonrpc: '2.0', method: 'session/cancel',
-        params: { sessionId: this.activePrompt.sessionId },
-      }) + '\n');
-      rtLog(`[dsh] interrupt session=${this.activePrompt.sessionId.slice(0, 8)}`);
-    } catch {}
-    // [2026-09-29 失忆根治] 打断≠换会话：只记一笔供 streamChat 清标记+日志，会话继续用。
-    // 旧家法"cancel 后复用会 turn/start 冲突故必须新建"是失忆元凶——mimo 09-25 已实测证伪同类
-    // 判断；且 interrupt() 下面就阻塞到 turn settled，冲突的前提本就不成立。强制换代还会撞
-    // resume 的 `already active`（会话明明活着）被误判失败 → 清档案+清影子 = 插话必失忆。
-    this.interruptedSessionIds.add(this.activePrompt.sessionId);
+    for (const target of this.activePrompts.values()) {
+      try {
+        this.child.stdin!.write(JSON.stringify({
+          jsonrpc: '2.0', method: 'session/cancel',
+          params: { sessionId: target.sessionId },
+        }) + '\n');
+        rtLog(`[dsh] interrupt session=${target.sessionId.slice(0, 8)}`);
+      } catch {}
+      // [2026-09-29 失忆根治] 打断≠换会话：只记一笔供 streamChat 清标记+日志，会话继续用。
+      // 旧家法"cancel 后复用会 turn/start 冲突故必须新建"是失忆元凶——mimo 09-25 已实测证伪同类
+      // 判断；且 interrupt() 下面就阻塞到 turn settled，冲突的前提本就不成立。强制换代还会撞
+      // resume 的 `already active`（会话明明活着）被误判失败 → 清档案+清影子 = 插话必失忆。
+      this.interruptedSessionIds.add(target.sessionId);
+    }
     // ⚠️ cancel 是异步的：harness 标记取消后还要等当前 turn quiesce 才真正结束。
     // 若不等待，下一条 prompt 会在 turn 1 未结束时发出 → "turn/start 2 while turn 1 is still open"。
     // 所以 interrupt() 必须阻塞到当前 streamChat 的流彻底结束（settled）再返回。
@@ -571,9 +575,9 @@ export class DshProvider implements RuntimeProvider {
     for (const k of this.sessions.keys()) this.lostReasons.set(k, 'restart');
     this.sessions.clear();
     this.lineBuf = '';
-    const stranded = this.activePrompt;
-    this.activePrompt = null;
-    if (stranded) { try { stranded.onDone(`DSH 引擎进程已退出，本条消息请重发（已自动复位，下条消息走新进程）`); } catch { /* 单条唤醒失败不阻塞收口 */ } }
+    const stranded = [...this.activePrompts.values()];
+    this.activePrompts.clear();
+    for (const st of stranded) { try { st.onDone(`DSH 引擎进程已退出，本条消息请重发（已自动复位，下条消息走新进程）`); } catch { /* 单条唤醒失败不阻塞收口 */ } }
     // 票 hand-3 剩余（老大 09-20"别靠监控垃圾维持稳定，把代码写对"）：pending 过去只存
     // resolve，初始化/建会话阶段的等待方进程死了也不醒，只能干等各自兜底超时（prompt 更无超时=永生）。
     this.wakePending(`DSH 引擎进程已退出`);
@@ -628,7 +632,7 @@ export class DshProvider implements RuntimeProvider {
     for (const k of this.sessions.keys()) this.lostReasons.set(k, 'restart');
     this.sessions.clear();
     this.wakePending('引擎进程已关闭（主动杀，下条消息重建）');
-    this.activePrompt = null;
+    this.activePrompts.clear();
     this.lineBuf = '';
   }
 
@@ -660,7 +664,10 @@ export class DshProvider implements RuntimeProvider {
 
       // 2) 服务端通知（session/update / request_permission）
       if (msg.method === 'session/update') {
-        this.activePrompt?.onUpdate(msg);
+        // [T-0031 批二] 按 ACP sessionId 路由；无 id/无挂载的 update 属于已放弃或未注册轮，丢弃
+        const sid = (msg.params as { sessionId?: unknown } | undefined)?.sessionId;
+        const h = typeof sid === 'string' ? this.activePrompts.get(sid) : undefined;
+        h?.onUpdate(msg);
         continue;
       }
       if (msg.method === 'session/request_permission') {
@@ -753,7 +760,7 @@ export class DshProvider implements RuntimeProvider {
           for (const k of this.sessions.keys()) this.lostReasons.set(k, 'restart');
           this.sessions.clear();
           this.wakePending(`引擎进程已 close（code=${code}）`);
-          this.activePrompt = null;
+          this.activePrompts.clear();
           this.lineBuf = '';
         } else if (this.spawnPromise) {
           // 2026-09-01 修复（同 openclaw）：初始化完成前进程退出时清悬挂 spawnPromise
@@ -1180,7 +1187,7 @@ export class DshProvider implements RuntimeProvider {
         resolveSettled();
       },
     };
-    this.activePrompt = promptHandler;
+    this.activePrompts.set(session.sessionId, promptHandler);
 
     // [票 T-0005 假死熔丝 09-20] 原 waitResponse(promptId) 无时限：上游掐线（网关日志实锤
     // MidStreamFallbackError/502，且"备用名单=空"）时引擎永不回包，队列卡成雕像（老大亲测 5h+）。
@@ -1194,12 +1201,12 @@ export class DshProvider implements RuntimeProvider {
     const FUSE_MS = parseInt(process.env.CTI_DSH_PROMPT_FUSE_MS || '0', 10);
     this.waitResponse(promptId, FUSE_MS > 0 ? FUSE_MS : undefined).then(
       (msg) => {
-        if (this.activePrompt === promptHandler) this.activePrompt = null;
+        if (this.activePrompts.get(session.sessionId) === promptHandler) this.activePrompts.delete(session.sessionId);
         if (msg.error) promptHandler.onDone(msg.error.message || JSON.stringify(msg.error));
         else promptHandler.onDone();
       },
       (err: unknown) => {
-        if (this.activePrompt === promptHandler) this.activePrompt = null;
+        if (this.activePrompts.get(session.sessionId) === promptHandler) this.activePrompts.delete(session.sessionId);
         // 票 hand-3④：原因说实话。原先不分起因一律写"ACP prompt 响应超时"，
         // 进程丢失/管道报错都被这句盖成谎话（老大 09-20 令：文案要说实话）。
         const em = err instanceof Error ? err.message : "";
