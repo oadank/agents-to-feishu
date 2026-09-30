@@ -816,7 +816,13 @@ export class MessageEngine {
       cardId = null;
       messageId = await this.opts.feishu.sendCardHttp(chatId, buildStreamingCardSkeleton(dividerInfo));
     }
-    if (!messageId) return;
+    if (!messageId) {
+      // [T-0031 批三] CardKit + 整卡两条通道都拿不到 messageId：旧代码直接 return = 静默吞消息
+      // （用户发了话毫无反应，且外层 finishId 把该 mid 标 done，判重台账封死重投补做）。
+      // 兑现 797 行"任一环节失败也要保证用户可见"的承诺：退化纯文本告知，绝不无声吞。
+      await this.sendError(chatId, `⚠️ 我收到了你的消息，但卡片通道暂时打不开（飞书建卡失败），没能正常作答——请稍后重发一次。`);
+      return;
+    }
     this.streamCards.set(chatId, messageId);
 
     const layers: TurnLayers = { text: '', thinking: '', toolLines: [] };
@@ -1401,6 +1407,12 @@ export class MessageEngine {
       await this.rescueInterruptedRound(chatId, pendingImageIds, pendingGenFiles, layers, isToolSent);
     } finally {
       if (flushTimer) clearTimeout(flushTimer);
+      // [T-0031 批三] 异常路径不经过 quiesce（只有正常收尾才调它清这三个）——外层 catch 渲染完
+      // 错误卡后，若还有 ≤1.8s 内挂着的 text/think/tool 节流定时器，会在 handleText 返回后触发
+      // doFlush→render(旧快照) 把刚发的错误卡覆盖掉（throw 型连错误都没了）。finally 一律清干净。
+      if (textFlushTimer) { clearTimeout(textFlushTimer); textFlushTimer = null; }
+      if (thinkFlushTimer) { clearTimeout(thinkFlushTimer); thinkFlushTimer = null; }
+      if (toolFlushTimer) { clearTimeout(toolFlushTimer); toolFlushTimer = null; }
       this.streamCards.delete(chatId);
       // 本任务结束：若 activeTaskMid 仍指向自己则清除（让插队 interrupt 检测到"旧任务已结束"）
       if (this.activeTaskMid.get(chatId) === (_replyToMessageId ?? undefined)) this.activeTaskMid.delete(chatId);
@@ -1431,6 +1443,22 @@ export class MessageEngine {
     try {
       const dir = path.join(os.tmpdir(), 'agents-to-feishu-answers');
       fs.mkdirSync(dir, { recursive: true });
+      // [T-0031 批三] 此前只写不清：每个超 28k 的答案永久留一个 .md，高频长任务 bot 的 %TEMP%
+      // 只增不减。写本次文件前先就地回收：超过 24 小时的删，再保底最多留最近 60 个（按 mtime）。
+      try {
+        const nowMs = Date.now();
+        const KEEP_MS = 24 * 3600_000;
+        const KEEP_MAX = 60;
+        const entries = fs.readdirSync(dir)
+          .map((name) => { try { return { name, mtime: fs.statSync(path.join(dir, name)).mtimeMs }; } catch { return null; } })
+          .filter((x): x is { name: string; mtime: number } => !!x)
+          .sort((a, b) => b.mtime - a.mtime);
+        for (let i = 0; i < entries.length; i++) {
+          if (i >= KEEP_MAX || nowMs - entries[i].mtime > KEEP_MS) {
+            try { fs.rmSync(path.join(dir, entries[i].name), { force: true }); } catch { /* 忽略 */ }
+          }
+        }
+      } catch { /* 回收失败不拦补发 */ }
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       const file = path.join(dir, `answer-${stamp}-${chatId.slice(-6)}.md`);
       fs.writeFileSync(file, fullText, 'utf8');
