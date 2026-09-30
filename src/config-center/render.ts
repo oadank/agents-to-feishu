@@ -231,6 +231,22 @@ const STALL_FIRST_MS_BY_RUNTIME: Record<string, string> = {
  * 生成一个 agent 的 config.env 文本。
  * 包含：飞书凭证、runtime=dsh、显示名、model/provider 展示标签、MCP URL 全局键、harness/ACP 落点、端口。
  */
+
+// ── [T-0031 批三] 渲染层转义（防用户可控字段破坏 .env / cordis.yml）──────────────
+// displayName/baseURL/serverName 等来自 PUT /api/agents、/api/providers、/api/mcps 的
+// 自由文本，一个换行就能让 config.env 后续行全变垃圾键、一个 # 能把 YAML 值当注释截断、
+// 一个单引号能令 cordis.yml 解析失败 → bot 起不来。systemPrompt 早已走 JSON.stringify
+// （render.ts 单引号内那段），这里把同口径补到其余用户可控字段。
+/** .env 值：常规 token 原样；含空格/换行/#/引号/反斜杠等则整体 JSON 双引号包裹（dotenv 认） */
+function envVal(v: string): string {
+  const s = String(v ?? '');
+  return /^[\w.\-/:@+=,]*$/.test(s) && !s.startsWith('#') ? s : JSON.stringify(s);
+}
+/** YAML 标量值：一律 JSON 双引号包裹（YAML 是 JSON 超集，转义语义精确，杜绝折行/注释/引号逃逸） */
+function yamlVal(v: unknown): string {
+  return JSON.stringify(String(v ?? ''));
+}
+
 export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra: Record<string, string> = {}): string {
   const prov = findProvider(store, agent.providerId);
   const model = prov ? findModel(store, agent.providerId, agent.modelId) : undefined;
@@ -252,32 +268,32 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   const lines: string[] = [];
   lines.push(`# agents-to-feishu agent: ${agent.id} —— 由配置中心渲染生成，勿手改（源: config-store.json）`);
   lines.push(`CTI_BOT=${agent.id}`);
-  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_APP_ID=${agent.appId}`);
-  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_APP_SECRET=${agent.appSecret}`);
+  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_APP_ID=${envVal(agent.appId)}`);
+  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_APP_SECRET=${envVal(agent.appSecret)}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_RUNTIME=${agent.runtime || 'dsh'}`);
-  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_AGENT_NAME=${agent.displayName}`);
-  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_MODEL_GROUP=${model?.label || model?.id || agent.modelId}`);
-  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_MODEL_PROVIDER=${prov?.displayName || prov?.id || agent.providerId}`);
+  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_AGENT_NAME=${envVal(agent.displayName)}`);
+  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_MODEL_GROUP=${envVal(model?.label || model?.id || agent.modelId)}`);
+  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_MODEL_PROVIDER=${envVal(prov?.displayName || prov?.id || agent.providerId)}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_SHOW_TOOL_CALL_CARDS=${agent.showToolCallCards}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_SHOW_AGENT_DIVIDER=${agent.showAgentDivider}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_SHOW_THINKING_CARDS=${agent.showThinkingCards !== false}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_DASHBOARD_PORT=${agent.port}`);
-  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_PROVIDER_ID=${agent.providerId || ''}`);
+  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_PROVIDER_ID=${envVal(agent.providerId || '')}`);
   // 状态栏显示模式（2026-08-30 老大要求二选一）：full=图标+文字 | icon=仅图标
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_DIVIDER_MODE=${agent.dividerMode || 'full'}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_CONTEXT_WINDOW=${model?.contextWindow || 1000000}`);
   // 飞书内置能力白名单（缺省全开）：逗号分隔，mcp-stdio 按此过滤 lark 工具
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_LARK_TOOLS=${(agent.feishuCaps && agent.feishuCaps.length ? agent.feishuCaps : ['list_chats', 'chat_history', 'send_text', 'send_image', 'create_doc', 'get_doc_text', 'bot_directory', 'send_post', 'send_as_user', 'chat_members']).join(',')}`);
   // 真实模型 ID + 网关 base_url（provider 端读这两个跑真实值，而非只读展示标签 MODEL_GROUP）
-  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_MODEL=${model?.id || agent.modelId}`);
-  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_BASE_URL=${acpGatewayBaseUrl(agent.id) || prov?.baseURL || ''}`);
+  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_MODEL=${envVal(model?.id || agent.modelId)}`);
+  lines.push(`CTI_BOT_${agent.id.toUpperCase()}_BASE_URL=${envVal(acpGatewayBaseUrl(agent.id) || prov?.baseURL || '')}`);
   // 真实 key 穿透（2026-09-11 从 zcode 专属升为全 runtime 统一）：
   // 按当前 provider 的 apiKeyEnv 从凭证层解析真实 key，写 CTI_BOT_<ID>_API_KEY。
   // provider 端优先读它 ⇒ 配置中心换 provider/model，key 跟着穿透、apply 后即可生效；
   // 否则进程继承的 HKCU 级固定值（如 OPENAI_API_KEY）会永远压住配置中心。
   {
     const realKey = (prov?.apiKeyEnv ? (readCredentialKey(prov.apiKeyEnv) || readOldEnvKey(prov.apiKeyEnv)) : '') || '';
-    lines.push(`CTI_BOT_${agent.id.toUpperCase()}_API_KEY=${realKey}`);
+    lines.push(`CTI_BOT_${agent.id.toUpperCase()}_API_KEY=${envVal(realKey)}`);
   }
   // 首包阈值（票 T-0003②）：只给需要它的五家（claude/codex/zcode/gemini/hermes）下发，
   // 其余 runtime 不写这行（键不存在 = provider 用自家兜底默认值）。
@@ -325,7 +341,7 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
     lines.push('CTI_SKILLS_DIRS=C:\\Users\\oadan\\.dsh\\skills');
   }
   lines.push('');
-  lines.push(`CTI_DEFAULT_WORKDIR=${workdir}`);
+  lines.push(`CTI_DEFAULT_WORKDIR=${envVal(workdir)}`);
   if (agent.runtime === 'claude') {
     // claude 引擎：CLI 路径必须显式保留。丢失会让 provider 回落 .bat ⇒ spawn EINVAL。
     // 优先级：现有 env 值 > 进程环境 > 官方默认路径
@@ -337,9 +353,9 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   }
   if (isDsh) {
     // DSH harness 接入（仅 dsh 引擎需要）
-    lines.push(`CTI_DSH_HARNESS_PATH=${harness}`);
-    lines.push(`CTI_DSH_ACP_CONFIG=${path.join(botHome, 'cordis.yml')}`);
-    lines.push(`CTI_DSH_ACP_CWD=${workdir}`);
+    lines.push(`CTI_DSH_HARNESS_PATH=${envVal(harness)}`);
+    lines.push(`CTI_DSH_ACP_CONFIG=${envVal(path.join(botHome, 'cordis.yml'))}`);
+    lines.push(`CTI_DSH_ACP_CWD=${envVal(workdir)}`);
     lines.push('');
   } else {
     // 非 dsh 引擎（claude/codex/mimo/...）：engine/readCacheStats 也靠 CTI_DSH_ACP_CONFIG
@@ -347,7 +363,7 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
     // ⚠️ 这里只是「路径锚点」：消费方（stats.ts / bridge/engine.readCacheStats / providers/dsh.ts）
     // 用正则从路径里抠出 <bot> 名，**从不读该文件内容** ⇒ non-dsh 引擎下这个 cordis.yml 不必存在。
     // （2026-09-11 已清理 ~/.dsh/gemini-bot/ 下 8-26 遗留的过期 cordis.yml，此键保持不变。）
-    lines.push(`CTI_DSH_ACP_CONFIG=${path.join(botHome, 'cordis.yml')}`);
+    lines.push(`CTI_DSH_ACP_CONFIG=${envVal(path.join(botHome, 'cordis.yml'))}`);
     lines.push('');
   }
   // ── 桥接层窗口单一真源 + 回声抑制档（票 T-0019，2026-09-29 dsh）──
@@ -390,7 +406,7 @@ export function renderCordisYml(store: ConfigStore, agent: AgentDef): string {
   const personaPath = path.join(botHome, 'persona.md');
 
   const L: string[] = [];
-  L.push(`# ${agent.displayName} bot ACP automation server composition (agents-to-feishu config-center owned).`);
+  L.push(`# ${agent.displayName.replace(/\r?\n/g, ' ')} bot ACP automation server composition (agents-to-feishu config-center owned).`);
   L.push(`# Generated from config-store.json by src/config-center/render.ts — DO NOT EDIT BY HAND.`);
   L.push(`# Spawned by the DshProvider via:`);
   L.push(`#   node --import tsx/esm <harness>/packages/examples/acp-demo/src/bin.ts --config this-file`);
@@ -399,16 +415,16 @@ export function renderCordisYml(store: ConfigStore, agent: AgentDef): string {
 
   // LLM provider 段
   if (prov.plugin === 'llm-pi-ai') {
-    L.push(`# LLM provider: ${prov.displayName} (llm-pi-ai / openai-completions 直连)`);
+    L.push(`# LLM provider: ${prov.displayName.replace(/\r?\n/g, ' ')} (llm-pi-ai / openai-completions 直连)`);
     L.push('- id: llm-pi-ai');
     L.push("  name: '@deepseek-ai/dsh-llm-pi-ai'");
     L.push('  config:');
     L.push('    providers:');
     L.push(`      ${prov.id}:`);
     L.push(`        api: ${prov.api || 'openai-completions'}`);
-    L.push(`        baseURL: ${prov.baseURL}`);
-    L.push(`        displayName: ${prov.displayName}`);
-    L.push(`        apiKeyEnv: ${prov.apiKeyEnv}`);
+    L.push(`        baseURL: ${yamlVal(prov.baseURL)}`);
+    L.push(`        displayName: ${yamlVal(prov.displayName)}`);
+    L.push(`        apiKeyEnv: ${yamlVal(prov.apiKeyEnv)}`);
     // 2026-08-29 修复"思考层消失"：llm-pi-ai 对手工声明的模型默认视为"不会思考"
     // （无 reasoning 元数据），必须声明 thinkingFormat + reasoning 默认档 + 每模型
     // reasoningEfforts，模型才会吐 agent_thought_chunk（ACP 探针实测回归）。
@@ -420,7 +436,7 @@ export function renderCordisYml(store: ConfigStore, agent: AgentDef): string {
     }
     L.push('        models:');
     for (const m of prov.models) {
-      L.push(`          - id: ${m.id}`);
+      L.push(`          - id: ${yamlVal(m.id)}`);
       if (!dshThinkOff) {
         L.push('            reasoningEfforts:');
         L.push('              high: high');
@@ -436,17 +452,17 @@ export function renderCordisYml(store: ConfigStore, agent: AgentDef): string {
     }
   } else {
     // llm-deepseek（官方协议，经 baseURL 可走网关）
-    L.push(`# LLM provider: ${prov.displayName} (llm-deepseek)`);
+    L.push(`# LLM provider: ${prov.displayName.replace(/\r?\n/g, ' ')} (llm-deepseek)`);
     L.push('- id: llm-deepseek');
     L.push("  name: '@deepseek-ai/dsh-llm-deepseek'");
     L.push('  config:');
     L.push('    thinking: enabled');
     L.push('    reasoningEffort: high');
-    if (prov.baseURL) L.push(`    baseURL: ${prov.baseURL}`);
-    L.push(`    apiKeyEnv: ${prov.apiKeyEnv}`);
+    if (prov.baseURL) L.push(`    baseURL: ${yamlVal(prov.baseURL)}`);
+    L.push(`    apiKeyEnv: ${yamlVal(prov.apiKeyEnv)}`);
     L.push('    models:');
     for (const m of prov.models) {
-      L.push(`      - id: ${m.id}`);
+      L.push(`      - id: ${yamlVal(m.id)}`);
     }
   }
   L.push('');
@@ -479,8 +495,8 @@ export function renderCordisYml(store: ConfigStore, agent: AgentDef): string {
   L.push('- id: acp-agent');
   L.push("  name: '@deepseek-ai/dsh-acp-demo'");
   L.push('  config:');
-  L.push(`    provider: ${prov.id}`);
-  L.push(`    model: ${model.id}`);
+  L.push(`    provider: ${yamlVal(prov.id)}`);
+  L.push(`    model: ${yamlVal(model.id)}`);
   L.push(`    persistenceRoot: !!js "process.env.DSH_BOT_SESSIONS_ROOT ?? '${botHome.replace(/\\/g, '/')}/sessions'"`);
   L.push("    persistenceCompression: 'zstd'");
   L.push('    workspaceContext:');
@@ -622,16 +638,16 @@ function renderMcpBlock(L: string[], m: McpDef): void {
   L.push("  name: '@deepseek-ai/dsh-mcp-client'");
   L.push('  config:');
   L.push(`    transport: '${m.transport}'`);
-  L.push(`    serverName: '${m.serverName}'`);
+  L.push(`    serverName: ${yamlVal(m.serverName)}`);
   if (m.transport === 'streamable-http') {
-    if (m.url) L.push(`    url: '${m.url}'`);
+    if (m.url) L.push(`    url: ${yamlVal(m.url)}`);
   } else {
-    if (m.command) L.push(`    command: '${m.command}'`);
+    if (m.command) L.push(`    command: ${yamlVal(m.command)}`);
     if (m.args?.length) L.push(`    args: ${JSON.stringify(resolveMcpArgPaths(m.id, m.args))}`);
     if (m.env && Object.keys(m.env).length) {
       L.push('    env:');
       for (const [k, v] of Object.entries(m.env)) {
-        L.push(`      ${k}: '${v}'`);
+        L.push(`      ${k}: ${yamlVal(v)}`);
       }
     }
   }
