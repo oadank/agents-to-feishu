@@ -54,7 +54,7 @@ const HTTP_BASE = (process.env.CTI_DEEPTUTOR_BASE || 'http://127.0.0.1:8001').re
 const WS_BASE = HTTP_BASE.replace(/^http/, 'ws') + '/ws';
 const PERSONA = process.env.CTI_DEEPTUTOR_PERSONA || '暴躁老青鱼';
 const KB_REFRESH_MS = 10 * 60 * 1000;
-const TURN_TIMEOUT_MS = 10 * 60 * 1000; // 单轮保护上限（DeepTutor 自身有租约看门狗）
+const TURN_TIMEOUT_MS = parseInt(process.env.CTI_DEEPTUTOR_TURN_TIMEOUT_MS || '1800000', 10) // 单轮绝对上限（非无输出判定）；长任务 10min 会误杀，DeepTutor 自身有租约看门狗（env 可覆盖）
 const PROTOCOL = '2.0';
 
 // [2026-09-20 T-0007·老大终案] 主聊天通道(/ws unified)按渠道 fail-closed：
@@ -125,6 +125,12 @@ interface DsAttachment {
 
 export function createDeeptutorProvider(): RuntimeProvider {
   const sessions = new SessionMap();
+
+  // [T-0030 C 类 09-30] DeepTutor 无压缩通道（OpenAPI 零 compact 端点）且零 usage 上报
+  //（provider 不发 usage 事件）→ 按票降级：轮数硬上限告警（默认 200 轮，每会话只发一次）。
+  const turnCounts = new Map<string, number>();
+  const capWarned = new Set<string>();
+  const TURN_CAP = Number(process.env.CTI_DEEPTUTOR_AUTOCOMPACT_TURNS || 200) || 200;
   let kbCache: { ids: string[]; at: number } | null = null;
   let activeTurn: { ws: WebSocket; turnId: string; sessionId: string; pkey: string } | null = null;
 
@@ -410,7 +416,7 @@ export function createDeeptutorProvider(): RuntimeProvider {
     try {
       for (;;) {
         if (Date.now() > deadline) {
-          yield { type: 'error', message: 'DeepTutor 本轮超时（10 分钟保护）' };
+          yield { type: 'error', message: `DeepTutor 本轮超时（${Math.round(TURN_TIMEOUT_MS / 60000)} 分钟保护上限）` };
           break;
         }
         const ev = await nextEvent();
@@ -422,6 +428,15 @@ export function createDeeptutorProvider(): RuntimeProvider {
           if (tail) yield tail;
           break;
         }
+      }
+      // [T-0030 C 类] 轮数硬上限告警：usage 全零 → 兜底层天然不可用，按票降级为轮数口径。
+      // 计数含失败轮（轮就是轮）；/new 后 resetSession 清账重新起算。
+      const tc = (turnCounts.get(params.sessionKey) ?? 0) + 1;
+      turnCounts.set(params.sessionKey, tc);
+      if (tc >= TURN_CAP && !capWarned.has(params.sessionKey)) {
+        capWarned.add(params.sessionKey);
+        rtLog(`deeptutor 轮数硬上限告警 key=${params.sessionKey.slice(0, 8)} turns=${tc} cap=${TURN_CAP}`);
+        yield { type: 'text', text: `\n⚠️ 本会话已累计 ${tc} 轮（DeepTutor 无自动压缩能力，会话上下文只增不减）——建议发 /new 开新会话，避免长对话质量劣化。\n` };
       }
       yield { type: 'done' };
     } finally {
@@ -454,6 +469,8 @@ export function createDeeptutorProvider(): RuntimeProvider {
         // gen+1 换 key，下一轮必是服务端新会话。
         const gk = `__gen__:${sessionKey}`;
         sessions.set(gk, String(Number(sessions.get(gk) ?? '0') + 1));
+        turnCounts.delete(sessionKey); // [T-0030] /new 清轮数账，告警重新起算
+        capWarned.delete(sessionKey);
       }
     },
 
