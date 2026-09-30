@@ -22,6 +22,7 @@ import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent } from './types.js';
 import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
 import { readCtiMcpDefs } from './shared/per-session-mcp.js';
+import { isInFlightResumeError, reviveInFlightSession } from './shared/revive.js';
 import { resolveMcpArgPaths } from '../tools/mcp-path-resolve.js';
 
 function rtLog(msg: string): void {
@@ -33,11 +34,26 @@ function rtLog(msg: string): void {
 function resolveWbCli(): string {
   const custom = process.env.CTI_WB_CLI || '';
   if (custom && fs.existsSync(custom)) return custom;
-  return 'C:\\Program Files\\WorkBuddy\\resources\\app.asar.unpacked\\cli\\dist\\codebuddy.js';
+  // WorkBuddy 2026-09-21 升级后 dist/codebuddy.js（TUI 包）已删，只剩 headless / lite-wb。
+  // --acp 是 headless 场景，按 现行 headless → 旧 TUI → bin 启动器 顺序认。
+  const root = 'C:\\Program Files\\WorkBuddy\\resources\\app.asar.unpacked\\cli';
+  const candidates = [
+    root + '\\dist\\codebuddy-headless.js',
+    root + '\\dist\\codebuddy.js',
+    root + '\\bin\\codebuddy',
+  ];
+  for (const p of candidates) if (fs.existsSync(p)) return p;
+  return candidates[0];
 }
 
 /** 人设交付：新会话首条消息前置 systemPrompt（对齐 12 家老法，不碰 spawn 参数）。 */
 
+// ⚠ 09-29 夜实测后撤回的尝试（留字为证，别再走一遍）：曾以为病根是"取的钥匙不对"——旧写法
+// 无脑取 process.env.CODEBUDDY_API_KEY / 模型池第一条（= deepseek-v4-flash 那把 35 位），改成
+// "按 resolveModel() 到 ~/.workbuddy/models.json 里精确取所选模型的 apiKey"。tsc 全绿、22:51:46
+// 重启装载、22:52:09 实测：取到了本机 litellm 钥匙（9 位 sk-200*）**仍然 504**（第 6 次）。
+// ⇒ 假设被否：腾讯 wb.tencentbuddy.com 那句"API key verification service temporarily unavailable"
+// 与我们递哪把钥匙无关。真实约束见 openmem 4b9e1343 与本票 T-0028 全文轨。
 function resolveApiKey(): string {
   if (process.env.CODEBUDDY_API_KEY) return process.env.CODEBUDDY_API_KEY;
   try {
@@ -66,7 +82,28 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
   clean.LOCALAPPDATA = path.join(home, 'AppData', 'Local');
   clean.PATH = buildWindowsPath(getEnvPath(clean));
   clean.CODEBUDDY_API_KEY = resolveApiKey();
+  // [T-0028 甲方案 · 09-29 夜，只用环境变量、不改厂家任何文件] 从 CLI 自身代码里读出来的开关（398 个
+  // CODEBUDDY_* 变量中筛出的）：CODEBUDDY_MODEL / CODEBUDDY_DISABLE_BUILTIN_MODELS。
+  // 现象依据：CLI 日志自报 `[SettingsEndpointProductProvider] resolved endpoint=<unset> env=internal`
+  // 即"回落到厂家内网路由"，随后 `Prompt refused … (target: https://wb.tencentbuddy.com)` 504 skipRun；
+  // 而桥外同参数同钥匙同会话探针能正常回话 ⇒ 差别在"这一代进程开工时认定的模型/路由"。
+  // 这里显式把它钉在我们自己的网关模型上，别再去厂家内网验身。若无效整段删掉即可（纯 env，可秒回滚）。
+  const wbModelId = resolveModel();
+  if (!clean.CODEBUDDY_MODEL) clean.CODEBUDDY_MODEL = wbModelId;
+  rtLog(`[wb-acp] 甲方案钉模型: CODEBUDDY_MODEL=${clean.CODEBUDDY_MODEL}`);
   clean.NO_COLOR = '1';
+  // [T-0028c 09-29 夜 · 老大令修] 子进程环境**白名单化**：原先把服务进程的 94 个变量整盆端给腾讯的
+  // codebuddy 子进程，里面混着别家钥匙与老大机器凭据（GATEWAY/LITELLM/OPENAI/ANYSEARCH/QWEN/REASONIX/
+  // N5105_SSH_PASSWORD…）——既是不该泄的攻击面，也是本次"桥内 skipRun、桥外同参同钥匙正常回话"唯一
+  // 没排除的差异。这里只剥"与我们/厂家无关或含密钥"的项，保留运行必需的（PATH/HOME/APPDATA/系统目录）。
+  // 实测口径：剥完重启 → 发一句 → 看 FINAL text.len 是否 >0；若仍 0，回来把本段整块删掉即可（不影响原逻辑）。
+  const strip = /^(CTI_|DSH_|NSSM|ANYSEARCH_|QWEN_TOKEN|REASONIX_|N5105_|GH_|GITHUB_|GIT_|PAGER|VOLC_|ARK_|DEEPSEEK_|MINIMAX_|XAI_|TOGETHER_)|(_API_KEY|_SECRET|_PASSWORD|_TOKEN|_KEY_ID)$/;
+  const before = Object.keys(clean).length;
+  for (const k of Object.keys(clean)) {
+    if (k === 'CODEBUDDY_API_KEY') continue; // 厂家唯一要的那把，保留
+    if (strip.test(k)) delete clean[k];
+  }
+  rtLog(`[wb-acp] 子进程环境净化 ${before}→${Object.keys(clean).length} 项（剥掉别家钥匙与内部变量）`);
   return clean;
 }
 
@@ -148,15 +185,21 @@ export function createWorkBuddyProvider(): RuntimeProvider {
     }
     if (m.method === 'session/update') { active?.onUpdate((m.params as { update?: Record<string, unknown> })?.update || {}); return; }
     if (m.method === 'session/request_permission') {
-      // bypassPermissions 已配，正常不会来；来了就放行第一项，绝不让它卡死
-      const opts = ((m.params as { options?: Array<Record<string, unknown>> })?.options) || [];
+      // 🔴 09-30 定罪（T-0029 验收实测撞出）：这里过去写的是 `outcomeSel:'selected'` —— **应答结构字段名错了**。
+      // ACP 规定 `result.outcome = { outcome:'selected', optionId }`；字段名不对，它家 interruption-service
+      // 解析不出"批准"，直接按拒绝处理：实测 CLI 日志 `Tool rejected in interruption-service, tool name: PowerShell`
+      // → `prompt() completed with stopReason: cancelled`，用户侧表现为"跑了 21 次工具，最后一句话都不说"。
+      // 另外 6 家 ACP provider（mimo/dsh/openclaw/opencode/reasonix/openakita）全都是正确写法，只这一处手误。
+      // 选项也改成**按语义挑 allow**（旧写法取 opts[0]，若它把 reject 排前面就等于我们自己点了拒绝）。
+      const opts = ((m.params as { options?: Array<{ optionId?: string }> })?.options) || [];
+      const allow = opts.find((o) => /allow/i.test(String(o?.optionId || '')))?.optionId || opts[0]?.optionId || 'allow_once';
       try {
         child?.stdin?.write(JSON.stringify({
           jsonrpc: '2.0', id: m.id,
-          result: { outcome: { outcomeSel: 'selected', optionId: opts[0]?.optionId || 'allow_once' } },
+          result: { outcome: { outcome: 'selected', optionId: allow } },
         }) + '\n');
       } catch { /* 死了有看门狗 */ }
-      rtLog('[wb-acp] request_permission 自动放行（异常路径，查 mode 配置）');
+      rtLog(`[wb-acp] request_permission 放行 optionId=${allow}（可选=${opts.map((o) => o?.optionId).join('|') || '无'}；bypassPermissions 已配还来问=查 mode）`);
     }
   };
 
@@ -234,13 +277,46 @@ export function createWorkBuddyProvider(): RuntimeProvider {
       await ensureChild();
       // 09-19 晚间纠错：codebuddy 有真记忆系统（~/.codebuddy/projects/*/memory/MEMORY.md + 词文件），
       // session/load 重启恢复实测有效（老大亲证）。恢复 load 路径，"换代强制失忆"补丁为误判产物，废除。
-      const wantSid = params.freshSession ? '' : sessions.get(params.sessionKey)?.sid || '';
+      // [票 T-0028 09-29 老大验收口径「不失忆」] 与 zcode 同型病，且比它更重一档：
+// 这道门历来只看"是不是 fresh"，不看"为什么 fresh"。桥侧 09-20 裁决（session.ts:141-160）
+// 把「重启恢复」打成 freshReason='restore'、「用户 /new」打成 'user-new' —— 两者语义不同：
+// restore ≠ 用户要重开，provider 应赎回。旧写法把重启也当 /new ⇒ wantSid 直接置空
+// ⇒ 连 session/load 都不发起（唯一的"load 失败"弹卡日志在 if(wantSid) 里，所以全程零痕迹），
+// 随后 :289-290 用新 sid 覆盖旧 sid ⇒ 账本层永久无门。codex 直证：sid 01a0d7b6(09-25)→01a0ec95
+// (09-29 boot 后 1.6 秒)，被覆盖那条引擎档案仍在盘上。
+// 修法照家族现成写法（dsh.ts:1001 / mimo.ts:522 / zcode.ts:700），不新造机制。
+const reviveAllowed = !params.freshSession || params.freshReason === 'restore';
+const wantSid = reviveAllowed ? (sessions.get(params.sessionKey)?.sid || '') : '';
+if (params.freshSession && params.freshReason === 'restore' && wantSid) {
+  rtLog(`[wb-acp] 重启恢复(restore)≠用户 /new：发起赎回 sid=${wantSid.slice(0, 8)} key=${params.sessionKey.slice(0, 8)}`);
+}
       let sid = '';
       if (wantSid) {
-        try {
+        const loadOnce = async (): Promise<string> => {
           const r = await rpc('session/load', { sessionId: wantSid, cwd: workdir, mcpServers: buildMcpServers() });
-          if (!r.error) sid = wantSid;
-        } catch { /* 落新建 */ }
+          if (r.error) {
+            const em = (r.error as { message?: string }).message;
+            throw new Error(em || JSON.stringify(r.error).slice(0, 160));
+          }
+          return wantSid;
+        };
+        try {
+          sid = await loadOnce();
+        } catch (e) {
+          // [T-0016 家法 09-27] "上一轮还在飞"≠档案丢了 → 摘掉在飞 turn 再 load，记忆原样。
+          // 命中不了错误特征就维持原样落新建（codebuddy 错误措辞未经实测，不做投机分支）。
+          if (isInFlightResumeError(e)) {
+            sid = (await reviveInFlightSession<string>({
+              label: 'workbuddy',
+              sid: wantSid,
+              log: rtLog,
+              cancelInFlight: async () => {
+                await rpc('session/cancel', { sessionId: wantSid });
+              },
+              retryResume: loadOnce,
+            })) || '';
+          }
+        }
         if (!sid) {
           params.onSessionLost?.();
           sessions.delete(params.sessionKey);

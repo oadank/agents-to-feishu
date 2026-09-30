@@ -23,7 +23,7 @@ type JsonRecord = Record<string, unknown>;
  * 只有 turn/completed 才解套 ⇒ 该 chat 永久挂起。两级空闲阈值（env 可覆写，命名对齐 CTI_CLAUDE_*）：
  * 首包（进程可能压根不在）只等 60s；已开吐字后允许 300s 静默（工具执行期间不出流事件）。
  */
-const STALL_MS = Number(process.env.CTI_CODEX_STALL_MS ?? 300_000);
+const STALL_MS = Number(process.env.CTI_CODEX_STALL_MS ?? 1_200_000);
 const STALL_FIRST_MS = Number(process.env.CTI_CODEX_STALL_FIRST_MS ?? 60_000);
 
 /**

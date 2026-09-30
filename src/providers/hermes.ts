@@ -342,7 +342,7 @@ export class HermesProvider implements RuntimeProvider {
     // 发送 prompt（后台任务：hermes 的 prompt 响应只在 turn 结束返回，绝不能 await 它——
     // 否则流式事件全堵死。详见下方消费循环注释）
     // 🔴 票 hand-2（C 项）：阈值只算一次并复用 —— 旧文案把"600s"写死在字符串里，env 一改就是谎话。
-    const PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_HERMES_PROMPT_TIMEOUT_MS || '600000', 10);
+    const PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_HERMES_PROMPT_TIMEOUT_MS || '1200000', 10);
     // 票 T-0003②（照 caf59ff 样板 60s 口径）：两级阈值分家 —— 零回包 = 疑引擎进程/网关不在，
     // 首包阈值到点就定性（下面 catch 按 firstPktInS===null 复位 + 弃用假死进程）；
     // 已经回过包 = 长任务在跑，给足 PROMPT_TIMEOUT_MS。旧写法零回包也要干等满整轮阈值。

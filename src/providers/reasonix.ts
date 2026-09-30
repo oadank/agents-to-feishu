@@ -97,7 +97,7 @@ export class ReasonixProvider implements RuntimeProvider {
 
   private static IDLE_TIMEOUT_MS = parseInt(process.env.CTI_REASONIX_IDLE_TIMEOUT_MS || '0', 10); // 🔴 09-20 老大令：默认永不回收（不主动/new 不许断），env CTI_REASONIX_IDLE_TIMEOUT_MS 可覆盖
   private static MAX_SESSIONS = parseInt(process.env.CTI_REASONIX_MAX_SESSIONS || '20', 10);
-  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_REASONIX_TIMEOUT_MS || '300000', 10);
+  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_REASONIX_TIMEOUT_MS || '1200000', 10);
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   async prepare(): Promise<void> {
@@ -429,18 +429,18 @@ export class ReasonixProvider implements RuntimeProvider {
       if (oldestKey) { this.sessions.delete(oldestKey); rtLog(`[reasonix] LRU evict ${oldestKey.slice(0, 8)}`); }
     }
 
-    const sessionInterrupted = session ? this.interruptedSessionIds.has(session.sessionId) : false;
+    // [2026-09-29 失忆根治] 打断≠换会话（同 mimo 09-25 / dsh 09-29）：cancel 后原会话照常可用且
+    // 记忆完好，旧家法"interrupted, opening new session"是插话必失忆的直接元凶。只清标记续用。
+    if (session && this.interruptedSessionIds.has(session.sessionId)) {
+      this.interruptedSessionIds.delete(session.sessionId);
+      rtLog(`[reasonix] post-cancel: reusing session ${session.sessionId.slice(0, 8)}（记忆连续，不换代）`);
+    }
     // [2026-09-17] 跨消息失忆修复：此前 history 仅在 sessionInterrupted 时注入，而 session
     // 可能因空闲回收（30min）/进程重启/LRU 被清——这些路径新建会话却不带历史 ⇒ 每次都是
     // 空白新对话。现统一为「本轮新建了会话 && bridge 有历史」就注入。/new（freshSession）
     // 时 bridge 已清空 context，天然不会误注，空白语义不变。
-    const isNewSession = !session || params.freshSession || sessionInterrupted;
-    if (!session || params.freshSession || sessionInterrupted) {
-      if (session && sessionInterrupted) {
-        this.interruptedSessionIds.delete(session.sessionId);
-        this.sessions.delete(sessionKey);
-        rtLog(`[reasonix] interrupted, opening new session`);
-      }
+    const isNewSession = !session || params.freshSession;
+    if (!session || params.freshSession) {
       try {
         session = await this.createSession(process.env.CTI_DEFAULT_WORKDIR || process.cwd());
         this.sessions.set(sessionKey, session);

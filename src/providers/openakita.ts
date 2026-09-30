@@ -101,7 +101,7 @@ export class OpenAkitaProvider implements RuntimeProvider {
   private static MAX_SESSIONS = parseInt(process.env.CTI_OPENAKITA_MAX_SESSIONS || '20', 10);
   // 2026-09-19 复盘：QW3.8F 思考模型×20 轮历史注入×编译器预处理，单轮合法耗时 5-8 分钟；
   // 300s 看门狗把没死的回合掐成"卡死"报错卡（10:23/11:13 两轮引擎实际均完成作答）。升至 900s。
-  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_OPENAKITA_TIMEOUT_MS || '900000', 10);
+  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_OPENAKITA_TIMEOUT_MS || '1200000', 10);
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   async prepare(): Promise<void> {
@@ -389,17 +389,17 @@ export class OpenAkitaProvider implements RuntimeProvider {
       if (oldestKey) { this.sessions.delete(oldestKey); rtLog(`[openakita] LRU evict ${oldestKey.slice(0, 8)}`); }
     }
 
-    const sessionInterrupted = session ? this.interruptedSessionIds.has(session.sessionId) : false;
+    // [2026-09-29 失忆根治] 打断≠换会话（同 mimo 09-25 / dsh 09-29）：cancel 后原会话照常可用且
+    // 记忆完好，旧家法"interrupted, opening new session"是插话必失忆的直接元凶。只清标记续用。
+    if (session && this.interruptedSessionIds.has(session.sessionId)) {
+      this.interruptedSessionIds.delete(session.sessionId);
+      rtLog(`[openakita] post-cancel: reusing session ${session.sessionId.slice(0, 8)}（记忆连续，不换代）`);
+    }
     // [2026-09-17] 跨消息失忆修复（对齐 reasonix）：history 此前仅 sessionInterrupted 注入，
     // 而 session 可能因空闲回收/进程重启/LRU 被清——这些路径新建会话却不带历史 ⇒ 失忆。
     // 现统一为「本轮新建了会话 && bridge 有历史」就注入。/new 时 context 已清空天然空白。
-    const isNewSession = !session || params.freshSession || sessionInterrupted;
-    if (!session || params.freshSession || sessionInterrupted) {
-      if (session && sessionInterrupted) {
-        this.interruptedSessionIds.delete(session.sessionId);
-        this.sessions.delete(sessionKey);
-        rtLog(`[openakita] interrupted, opening new session`);
-      }
+    const isNewSession = !session || params.freshSession;
+    if (!session || params.freshSession) {
       try {
         session = await this.createSession(process.env.CTI_DEFAULT_WORKDIR || process.cwd());
         this.sessions.set(sessionKey, session);

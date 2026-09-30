@@ -76,14 +76,14 @@ function readDeepSeekApiKey(): string {
  * 幂等：内容未变不落盘。任何异常返回 null（退化为只带 --profile acp，仍比旧入口强）。
  */
 /**
- * [根治 A①] 轻量解析 settings.yaml 的 `llm-pi-ai.providers.<name>.models[].id|name`。
- * 刻意不引 yaml 依赖：cordis 系文件带 `!!js` 自定义标签，通用解析器在这类文件上会炸，
- * 而 settings.yaml 是本机手维护的固定缩进风格（providers 缩进 2 / provider 名缩进 4 /
- * models 缩进 6 / 列表项缩进 8），逐行扫一次即可，零依赖零副作用。
+ * [根治 A①] 轻量解析 `llm-pi-ai.providers.<name>.models[].id|name`。
+ * 刻意不引 yaml 依赖：cordis 系文件带 `!!js` 自定义标签，通用解析器在这类文件上会炸。
+ * 缩进按【相对层级】解析（providers 键为锚点）：同一样式在 settings.yaml（providers 缩进 2）
+ * 与 profile cordis.patch.yml（providers 缩进 4）下都成立；绝对缩进写死会在其中一边失效。
  */
 function parseSettingsProviders(text: string): Record<string, string[]> {
   const out: Record<string, string[]> = {};
-  let inProviders = false;
+  let baseInd = -1; // providers 键的缩进；-1 = 尚未进入
   let cur = '';
   let inModels = false;
   for (const raw of text.split(/\r?\n/)) {
@@ -91,12 +91,15 @@ function parseSettingsProviders(text: string): Record<string, string[]> {
     const ind = raw.match(/^\s*/)?.[0].length ?? 0;
     const key = /^\s*("?[\w.\-]+"?)\s*:\s*(.*)$/.exec(raw);
     const name = key?.[1]?.replace(/^"|"$/g, '') ?? '';
-    if (ind <= 0) { inProviders = false; cur = ''; inModels = false; continue; }
-    if (ind === 2 && key) { inProviders = name === 'providers'; cur = ''; inModels = false; continue; }
-    if (!inProviders) continue;
-    if (ind === 4 && key) { cur = name; out[cur] = out[cur] ?? []; inModels = false; continue; }
-    if (ind === 6 && key) { inModels = name === 'models'; continue; }
-    if (ind >= 8 && inModels && cur) {
+    if (baseInd < 0) {
+      // 只认 llm-pi-ai 段里的 providers（settings.yaml 顶层 / patch 的 config: 之下）
+      if (key && name === 'providers') { baseInd = ind; cur = ''; inModels = false; }
+      continue;
+    }
+    if (ind <= baseInd) { baseInd = -1; cur = ''; inModels = false; continue; }
+    if (ind === baseInd + 2 && key) { cur = name; out[cur] = out[cur] ?? []; inModels = false; continue; }
+    if (ind === baseInd + 4 && key) { inModels = name === 'models'; continue; }
+    if (ind >= baseInd + 6 && inModels && cur) {
       const m = /(?:^|[\s,\[])-\s*(?:id|name)\s*:\s*([\w.\-]+)/.exec(raw);
       if (m?.[1]) out[cur]?.push(m[1]);
       const inline = /^\s*(?:id|name)\s*:\s*([\w.\-]+)/.exec(raw);
@@ -107,30 +110,51 @@ function parseSettingsProviders(text: string): Record<string, string[]> {
 }
 
 /**
- * [根治 A①] 校验 provider/model 确实在 DSH 全局 settings.yaml 注册过。
- * 为什么必须提前拦：`--profile acp` 的模型 catalog 来自 settings.yaml，选了没注册的
+ * [根治 A①] 校验 provider/model 确实在 DSH 的 llm-pi-ai.providers 里注册过。
+ * 为什么必须提前拦：`--profile acp` 的模型 catalog 来自 llm-pi-ai 路由表，选了没注册的
  * 组合时，会话创建会掉进 harness 的悬空 await ——【既不报错也不响应】，就是今早那次
  * "卡片停在第一帧、重启服务也没用"的放大器。宁可在这里响亮地拒绝。
+ *
+ * [2026-09-25 修复] 旧实现只读 `~/.dsh/settings.yaml`——0.1.7 的 settings 一次性导入
+ * 已把它改名成 `settings.yaml.imported`，且真正生效的路由表在 **profile 的
+ * cordis.patch.yml**（acp bot 用 `--profile acp` ⇒ 读 profiles/acp/）。旧逻辑
+ * 文件不存在直接 return null，校验长期形同虚设。现按「实际会加载的文件」收集路由表。
  */
 function checkAcpModelSelection(provider: string, model: string): string | null {
   const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
-  const settingsPath = path.join(home, 'settings.yaml');
-  if (!fs.existsSync(settingsPath)) return null; // 文件不存在＝不是这套部署形态，不拦
-  let text = '';
-  try { text = fs.readFileSync(settingsPath, 'utf8'); } catch { return null; }
-  const provs = parseSettingsProviders(text);
-  const names = Object.keys(provs);
-  if (!names.length) return null; // 读不出结构就放行，避免误伤
-  if (!(provider in provs)) {
-    return `DSH 模型配置校验未通过：provider "${provider}" 不在 ${settingsPath} 的 llm-pi-ai.providers 里`
-      + `（本机已注册：${names.join(' / ')}）。这种组合会让会话创建静默挂死，已提前拦下——`
-      + `请到配置中心(:13600)改该 bot 的模型，或先在 settings.yaml 里补上该 provider。`;
+  // 按 ACP 启动实际加载顺序收集：profile patch（真正生效）→ 旧 settings 残留（兜底）。
+  // 多文件命中时合并，只要任一来源注册过即放行（避免新旧并存期误拦）。
+  const candidates = [
+    path.join(home, 'profiles', 'acp', 'cordis.patch.yml'),
+    path.join(home, 'settings.yaml'),
+    path.join(home, 'settings.yaml.imported'),
+  ];
+  const merged: Record<string, string[]> = {};
+  const used: string[] = [];
+  for (const p of candidates) {
+    if (!fs.existsSync(p)) continue;
+    let text = '';
+    try { text = fs.readFileSync(p, 'utf8'); } catch { continue; }
+    const provs = parseSettingsProviders(text);
+    if (!Object.keys(provs).length) continue;
+    used.push(p);
+    for (const [k, v] of Object.entries(provs)) {
+      merged[k] = [...new Set([...(merged[k] ?? []), ...v])];
+    }
   }
-  const models = provs[provider] ?? [];
+  const names = Object.keys(merged);
+  if (!names.length) return null; // 读不出结构就放行，避免误伤
+  const where = used.length ? used.join(' / ') : '(未找到配置文件)';
+  if (!(provider in merged)) {
+    return `DSH 模型配置校验未通过：provider "${provider}" 不在 ${where} 的 llm-pi-ai.providers 里`
+      + `（本机已注册：${names.join(' / ')}）。这种组合会让会话创建静默挂死，已提前拦下——`
+      + `请到配置中心(:13600)改该 bot 的模型，或在对应 profile 的 cordis.patch.yml 里补上该 provider。`;
+  }
+  const models = merged[provider] ?? [];
   if (models.length && !models.includes(model)) {
     return `DSH 模型配置校验未通过：模型 "${model}" 未挂在 provider "${provider}" 下`
       + `（该 provider 可用：${models.join(' / ')}）。继续启动会掉进会话创建静默挂死，已提前拦下——`
-      + `请到配置中心(:13600)重选模型，或在 settings.yaml 的 ${provider}.models 里补上 "${model}"。`;
+      + `请到配置中心(:13600)重选模型，或在对应 profile 的 cordis.patch.yml 的 ${provider}.models 里补上 "${model}"。`;
   }
   return null;
 }
@@ -379,6 +403,42 @@ export class DshProvider implements RuntimeProvider {
     const msg = await this.waitResponse(id, 60_000);
     if (!msg?.result) throw new Error(msg?.error?.message ? String(msg.error.message) : 'no result');
   }
+
+  /**
+   * [T-0016 2026-09-26 老大令「重启之后丢失上文」] 赎回旧会话时撞到
+   * `Invalid params: session is already active: <sid>` —— 这**不是档案丢了**，是上一条消息的
+   * turn 还挂在引擎里没 quiesce（熔丝误杀 / 用户插队 cancel 后都会留这种在飞 turn）。
+   * 旧逻辑把它和"引擎不认这个 id"混为一谈：清 savedSids → 新建会话 → auto /new，
+   * 结果整段上文只剩回灌的 20 条影子 = 老大感知的"重启之后丢失上文"。
+   * 正解：先 session/cancel 把在飞 turn 摘掉，退避等它 settle，再重试 resume ——
+   * 只要赎回成功，引擎原生记忆就原样回来（不清档案、不喂影子、不弹 auto /new 卡）。
+   * @returns true=已赎回成功；false=非"在飞"类错误或重试耗尽，交调用方兜底新建
+   */
+  private async reviveStalledSession(sid: string, cwd: string): Promise<boolean> {
+    const child = await this.ensureProcess();
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        // cancel 是通知（无 id），harness 收到后等当前 turn quiesce 才真正结束
+        child.stdin!.write(JSON.stringify({
+          jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: sid },
+        }) + '\n');
+        rtLog(`[dsh] revive#${attempt}: session/cancel ${sid.slice(0, 8)}（摘在飞 turn）`);
+      } catch (e) {
+        rtLog(`[dsh] revive#${attempt}: cancel 写入失败 ${e instanceof Error ? e.message : e}`);
+      }
+      await new Promise((r) => setTimeout(r, 1500 * attempt)); // 退避 1.5/3/4.5s 等 quiesce
+      try {
+        await this.resumeSession(sid, cwd);
+        rtLog(`[dsh] revive#${attempt} ✅ 赎回 ${sid.slice(0, 8)}：引擎记忆原样回来，不清档案不弹卡`);
+        return true;
+      } catch (e) {
+        const m = e instanceof Error ? e.message : String(e);
+        rtLog(`[dsh] revive#${attempt} 仍失败: ${m.slice(0, 140)}`);
+        if (!/already active/i.test(m)) return false; // 不再是"在飞"类错误 → 别耗时间，直接兜底新建
+      }
+    }
+    return false;
+  }
   /** 会话注册表：sessionKey（桥接层 id）→ ACP session（同一进程内） */
   private sessions = new Map<string, AcpSession>();
   /** 进程 spawn 等待队列（initialize 未完成时排队的请求） */
@@ -387,7 +447,7 @@ export class DshProvider implements RuntimeProvider {
   private static IDLE_TIMEOUT_MS = parseInt(process.env.CTI_DSH_IDLE_TIMEOUT_MS || '0', 10); // 🔴 09-20 老大令：默认永不回收——不主动 /new 会话必须连续（30min/12h 均为历史中间态，作废；env 可覆盖）
   /** 进程内最大会话数（超出按 LRU 淘汰最久未用的） */
   private static MAX_SESSIONS = parseInt(process.env.CTI_DSH_MAX_SESSIONS || '20', 10);
-  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_DSH_TIMEOUT_MS || '300000', 10); // 5min 无输出判卡死
+  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_DSH_TIMEOUT_MS || '1200000', 10); // [T-0016 09-26] 5min→20min 无输出才判卡死：H3 生视频/大下载/多子代理这类**正常长工具调用**中间就是全静默，5min 阈值把干活当假死杀
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
@@ -463,7 +523,10 @@ export class DshProvider implements RuntimeProvider {
       }) + '\n');
       rtLog(`[dsh] interrupt session=${this.activePrompt.sessionId.slice(0, 8)}`);
     } catch {}
-    // 标记该 session 已中断：下一条必须开新 session（cancel 后旧 turn 不释放，复用会 turn/start 冲突）
+    // [2026-09-29 失忆根治] 打断≠换会话：只记一笔供 streamChat 清标记+日志，会话继续用。
+    // 旧家法"cancel 后复用会 turn/start 冲突故必须新建"是失忆元凶——mimo 09-25 已实测证伪同类
+    // 判断；且 interrupt() 下面就阻塞到 turn settled，冲突的前提本就不成立。强制换代还会撞
+    // resume 的 `already active`（会话明明活着）被误判失败 → 清档案+清影子 = 插话必失忆。
     this.interruptedSessionIds.add(this.activePrompt.sessionId);
     // ⚠️ cancel 是异步的：harness 标记取消后还要等当前 turn quiesce 才真正结束。
     // 若不等待，下一条 prompt 会在 turn 1 未结束时发出 → "turn/start 2 while turn 1 is still open"。
@@ -921,20 +984,18 @@ export class DshProvider implements RuntimeProvider {
     }
 
     // /new 或首次，或该 session 刚被 interrupt 取消：开新 ACP session（复用进程，不杀）
-    // （interrupt 后旧 turn 未释放，复用同一 sessionId 会 turn/start 冲突，必须新建）
-    const sessionInterrupted = session ? this.interruptedSessionIds.has(session.sessionId) : false;
+    // [2026-09-29 失忆根治] 打断≠换会话（同 mimo 09-25）：cancel 后原会话照常可用且记忆完好，
+    // 旧家法强制新建是"插话就失忆"的直接元凶。只清 interrupted 标记，继续用原 session。
+    if (session && this.interruptedSessionIds.has(session.sessionId)) {
+      this.interruptedSessionIds.delete(session.sessionId);
+      rtLog(`[dsh] post-cancel: reusing session ${session.sessionId.slice(0, 8)}（记忆连续，不换代）`);
+    }
     // [2026-09-17] 跨消息失忆修复（对齐 reasonix）：history 此前仅 sessionInterrupted 注入，
     // 而 session 可能因空闲回收/进程重启/LRU 被清——这些路径新建会话却不带历史 ⇒ 失忆。
     // 现统一为「本轮新建了会话 && bridge 有历史」就注入。/new 时 context 已清空天然空白。
-    const isNewSession = !session || params.freshSession || sessionInterrupted;
+    const isNewSession = !session || params.freshSession;
     let resumedOk = false;
-    if (!session || params.freshSession || sessionInterrupted) {
-      if (session && sessionInterrupted) {
-        this.interruptedSessionIds.delete(session.sessionId);
-        this.lostReasons.set(sessionKey, 'interrupt');
-        this.sessions.delete(sessionKey);
-        rtLog(`[dsh] interrupted session, opening new one for key ${sessionKey.slice(0, 8)}`);
-      }
+    if (!session || params.freshSession) {
       // [09-20 裁决] freshSession 两个来源分道：user-new=用户主动 /new（档案作废，绝不复活）；
       // restore=桥重启恢复（先向引擎赎回旧会话，成功=记忆原生连续且不喂影子，失败=退回新建+影子注入照旧）。
       const reviveAllowed = !params.freshSession || params.freshReason === 'restore';
@@ -950,8 +1011,23 @@ export class DshProvider implements RuntimeProvider {
           resumedOk = true;
           rtLog(`[dsh] session/resume 赎回 ${saved.slice(0, 8)}：记忆原样，不弹卡`);
         } catch (e) {
-          rtLog(`[dsh] session/resume 失败(${e instanceof Error ? e.message.slice(0, 140) : e}) → 新建+照常弹卡`);
-          this.savedSids.delete(sessionKey); this.saveSids();
+          const rm = e instanceof Error ? e.message : String(e);
+          // [T-0016 / 09-29 失忆根治] `already active` = 会话**还在引擎里活着**，不是档案丢了。
+          // 旧逻辑把它当失败 → 清档案+新建+清影子 = 活活把记忆扔掉（09-29 05:22 revive#1..#3
+          // 全 already active 仍新建的现行犯）。正解：先 cancel 摘掉可能在飞的 turn，然后
+          // **直接用这个 sid**——会话就在那，不必 resume 也成功。
+          if (/already active/i.test(rm)) {
+            await this.reviveStalledSession(saved, savedCwd); // 尽力摘在飞 turn（失败不拦）
+            session = { sessionId: saved, cwd: savedCwd, lastUsed: Date.now(), personaInjected: true };
+            this.sessions.set(sessionKey, session);
+            this.startCleanupTimer();
+            resumedOk = true;
+            this.interruptedSessionIds.delete(saved);
+            rtLog(`[dsh] already active=${saved.slice(0, 8)}：会话活着=赎回成功，不清档案不新建`);
+          } else {
+            rtLog(`[dsh] session/resume 失败(${rm.slice(0, 140)}) → 新建+照常弹卡`);
+            this.savedSids.delete(sessionKey); this.saveSids();
+          }
         }
       }
       if (!resumedOk) {
@@ -1096,9 +1172,14 @@ export class DshProvider implements RuntimeProvider {
 
     // [票 T-0005 假死熔丝 09-20] 原 waitResponse(promptId) 无时限：上游掐线（网关日志实锤
     // MidStreamFallbackError/502，且"备用名单=空"）时引擎永不回包，队列卡成雕像（老大亲测 5h+）。
-    // 熔丝：15 分钟无回音 → 本条诚实报错唤醒队列 + 掐死引擎进程（close 回调自动清 sessions/
-    // wakePending，下条消息走档案恢复重建）。env CTI_DSH_PROMPT_FUSE_MS 可调，0=禁用。
-    const FUSE_MS = parseInt(process.env.CTI_DSH_PROMPT_FUSE_MS || '900000', 10);
+    // [T-0016 2026-09-26 老大令"一做长任务全都报错"改判] 上面这道熔丝是**整轮绝对超时**，不看输出
+    // 有没有在流：日志实锤 03:47 老大引用的报错原文「本轮等了 15 分钟模型没回音（上游多半掐线了）」
+    // = 本熔丝爆断，而同轮 activity watchdog（连续无输出才爆）没有先响 ⇒ 事件流一直在动 = 引擎正在
+    // 正常干长活，被这道绝对闸误杀并 SIGTERM。误杀还连带第二个病：turn 被劈断 → 下条消息 resume 撞
+    // "session is already active" → 旧逻辑当档案丢失 → 新建 + auto /new = 「重启之后丢失上文」。
+    // 判卡死本就该只看"有没有输出"（下面 watchdog 干的就是这件事，20min 全静默照样复位）。
+    // 故绝对上限降级为**兜底护栏**：默认 0=禁用，env CTI_DSH_PROMPT_FUSE_MS 可开（防极端事件涓流焊死队列）。
+    const FUSE_MS = parseInt(process.env.CTI_DSH_PROMPT_FUSE_MS || '0', 10);
     this.waitResponse(promptId, FUSE_MS > 0 ? FUSE_MS : undefined).then(
       (msg) => {
         if (this.activePrompt === promptHandler) this.activePrompt = null;
@@ -1111,8 +1192,10 @@ export class DshProvider implements RuntimeProvider {
         // 进程丢失/管道报错都被这句盖成谎话（老大 09-20 令：文案要说实话）。
         const em = err instanceof Error ? err.message : "";
         if (/timeout/i.test(em)) {
-          rtLog(`[dsh] ⛔ 熔丝爆断 promptId=${promptId}: ${Math.round(FUSE_MS / 60000)}min 无回音，杀引擎换人`);
-          promptHandler.onDone(`本轮等了 ${Math.round(FUSE_MS / 60000)} 分钟模型没回音（上游多半掐线了）。我已把引擎复位，请把这条消息重发一次。`);
+          // [T-0016] 文案说实话：按实测静默时长说，不再一律谎报"没回音"（爆闸时往往正在出事件）。
+          const silentS = Math.round((Date.now() - lastOutput) / 1000);
+          rtLog(`[dsh] ⛔ 绝对上限爆表 promptId=${promptId}: ${Math.round(FUSE_MS / 60000)}min 整轮未收口（最后输出 ${silentS}s 前），杀引擎换人`);
+          promptHandler.onDone(`本轮跑满绝对上限 ${Math.round(FUSE_MS / 60000)} 分钟仍未收口（最后一条输出在 ${silentS}s 前${silentS > 120 ? '，期间确实没动静' : '，期间引擎还在出事件'}）。我已把引擎复位，请把这条消息重发一次。`);
           try { child.kill('SIGTERM'); } catch { /* 进程已没就不补刀 */ }
         } else {
           promptHandler.onDone(em || "DSH ACP prompt 响应异常");
@@ -1127,7 +1210,7 @@ export class DshProvider implements RuntimeProvider {
       if (settled) { clearInterval(watchdog); return; }
       if (Date.now() - lastOutput > DshProvider.PROMPT_TIMEOUT_MS) {
         clearInterval(watchdog);
-        promptHandler.onDone(`DSH ACP 卡死：连续 ${DshProvider.PROMPT_TIMEOUT_MS / 1000}s 无输出，已中断并复位引擎，本条请重发`);
+        promptHandler.onDone(`DSH ACP 卡死：连续 ${Math.round(DshProvider.PROMPT_TIMEOUT_MS / 60000)} 分钟没有任何输出（引擎没在干活了），已中断并复位引擎，本条请重发`);
         rtLog(`[dsh] watchdog timeout promptId=${promptId} → 杀僵尸引擎`);
         try { child.kill('SIGTERM'); } catch { /* ignore */ }
       }
