@@ -18,6 +18,7 @@ import path from 'node:path';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
 import { readSessionMcpServers } from './shared/per-session-mcp.js';
 import { buildWindowsPath, getEnvPath } from './win-spawn-env.js';
+import { AutoCompact } from '../bridge/auto-compact.js';
 
 // MCP 穿透收编（2026-09-18）：已上收 src/providers/shared/per-session-mcp.ts。
 // openclaw 引擎行为 = 'rejectAllMcp'（ACP bridge 明确拒绝 per-session MCP，-32603）；
@@ -73,6 +74,10 @@ interface ActivePrompt {
 export class OpenClawProvider implements RuntimeProvider {
   readonly name = 'openclaw';
 
+  // [T-0030 C 类 09-30] openclaw 完全无压缩（探针实测 session/compact=-32601 且 CLI 零 compact 特征）
+  // → 接公共模块兜底告警。usage_update{used,size} 是其唯一用量来源（result 无 usage），兼供 stats。
+  private readonly autoc = new AutoCompact({ log: (m) => rtLog(`[openclaw] ${m}`) });
+
   private child: ChildProcess | null = null;
   private lineBuf = '';
   private nextId = 100;
@@ -86,9 +91,15 @@ export class OpenClawProvider implements RuntimeProvider {
 
   private static IDLE_TIMEOUT_MS = parseInt(process.env.CTI_OPENCLAW_IDLE_TIMEOUT_MS || '0', 10); // 🔴 09-20 老大令：默认永不回收（不主动/new 不许断），env CTI_OPENCLAW_IDLE_TIMEOUT_MS 可覆盖
   private static MAX_SESSIONS = parseInt(process.env.CTI_OPENCLAW_MAX_SESSIONS || '20', 10);
-  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_OPENCLAW_TIMEOUT_MS || '300000', 10);
-  /** 首输出死线：发出 prompt 后 75s 内零任何流事件 ⇒ 快速失败（gateway embedded agent 失败时不回 ACP 响应，会静默） */
-  private static FIRST_OUTPUT_TIMEOUT_MS = parseInt(process.env.CTI_OPENCLAW_FIRST_OUTPUT_MS || '75000', 10);
+  private static PROMPT_TIMEOUT_MS = parseInt(process.env.CTI_OPENCLAW_TIMEOUT_MS || '1200000', 10);
+  /**
+   * 首输出死线：发出 prompt 后零任何流事件 ⇒ 判引擎假死并复位。
+   * 🔴 09-26 由 75s 提到 180s：实测 9 轮里 4 轮踩线（44%），且全是长/复杂 prompt；
+   *    成功轮首事件本就要 13.6~24s（引擎自磨：起 MCP + 读 72MB 会话库），
+   *    被掐掉的轮次其后 +115s 乃至 +9min 才吐出事件 —— 75s 杀的是"慢但活着"的长任务，不是死进程。
+   *    env CTI_OPENCLAW_FIRST_OUTPUT_MS 可覆盖（设 0 = 关闭本死线）。
+   */
+  private static FIRST_OUTPUT_TIMEOUT_MS = parseInt(process.env.CTI_OPENCLAW_FIRST_OUTPUT_MS || '180000', 10);
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   async prepare(): Promise<void> {
@@ -112,7 +123,11 @@ export class OpenClawProvider implements RuntimeProvider {
   }
 
   async resetSession(sessionKey?: string): Promise<void> {
-    if (sessionKey) { this.sessions.delete(sessionKey); rtLog(`[openclaw] resetSession key=${sessionKey.slice(0, 8)}`); }
+    if (sessionKey) {
+      this.sessions.delete(sessionKey);
+      this.autoc.clear(sessionKey); // [T-0030] /new 清该会话的告警段号，重新起算
+      rtLog(`[openclaw] resetSession key=${sessionKey.slice(0, 8)}`);
+    }
   }
 
   async interrupt(): Promise<void> {
@@ -401,17 +416,17 @@ export class OpenClawProvider implements RuntimeProvider {
       if (oldestKey) { this.sessions.delete(oldestKey); rtLog(`[openclaw] LRU evict ${oldestKey.slice(0, 8)}`); }
     }
 
-    const sessionInterrupted = session ? this.interruptedSessionIds.has(session.sessionId) : false;
+    // [2026-09-29 失忆根治] 打断≠换会话（同 mimo 09-25 / dsh 09-29）：cancel 后原会话照常可用且
+    // 记忆完好，旧家法"interrupted, opening new session"是插话必失忆的直接元凶。只清标记续用。
+    if (session && this.interruptedSessionIds.has(session.sessionId)) {
+      this.interruptedSessionIds.delete(session.sessionId);
+      rtLog(`[openclaw] post-cancel: reusing session ${session.sessionId.slice(0, 8)}（记忆连续，不换代）`);
+    }
     // [2026-09-17] 跨消息失忆修复（对齐 reasonix）：history 此前仅 sessionInterrupted 注入，
     // 而 session 可能因空闲回收/进程重启/LRU 被清——这些路径新建会话却不带历史 ⇒ 失忆。
     // 现统一为「本轮新建了会话 && bridge 有历史」就注入。/new 时 context 已清空天然空白。
-    const isNewSession = !session || params.freshSession || sessionInterrupted;
-    if (!session || params.freshSession || sessionInterrupted) {
-      if (session && sessionInterrupted) {
-        this.interruptedSessionIds.delete(session.sessionId);
-        this.sessions.delete(sessionKey);
-        rtLog(`[openclaw] interrupted, opening new session`);
-      }
+    const isNewSession = !session || params.freshSession;
+    if (!session || params.freshSession) {
       try {
         session = await this.createSession(process.env.CTI_DEFAULT_WORKDIR || process.cwd());
         this.sessions.set(sessionKey, session);
@@ -458,6 +473,9 @@ export class OpenClawProvider implements RuntimeProvider {
     let wakeup: () => void = () => {};
     let wakeupP: Promise<void> = Promise.resolve();
     const poke = (): void => { wakeup(); };
+    // [T-0030 C 类] 本轮真实用量跟踪（usage_update 独源）
+    let turnUsed = 0;
+    let turnSize = 0;
     let gotUsage = false;
     let gotText = false; // 已流出正文（watchdog 判定：有正文且超时=结束信号丢失，静默完成） // 本轮是否已收到 usage（防响应兜底重复记账）
     const promptHandler: ActivePrompt = {
@@ -490,6 +508,12 @@ export class OpenClawProvider implements RuntimeProvider {
             input: typeof u.rawInput === 'string' ? u.rawInput.slice(0, 200) : JSON.stringify(u.rawInput ?? '').slice(0, 200),
           });
           poke();
+        } else if (update?.sessionUpdate === 'usage_update') {
+          // [T-0030 C 类] gateway 原生用量 {used,size,_meta:{approximate}}：本轮唯一用量来源。
+          // 跟踪最新值供轮末兜底告警；stats 记账在轮末统一发一次（used=全上下文口径，防多帧叠加）。
+          const used = Number((update as { used?: number }).used || 0);
+          const size = Number((update as { size?: number }).size || 0);
+          if (used > 0) { turnUsed = Math.max(turnUsed, used); if (size > 0) turnSize = size; }
         } else if (update?.sessionUpdate) {
           // 未知/未处理类型落 RT 日志（排查 openclaw 静默的关键观察点）
           rtLog(`[openclaw] session/update 未处理类型: ${update.sessionUpdate}`);
@@ -510,6 +534,18 @@ export class OpenClawProvider implements RuntimeProvider {
             queue.push({ type: 'usage', usage: ru, sessionId: session.sessionId });
             poke();
           }
+        }
+        // [T-0030 C 类] 轮末记账：openclaw 的 usage_update{used,size} 是唯一用量来源（result 无 usage），
+        // 整轮收尾统一发一次 usage 事件（used=全上下文口径），中间帧不叠加防统计虚高。
+        if (!gotUsage && turnUsed > 0) {
+          gotUsage = true;
+          queue.push({ type: 'usage', usage: { inputTokens: turnUsed, outputTokens: 0, cacheReadTokens: 0, requests: 1 }, sessionId: session.sessionId });
+          poke();
+        }
+        // [T-0030 C 类] 轮末兜底告警：used 达阈值播一次（每会话每 10% 段一次，防刷屏在模块内）
+        if (!msg.error && turnUsed > 0) {
+          const warn = this.autoc.floorWarning(params.sessionKey, turnUsed, turnSize || undefined);
+          if (warn) { queue.push({ type: 'text', text: AutoCompact.floorWarningText(warn.pct, warn.hoursDesc, 'OpenClaw 引擎') }); poke(); }
         }
         if (msg.error) promptHandler.onDone(msg.error.message || JSON.stringify(msg.error));
         else promptHandler.onDone();
@@ -542,7 +578,7 @@ export class OpenClawProvider implements RuntimeProvider {
 
         }
         rtLog(`[openclaw] watchdog timeout promptId=${promptId}`);
-      } else if (!gotFirstOutput && idle > OpenClawProvider.FIRST_OUTPUT_TIMEOUT_MS) {
+      } else if (!gotFirstOutput && OpenClawProvider.FIRST_OUTPUT_TIMEOUT_MS > 0 && idle > OpenClawProvider.FIRST_OUTPUT_TIMEOUT_MS) {
         // 2026-08-30 加固：首 token 死线——gateway 失败时不回 ACP 响应 ⇒ 静默；
         // 与其傻等 300s，快速失败并指路 gateway 日志
         clearInterval(watchdog);
