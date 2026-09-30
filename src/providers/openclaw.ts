@@ -83,7 +83,8 @@ export class OpenClawProvider implements RuntimeProvider {
   private nextId = 100;
   /** 按 request id 等待的响应 resolver —— 存 {resolve,reject} 两把手：进程没了要能 reject 掉等待方 */
   private pending = new Map<number, { resolve: (msg: any) => void; reject: (e: Error) => void }>();
-  private activePrompt: ActivePrompt | null = null;
+  // [T-0031 批二] 按 ACP sessionId 路由（旧单槽并发串台，zcode Map 模式照抄）
+  private activePrompts = new Map<string, ActivePrompt>();
   private currentStreamEnd: Promise<void> | null = null;
   private interruptedSessionIds = new Set<string>();
   private sessions = new Map<string, AcpSession>();
@@ -131,15 +132,17 @@ export class OpenClawProvider implements RuntimeProvider {
   }
 
   async interrupt(): Promise<void> {
-    if (!this.activePrompt || !this.child) return;
-    try {
-      this.child.stdin!.write(JSON.stringify({
-        jsonrpc: '2.0', method: 'session/cancel',
-        params: { sessionId: this.activePrompt.sessionId },
-      }) + '\n');
-      rtLog(`[openclaw] interrupt session=${this.activePrompt.sessionId.slice(0, 8)}`);
-    } catch {}
-    this.interruptedSessionIds.add(this.activePrompt.sessionId);
+    if (this.activePrompts.size === 0 || !this.child) return;
+    for (const target of this.activePrompts.values()) {
+      try {
+        this.child.stdin!.write(JSON.stringify({
+          jsonrpc: '2.0', method: 'session/cancel',
+          params: { sessionId: target.sessionId },
+        }) + '\n');
+        rtLog(`[openclaw] interrupt session=${target.sessionId.slice(0, 8)}`);
+      } catch {}
+      this.interruptedSessionIds.add(target.sessionId);
+    }
     if (this.currentStreamEnd) {
       await this.currentStreamEnd;
       rtLog(`[openclaw] interrupt: current turn fully ended`);
@@ -175,9 +178,9 @@ export class OpenClawProvider implements RuntimeProvider {
     this.spawnPromise = null;
     this.sessions.clear();
     this.lineBuf = '';
-    const stranded = this.activePrompt;
-    this.activePrompt = null;
-    if (stranded) { try { stranded.onDone(`OpenClaw 引擎进程已退出，本条消息请重发（已自动复位，下条消息走新进程）`); } catch { /* 单条唤醒失败不阻塞收口 */ } }
+    const stranded = [...this.activePrompts.values()];
+    this.activePrompts.clear();
+    for (const st of stranded) { try { st.onDone(`OpenClaw 引擎进程已退出，本条消息请重发（已自动复位，下条消息走新进程）`); } catch { /* 单条唤醒失败不阻塞收口 */ } }
     // 票 hand-3 剩余（老大 09-20"别靠监控垃圾维持稳定，把代码写对"）：pending 过去只存
     // resolve，初始化/建会话阶段的等待方进程死了也不醒，只能干等各自兜底超时（prompt 更无超时=永生）。
     this.wakePending(`OpenClaw 引擎进程已退出`);
@@ -229,7 +232,7 @@ export class OpenClawProvider implements RuntimeProvider {
     this.spawnPromise = null;
     this.sessions.clear();
     this.wakePending('引擎进程已关闭（主动杀，下条消息重建）');
-    this.activePrompt = null;
+    this.activePrompts.clear();
     this.lineBuf = '';
   }
 
@@ -256,10 +259,19 @@ export class OpenClawProvider implements RuntimeProvider {
         // 2026-08-30 加固：gateway embedded agent 失败时可能只发错误通知、不回 prompt 响应（静默根源）——
         // 落 RT 日志 + 立即终结当前 prompt，把错误回传给用户
         rtLog(`[openclaw] JSON-RPC 错误通知: ${JSON.stringify(msg.error).slice(0, 200)}`);
-        this.activePrompt?.onDone(msg.error.message || 'ACP 错误');
+        const esid = (msg.params as { sessionId?: unknown } | undefined)?.sessionId;
+        const eh = typeof esid === 'string' ? this.activePrompts.get(esid) : undefined;
+        if (eh) eh.onDone(msg.error.message || 'ACP 错误');
+        else for (const x of this.activePrompts.values()) x.onDone(msg.error.message || 'ACP 错误');
         continue;
       }
-      if (msg.method === 'session/update') { this.activePrompt?.onUpdate(msg); continue; }
+      if (msg.method === 'session/update') {
+        // [T-0031 批二] 按 ACP sessionId 路由；无 id/无挂载的 update 属于已放弃或未注册轮，丢弃
+        const sid = (msg.params as { sessionId?: unknown } | undefined)?.sessionId;
+        const h = typeof sid === 'string' ? this.activePrompts.get(sid) : undefined;
+        h?.onUpdate(msg);
+        continue;
+      }
       if (msg.method === 'session/request_permission') {
         const options = msg.params?.options as Array<{ optionId: string }> | undefined;
         const allow = options?.find((o) => /allow/i.test(o.optionId))?.optionId || options?.[0]?.optionId || 'allow-once';
@@ -315,7 +327,7 @@ export class OpenClawProvider implements RuntimeProvider {
         rtLog(`[openclaw] ACP exited code=${code}`);
         if (this.child === child) {
           this.child = null; this.spawnPromise = null;
-          this.sessions.clear(); this.wakePending(`引擎进程已 close（code=${code}）`); this.activePrompt = null; this.lineBuf = '';
+          this.sessions.clear(); this.wakePending(`引擎进程已 close（code=${code}）`); this.activePrompts.clear(); this.lineBuf = '';
         } else if (this.spawnPromise) {
           // 2026-09-01 修复：初始化完成前进程退出（如 gateway 未就绪 ECONNREFUSED）时清悬挂
           // spawnPromise 并唤醒等待方——否则后续 ensureProcess 永远复用死 promise，
@@ -521,11 +533,11 @@ export class OpenClawProvider implements RuntimeProvider {
       },
       onDone: (err?: string) => { if (settled) return; /* 票 hand-3：首个终态为准（否则收口唤醒会被迟到事件盖成假错误） */ if (err) settleErr = err; settled = true; resolveSettled(); },
     };
-    this.activePrompt = promptHandler;
+    this.activePrompts.set(session.sessionId, promptHandler);
 
     this.waitResponse(promptId).then(
       (msg) => {
-        if (this.activePrompt === promptHandler) this.activePrompt = null;
+        if (this.activePrompts.get(session.sessionId) === promptHandler) this.activePrompts.delete(session.sessionId);
         // 2026-08-30 兜底：CLI 不发 _meta.usage 流事件时，从 prompt 响应捞 usage（保底命中率数据）
         if (!gotUsage) {
           const rr = msg.result as { usage?: UsageInfo; _meta?: { usage?: UsageInfo } } | undefined;
@@ -551,7 +563,7 @@ export class OpenClawProvider implements RuntimeProvider {
         else promptHandler.onDone();
       },
       (err: unknown) => {
-        if (this.activePrompt === promptHandler) this.activePrompt = null;
+        if (this.activePrompts.get(session.sessionId) === promptHandler) this.activePrompts.delete(session.sessionId);
         // 票 hand-3④：原因说实话。原先不分起因一律写"ACP prompt 响应超时"，
         // 进程丢失/管道报错都被这句盖成谎话（老大 09-20 令：文案要说实话）。
         const em = err instanceof Error ? err.message : "";
