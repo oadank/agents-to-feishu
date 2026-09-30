@@ -447,7 +447,7 @@ export class MessageEngine {
       return;
     }
     try {
-      await this.opts.provider.interrupt();
+      await this.opts.provider.interrupt(this.opts.sessions?.get(chatId)?.id);
       console.log(`[engine] doAutoInterrupt interrupt() done`);
       await this.updateInterruptCard(chatId, 'auto');
     } catch (e) {
@@ -508,11 +508,18 @@ export class MessageEngine {
     }
 
     // yes：立即中断当前任务，队列随即消费新消息
-    try {
-      await this.opts.provider.interrupt();
-      await this.opts.sessions?.interrupt(chatId); // [2026-09-02] 标记会话中断→下条消息保留历史（不再丢上下文）
-    } catch (e) {
-      console.warn(`[engine] interrupt failed:`, e);
+    // [T-0031 批二] 保险丝对齐 doAutoInterrupt：只有 sendInterruptCard 记录的旧任务仍活跃才真打断。
+    // 此前此路径没装守卫（注释 400-403 行早已承诺）：旧任务已结束才点 yes ⇒ provider.interrupt()
+    // 误伤"轮到插队消息自己"的新轮次；传 sessionKey 定向后，多群场景 B 群点 yes 也不再杀 A 群的活。
+    if (!this.shouldInterrupt(chatId)) {
+      console.log(`[engine] 插队卡 yes SKIP：旧任务已结束，不中断（避免误伤插队消息自己） chat=${chatId}`);
+    } else {
+      try {
+        await this.opts.provider.interrupt(this.opts.sessions?.get(chatId)?.id);
+        await this.opts.sessions?.interrupt(chatId); // [2026-09-02] 标记会话中断→下条消息保留历史（不再丢上下文）
+      } catch (e) {
+        console.warn(`[engine] interrupt failed:`, e);
+      }
     }
     await this.updateInterruptCard(chatId, 'yes');
     return { toast: { type: 'success', content: '已插队' }, status: 'yes', card: finalCard('yes') };
@@ -689,9 +696,9 @@ export class MessageEngine {
    * 中断当前 provider 的正在执行任务（/stop 命令、插队均走这里）。
    * 所有 agent 通用：调各 provider.interrupt()（DSH/Claude 等真实中断底层，其余尽力）。
    */
-  async interruptProvider(): Promise<void> {
+  async interruptProvider(sessionKey?: string): Promise<void> {
     try {
-      await this.opts.provider.interrupt();
+      await this.opts.provider.interrupt(sessionKey);
       console.log('[engine] interruptProvider done');
     } catch (e) {
       console.warn(`[engine] interruptProvider failed: ${e instanceof Error ? e.message : String(e)}`);

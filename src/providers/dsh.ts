@@ -515,10 +515,15 @@ export class DshProvider implements RuntimeProvider {
     rtLog(`[dsh] resetSession key=${(sessionKey || '').slice(0, 8)} old=${(oldSessionKey || '').slice(0, 8)} 清档案 ${swept} 条`);
   }
 
-  async interrupt(): Promise<void> {
-    if (this.activePrompts.size === 0 || !this.child) return;
+  async interrupt(sessionKey?: string): Promise<void> {
+    // [T-0031 批二] 传了 sessionKey 只打断该会话的在飞轮（多群并发不杀别群）；不传保持全量旧语义。
+    const acpSid = sessionKey ? this.sessions.get(sessionKey)?.sessionId : undefined;
+    const targets = acpSid
+      ? [...this.activePrompts.values()].filter((t) => t.sessionId === acpSid)
+      : [...this.activePrompts.values()];
+    if (targets.length === 0 || !this.child) return;
     // session/cancel 必须传真实 sessionId（空字符串 ACP 找不到会话 → 插队无效）
-    for (const target of this.activePrompts.values()) {
+    for (const target of targets) {
       try {
         this.child.stdin!.write(JSON.stringify({
           jsonrpc: '2.0', method: 'session/cancel',

@@ -112,8 +112,13 @@ export interface RuntimeProvider {
    */
   resetSession(sessionKey?: string, oldSessionKey?: string): Promise<void>;
 
-  /** /stop：中断当前任务（尽力而为，超时强制） */
-  interrupt(): Promise<void>;
+  /**
+   * /stop：中断当前任务（尽力而为，超时强制）。
+   * [T-0031 批二] 加可选 sessionKey：多会话共进程的 ACP 家（dsh/mimo/openclaw/opencode/
+   * openakita/reasonix）据此只打断该会话的在飞轮，别群不误伤；不传则保持旧的全量语义
+   * （claude 单常驻进程等本就全局，零参实现自动兼容此签名）。
+   */
+  interrupt(sessionKey?: string): Promise<void>;
 
   /**
    * 桥接内置工具接线（Phase 1，可选实现）：注入 sendVoice/getSpeech 依赖，

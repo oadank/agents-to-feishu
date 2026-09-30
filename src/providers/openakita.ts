@@ -130,9 +130,14 @@ export class OpenAkitaProvider implements RuntimeProvider {
     if (sessionKey) { this.sessions.delete(sessionKey); rtLog(`[openakita] resetSession key=${sessionKey.slice(0, 8)}`); }
   }
 
-  async interrupt(): Promise<void> {
-    if (this.activePrompts.size === 0 || !this.child) return;
-    for (const target of this.activePrompts.values()) {
+  async interrupt(sessionKey?: string): Promise<void> {
+    // [T-0031 批二] 传了 sessionKey 只打断该会话的在飞轮（多群并发不杀别群）；不传保持全量旧语义。
+    const acpSid = sessionKey ? this.sessions.get(sessionKey)?.sessionId : undefined;
+    const targets = acpSid
+      ? [...this.activePrompts.values()].filter((t) => t.sessionId === acpSid)
+      : [...this.activePrompts.values()];
+    if (targets.length === 0 || !this.child) return;
+    for (const target of targets) {
       try {
         this.child.stdin!.write(JSON.stringify({
           jsonrpc: '2.0', method: 'session/cancel',
