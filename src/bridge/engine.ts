@@ -884,7 +884,14 @@ export class MessageEngine {
         }
       });
       flushChain = run.catch(() => { /* 网络/临时错误：下轮事件会再刷 */ });
-      await run;
+      try {
+        await run;
+      } catch {
+        // [T-0031 批一 09-30 审计P0] render 的网络异常（fetch/SDK 裸抛）绝不能穿透到
+        // 唯一调用点 `void doFlush()` —— Node ≥15 默认 unhandledRejection 即杀进程，
+        // 一次飞书 API 抖动 = 13 个 bot 的进程级雷。链上已 catch 保住后续续刷，
+        // 这里再吞掉本次：丢一帧流式刷新无害，丢进程致命。
+      }
     };
     let lastThinkFlushAt = 0;
     let thinkFlushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1170,7 +1177,14 @@ export class MessageEngine {
           }
           // Arc 用量/余额后台查询完成后再刷一次最终卡状态行（同步读新缓存；无则保持现状）
           await viewLoaded;
-          await render(buildFinalMarkdown(layers), true);
+          try {
+            await render(buildFinalMarkdown(layers), true);
+          } catch (e) {
+            // [T-0031 批一 09-30 审计P1] 此时答案已完整交付：这次刷新失败绝不能落进外层
+            // catch（外层会把已交付的终卡整体覆盖成错误块，还连带跳过 appendContext/
+            // onReplySent）。注释承诺 best-effort，这里把保护补上——失败只留日志。
+            console.warn(`[engine] 终态状态行刷新失败（不影响已交付答案）: ${e instanceof Error ? e.message : String(e)}`);
+          }
           // 状态行含 model/context/session/balance 等可变字段（acpSessionId 在 usage 事件后才真实）。
           // 流式 updateCardElement 只刷正文元素，此处用整卡 body 刷新状态行：session=claude 真实 id、
           // 上下文按最新 stats、余额按最新缓存。失败不影响主回复（best-effort）。

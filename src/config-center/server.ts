@@ -63,6 +63,61 @@ const mcpProxyStats: Record<string, { calls: number; lastAt: string }> = {
   comfy: { calls: 0, lastAt: '' },
   vision: { calls: 0, lastAt: '' },
 };
+
+// ── [T-0031 批一 09-30 审计P2] 密钥脱敏：GET 只说"有没有"，不给值 ─────────────
+// 此前 /api/store、/api/agents、/api/vision、/api/speech、/api/prompt-optimize 把
+// appSecret/apiKey 明文回显给浏览器（model-catalog 早就是 hasKey 口径，就这几家漏了），
+// 服务又同时绑 Tailscale IP 且不校验 Host —— DNS rebinding 一页就能读走全部密钥。
+// 契约：GET 出掩码哨兵；前端原样带回；PUT/POST 侧 unmask——哨兵从旧值还原、旧值没有就
+// 删键交给 ?? 旧值兜底。前端零改动、不碰哨兵就永不覆盖真密钥。
+const SECRET_MASK = '__cti_masked__';
+/** 顶层密钥字段（精确匹配：apiKeyEnv 是"环境变量名"不是密钥，不命中） */
+const SECRET_FIELD_RE = /^(appsecret|apikey|token|password)$/i;
+/** mcp env 这类"环境变量名 → 值"表里，键名像凭据的才当密钥 */
+const SECRET_ENV_KEY_RE = /(token|secret|password|passwd|apikey|api_key)/i;
+
+function maskSecretsDeep(x: unknown): unknown {
+  if (Array.isArray(x)) return x.map(maskSecretsDeep);
+  if (x && typeof x === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(x as Record<string, unknown>)) {
+      if (SECRET_FIELD_RE.test(k) && typeof v === 'string' && v !== '') { out[k] = SECRET_MASK; continue; }
+      if (k === 'env' && v && typeof v === 'object' && !Array.isArray(v)) {
+        const env: Record<string, unknown> = {};
+        for (const [ek, ev] of Object.entries(v as Record<string, unknown>)) {
+          env[ek] = (typeof ev === 'string' && ev !== '' && SECRET_ENV_KEY_RE.test(ek)) ? SECRET_MASK : ev;
+        }
+        out[k] = env;
+        continue;
+      }
+      out[k] = maskSecretsDeep(v);
+    }
+    return out;
+  }
+  return x;
+}
+
+/** body 里的哨兵 → 用 old 同位置旧值放回；旧值没有 → 删键（?? 旧值兜底）。原地改 body。 */
+function unmaskSecretsDeep(body: unknown, old: unknown): void {
+  if (Array.isArray(body)) {
+    const o = Array.isArray(old) ? old : [];
+    for (let i = 0; i < body.length; i++) unmaskSecretsDeep(body[i], o[i]);
+    return;
+  }
+  if (body && typeof body === 'object' && old && typeof old === 'object') {
+    const b = body as Record<string, unknown>;
+    const o = old as Record<string, unknown>;
+    for (const k of Object.keys(b)) {
+      if (b[k] === SECRET_MASK) {
+        const ov = o[k];
+        if (typeof ov === 'string' && ov !== '') b[k] = ov;
+        else delete b[k];
+        continue;
+      }
+      unmaskSecretsDeep(b[k], o[k]);
+    }
+  }
+}
 import { createVisionMcpHttpHandler } from '../vision/mcp.js';
 
 /** 项目根（server.ts 位于 src/config-center/，上溯两级） */
@@ -559,6 +614,16 @@ export function createConfigServer(opts: ConfigServerOptions) {
   // ── HTTP server ──
 
   const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
+    // [T-0031 批一 09-30 审计P2] 来源校验（防 DNS rebinding）：Host 头必须是本机回环或
+    // 本服务绑定的地址。浏览器里 evil.com 把域名 rebind 到 127.0.0.1 再 fetch /api/store
+    // 时 Host 是 evil.com → 403；curl / 直连 127.0.0.1 / Tailscale IP 不受影响
+    // （老大 09-19 拍板过"怎么访问就怎么绑"，这里只挡浏览器侧的伪装 Host，不改绑定面）。
+    const hostName = String(req.headers.host || '').replace(/:\d+$/, '').toLowerCase();
+    if (!hostName || !(hostName === '127.0.0.1' || hostName === 'localhost' || hostName === '::1' || hosts.some((h) => h.toLowerCase() === hostName))) {
+      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'forbidden host' }));
+      return;
+    }
     const u = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     const p = u.pathname;
     const method = (req.method || 'GET').toUpperCase();
@@ -682,7 +747,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
 
       // GET /api/store
       if (p === '/api/store' && method === 'GET') {
-        return json(res, 200, load());
+        return json(res, 200, maskSecretsDeep(load()));
       }
 
       // GET /api/settings —— 全局开关
@@ -822,7 +887,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
       }
       // GET /api/agents (简)
       if (p === '/api/agents' && method === 'GET') {
-        return json(res, 200, load().agents);
+        return json(res, 200, maskSecretsDeep(load().agents));
       }
 
       // GET /api/agents/installed —— 探测每个 agent 的真实运行时（CLI 程序）是否安装。
@@ -989,6 +1054,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
       // POST /api/agents
       if (p === '/api/agents' && method === 'POST') {
         const body = JSON.parse((await readBody(req)) || '{}');
+        unmaskSecretsDeep(body, {}); // 新建没有旧值：哨兵一律删键，密钥留空待真填
         const store = load();
         const agent: AgentDef = {
           id: String(body.id || '').trim(),
@@ -1030,6 +1096,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
           const idx = store.agents.findIndex((a) => a.id === id);
           if (idx < 0) return json(res, 404, { error: 'not found' });
           const a = store.agents[idx];
+          unmaskSecretsDeep(body, a); // 哨兵 → 旧密钥原样放回；没动密钥就永不覆盖
           store.agents[idx] = {
             ...a,
             displayName: body.displayName ?? a.displayName,
@@ -1304,6 +1371,8 @@ export function createConfigServer(opts: ConfigServerOptions) {
       if (p === '/api/mcps' && method === 'POST') {
         const body = JSON.parse((await readBody(req)) || '{}');
         const store = load();
+        // 同 id 重提交（前端"编辑保存"走 POST 的情形）：哨兵从旧定义还原，env 密钥不丢
+        unmaskSecretsDeep(body, store.mcps.find((x) => x.id === String(body.id || '').trim()) ?? {});
         const m: McpDef = {
           id: String(body.id || '').trim(),
           displayName: String(body.displayName || body.id || ''),
@@ -1330,6 +1399,7 @@ export function createConfigServer(opts: ConfigServerOptions) {
           const store = load();
           const idx = store.mcps.findIndex((x) => x.id === id);
           if (idx < 0) return json(res, 404, { error: 'not found' });
+          unmaskSecretsDeep(body, store.mcps[idx]); // 哨兵 → 旧 env 密钥放回（整包 spread 前必做）
           store.mcps[idx] = { ...store.mcps[idx], ...body, id };
           save(store);
           // [2026-09-26 根治保存断链] MCP 定义改动会烧进引用它的 bot env，重启那几家生效（只影响引用方，不惊动其余）
@@ -1350,12 +1420,13 @@ export function createConfigServer(opts: ConfigServerOptions) {
       // GET /api/vision：读视觉配置
       if (p === '/api/vision' && method === 'GET') {
         const store = load();
-        return json(res, 200, { ok: true, vision: store.vision });
+        return json(res, 200, { ok: true, vision: maskSecretsDeep(store.vision) });
       }
       // PUT /api/vision：更新视觉配置（apiKey 留空表示由凭证层读）
       if (p === '/api/vision' && method === 'PUT') {
         const store = load();
         const body = JSON.parse((await readBody(req)) || '{}');
+        unmaskSecretsDeep(body, store.vision ?? {}); // 哨兵 → 旧 apiKey 放回
         store.vision = {
           ...(store.vision ?? { enabled: true, provider: 'online', baseUrl: '', apiKey: '', model: '', timeoutMs: 240000, prompts: {} }),
           ...body,
@@ -1366,12 +1437,17 @@ export function createConfigServer(opts: ConfigServerOptions) {
       // ── 内建 ⚡ 提示词优化 + /de 副驾（本地引擎，不依赖 dsh；页面上两块配置共用一张卡）──
       if (p === '/api/prompt-optimize' && method === 'GET') {
         const store = load();
-        return json(res, 200, { ok: true, promptOptimize: store.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE, de: store.de ?? DEFAULT_DE });
+        return json(res, 200, {
+          ok: true,
+          promptOptimize: maskSecretsDeep(store.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE),
+          de: maskSecretsDeep(store.de ?? DEFAULT_DE),
+        });
       }
       // PUT /api/prompt-optimize：只写传了的字段；llm 深合并，避免前端漏传把模型清空
       if (p === '/api/prompt-optimize' && method === 'PUT') {
         const store = load();
         const body = JSON.parse((await readBody(req)) || '{}');
+        unmaskSecretsDeep(body, { promptOptimize: store.promptOptimize ?? {}, de: store.de ?? {} }); // 哨兵 → 旧 apiKey 放回
         const cur = store.promptOptimize ?? DEFAULT_PROMPT_OPTIMIZE;
         store.promptOptimize = {
           ...cur, ...body,
@@ -1527,13 +1603,14 @@ export function createConfigServer(opts: ConfigServerOptions) {
           },
           asr: { ...d.asr, ...(s.asr ?? {}) },
         };
-        return json(res, 200, { ok: true, speech: full });
+        return json(res, 200, { ok: true, speech: maskSecretsDeep(full) });
       }
       // PUT /api/speech：写语音配置（各引擎子段深合并，缺省用 DEFAULT 兜底）
       if (p === '/api/speech' && method === 'PUT') {
         const store = load();
         const body = JSON.parse((await readBody(req)) || '{}');
         const base = store.speech ?? DEFAULT_SPEECH;
+        unmaskSecretsDeep(body, base); // 哨兵 → 旧 apiKey 放回（各引擎 spread 前必做）
         const newTts = body.tts ?? {};
         const tts = {
           defaultEngine: newTts.defaultEngine ?? base.tts?.defaultEngine ?? DEFAULT_SPEECH.tts.defaultEngine,

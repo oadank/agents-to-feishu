@@ -113,7 +113,13 @@ async def handle_prompt(acp_id: str, prompt: str, req_id: int) -> None:
     _dbg(f"[acp] handle_prompt enter acp={acp_id} req={req_id} prompt={prompt[:60]!r}")
     st = sessions[acp_id]
     _dbg("[acp] get_agent_safe...")
-    a = await get_agent_safe()
+    try:
+        a = await get_agent_safe()
+    except BaseException:
+        # [T-0031 批一 09-30] 预备段（agent 构建）失败同样会带着闸门死掉：
+        # _running_prompt 已置位，不复位 = main_loop 死等 + stdin 停读 = 进程死锁。
+        _running_prompt = None
+        raise
     _dbg("[acp] agent ready, start chat_with_session_stream...")
 
     # 预授权（RiskIntentGate 单次放行）：openakita 对 free-form streaming 会等确认，
@@ -191,8 +197,11 @@ async def handle_prompt(acp_id: str, prompt: str, req_id: int) -> None:
     except Exception as exc:  # noqa: BLE001
         is_error = True
         err_text = f"{type(exc).__name__}: {exc}"
-
-    _running_prompt = None
+    finally:
+        # [T-0031 批一 09-30] 闸门复位必须无条件执行：/stop 的 CancelledError 此前走
+        # raise 跳过复位 → main_loop 的 while _running_prompt 死等 + stdin 停读 =
+        # 一次 /stop 即进程死锁（审计 P0）。finally 保证 cancel/异常/成功三路都抬闸。
+        _running_prompt = None
 
     # 更新历史（只在成功时记 assistant 回复）
     if not is_error:

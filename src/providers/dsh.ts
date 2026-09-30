@@ -776,6 +776,9 @@ export class DshProvider implements RuntimeProvider {
       const timeout = setTimeout(() => {
         if (!this.child) {
           try { child.kill('SIGTERM'); } catch {}
+          // [T-0031 批一 09-30 审计P1] 失败必须清 spawnPromise（对齐 :690/:760 既有口径）：
+          // 否则它停在已失败的 promise 上，之后每条消息秒败、永不重试 = bot 永久 brick。
+          this.spawnPromise = null;
           reject(new Error('DSH ACP initialize timeout'));
         }
       }, 120_000);
@@ -785,6 +788,10 @@ export class DshProvider implements RuntimeProvider {
         (msg) => {
           clearTimeout(timeout);
           if (msg.error) {
+            // [T-0031 批一 09-30 审计P1] 引擎回了 initialize 错误 = 活着但起不来：
+            // 清 spawnPromise + 补刀杀进程，让下一条消息走真正的重建，而不是砖化。
+            this.spawnPromise = null;
+            try { child.kill('SIGTERM'); } catch {}
             reject(new Error('DSH ACP initialize failed'));
             return;
           }
@@ -794,6 +801,11 @@ export class DshProvider implements RuntimeProvider {
         },
         (err) => {
           clearTimeout(timeout);
+          // [T-0031 批一 09-30 审计P1] 60s 无响应（冷编译慢等）：清 spawnPromise 让下条消息
+          // 重建；120s 补刀定时器已被本分支 clearTimeout 取消，进程必须在这里就地补刀，
+          // 否则留下孤儿引擎 + spawnPromise 砖化双雷。
+          this.spawnPromise = null;
+          try { child.kill('SIGTERM'); } catch {}
           reject(err);
         },
       );

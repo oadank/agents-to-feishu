@@ -492,7 +492,11 @@ export function readStore(file?: string): ConfigStore {
       defaultWorkdir: '',
     };
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, `${JSON.stringify(initial, null, 2)}\n`, 'utf-8');
+    // [T-0031 批一 09-30 审计P1] 原子写：裸 writeFileSync 写一半崩溃 = store 截断 =
+    // readStore 永久 throw = 配置中心全站 500。先写临时再改名（与 taskboard saveBoard 同模式）。
+    const tmp0 = `${p}.tmp`;
+    fs.writeFileSync(tmp0, `${JSON.stringify(initial, null, 2)}\n`, 'utf-8');
+    fs.renameSync(tmp0, p);
     return initial;
   }
   try {
@@ -531,7 +535,11 @@ export function readStore(file?: string): ConfigStore {
 export function writeStore(store: ConfigStore, file?: string): void {
   const p = file || defaultStorePath();
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, `${JSON.stringify(store, null, 2)}\n`, 'utf-8');
+  // [T-0031 批一 09-30 审计P1] 原子写：这是全系统唯一真相源，写一半截断 = 配置中心
+  // 整体瘫到手工修文件。先写临时再改名，断电也只留下完整旧版（同仓 taskboard 现成模式）。
+  const tmp = `${p}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(store, null, 2)}\n`, 'utf-8');
+  fs.renameSync(tmp, p);
 }
 
 // ── 查询辅助 ──
