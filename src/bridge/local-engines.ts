@@ -8,7 +8,7 @@
 import { readStore, type DeConfig, type DecisionConfig, type LlmConfig, type PromptOptimizeConfig } from '../config-center/store.js';
 import { readCredentialKey } from '../config-center/render.js';
 // 三条候选的「分歧轴」词表（真源在 dsh-input-tools 插件，改词表先改那边再同步）
-import { pickAxes, hasNumberedOptions } from './de-axes.js';
+// [2026-09-26 根治·与 dsh 同步] de-axes.js 的分歧轴词表/擦屁股正则已无引用（轴废、内容正则拆），故不 import。
 
 // ───────────────────────── OpenAI 兼容底座 ─────────────────────────
 
@@ -138,20 +138,13 @@ const DE_JUDGE_SYSTEM = [
 
 const DE_DRAFT_SYSTEM_HUMAN = '用户在跟另一个 AI 助手对话，替他写 3 条可直接发出的回复。';
 const DE_DRAFT_BASE = [
-  '规则：',
-  '- 🔴 第一优先级：必须**接住标了「▶ 助手刚说的」那一句**。它问什么就答什么；它给了结论/方案/报错，就针对那句推进、否定、补条件或收窄；与这句无关的一律算错；',
-  '- 🔴 只写"能直接按回车发出去的那句话"本身。严禁复述角色名、严禁出现"用户要三条/所以三条要/第一条是/认账收尾：/可以要求它"这类自述或解释——出现一个就算废稿重写；',
-  '- 助手原话里的具体名称、文件、命令、数字、选项序号，照抄进回复，不许改写成"那个东西/它"这种泛指；',
-  '- 每条必须是用户现在就能按回车发给助手的**原话**：主语是"你"（指助手）；',
-  '- 禁评估腔（建议/可以考虑/是否/要不要），禁"让我/我这边"的助手口吻，禁角色前缀，禁解释为什么这么定；',
-  '- 大白话短句，命令式，允许只有几个字；不要客气话；',
-  '- 🔴 看得懂优先（老大 09-25 定，**取代上一版"不许出现文件名/路径/函数名"那条过死规矩**）：① 提到文件名就顺带说清这个文件或文件夹是干什么的；② 提到路径就给全路径，别只甩个尾名；③ 提到函数名、英文变量名、端口号，后面跟一句大白话解释它是干嘛的。目标是"他不查也能看懂"，不是"不许用名字"；',
-  '- 🔴 严禁把助手汇报里的黑话原样搬进候选（提交号、diff、JSON、"残渣""自述句"这类），除非他自己在上文里就这么说过。要说成他嘴里说得出的话（例：说"把那次改动的文件全路径列一遍"，别说"贴 ce64de8 的 diff"）；',
-  '- 🔴 每条末尾带一句"怎么算做完了"（验收）：要它拿什么回来给你看（哪条日志、哪个页面、哪个数字），一句话就够，不许写成两段；',
-  '- 高风险动作必须在句子里写明"先备份/先确认再动"；',
-  '- 严禁替助手回答问题或代它写代码；严禁承诺花钱、签约、对外发东西；',
-  '- 🔴 上面这些只是给你的要求，一个字都不许出现在候选里。候选里出现"角色/验收/语气/接住/三条/量级/风险/情绪"这类词，就算废稿；',
-  '- 只输出 JSON 字符串数组，恰好 3 条，不要代码围栏，不要别的字。',
+  '【输出契约】只输出一个 JSON 字符串数组，恰好 3 个元素，每个元素是一句他可以直接按回车发给助手的话。除此之外一个字都不许多（不要围栏、不要编号、不要解释、不要前后缀、不要标签）。',
+  '',
+  '【怎么写】就三条：',
+  '1. 大白话、说人、说清楚，他一眼看得懂。看不懂就是废稿。',
+  '2. 每条都是能直接复制发出去的原话本身：不带"表态：""第1条："这种标签，不带引号，不解释为什么这么写，不替助手写回答、不总结助手说了什么。',
+  '3. 看对面刚说了什么，给最贴合此刻的 3 句，三条要真的不一样——帮他把事往前推、或者把问题问出来、或者把决定做下来（对面给了选项就有一条可以是"选 X"）。跟着上下文走，别规定必须哪几个角度。',
+  '4. 涉及删除、重启、花钱、对外发送的，句子里写明先备份或先确认。',
 ].join('\n');
 
 const DE_RANK_SYSTEM = '给定会话与 3 条候选，判断用户最该发哪一条。只输出 JSON：{"probabilities":{"c1":0.x,"c2":0.x,"c3":0.x}}，和为 1。';
@@ -165,16 +158,8 @@ export interface DeResult {
   degraded: { judge: boolean; draft: boolean; rank: boolean };
 }
 
-/**
- * [2026-09-26 老大选 C] 三条候选不再固定"推进/收窄/叫停"（那三个是**态度**不是**分歧点**，
- * 实测三条容易写成同一态度换三种语气，且装不下"换人做 / 换工具 / 先回答我 / 等条件"这些真实分歧）。
- * 改成从 8 条「分歧轴」里按八维判断挑 3 条**不同轴**；对面给了编号选项则「表态」必须排第一
- * （他的回法铁律：你给 A/B/C，回话就得是 A/B/C 之一或"都不选 + 我的要求"，不许另起一套）。
- * 词表与判定在 ./de-axes.ts —— 真源是 dsh-input-tools 插件那一份（带 24 项单测），别在这边单独加词。
- */
-export function rolesForJudge(j: Record<string, unknown>, convoForOptions?: string): string[] {
-  return pickAxes(j, { hasOptions: hasNumberedOptions(convoForOptions || '') });
-}
+// [2026-09-26 根治·与 dsh 同步] rolesForJudge（分歧轴挑 3 条不同轴）随轴机器一并废 —— 新设计不再规定
+// 候选必须落在哪几个轴，改由提示词「贴上下文、三条真的不一样」自然保证多样性，无需挑轴贴角色标签。
 
 /** 会话拼文本（最近的必须在最后：模型对尾部最敏感，历史上保头砍尾出过大事故） */
 export function foldHistory(turns: DeHistoryTurn[], cap = 6000): string {
@@ -348,13 +333,15 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
 
   const large = judge.scope === 'large';
   const riskHigh = judge.risk === 'high';
-  const roles = rolesForJudge(judge, convo);
   // 🔴 与网页侧同一招（09-25 老大「这三条我一样看不懂」）：候选老照着助手的腔写（提交号、diff、
   // 黑话一堆），把他自己的原话当语气样本喂进去才像他说的话。
   const voice = convo.split('\n').filter((l) => l.startsWith('我:')).slice(-3).map((l) => l.slice(0, 160));
   // 🔴 判断小抄**不再放进系统提示词**（09-25 实测模型把「用户情绪不耐烦，风险无，改动量级轻」整句抄上卡片）：
   // 挪到用户那一轮、并明确包成"只给你看、不许抄"，减少背题面。
-  const sys = `${DE_DRAFT_BASE}\n${DE_DRAFT_SYSTEM_HUMAN}\n三条角色依次是：${roles.join(' / ')}。${riskHigh ? '其中必须有一条明确劝停或要求先备份确认。' : ''}每条都要在句尾附一句怎么算做完了（拿什么证据回来给我看）。\n【他本人就这么说话，照这个语气写，别学助手的腔】\n${voice.length ? voice.join('\n') : '（这次没抽到他之前的话）'}`;
+  // 🔴 09-26 真跑照出来的病：原来这句写成「三条角色依次是：表态 / 改范围 / 定完成标准」，模型就照抄成
+  // 「第1条：表态 —— 选 A？」这种答题格式上卡片（答题格式不是他能按回车发的话）。词表照给，但明确
+  // 标成"只给你判断用"，并禁掉序号/轴名/冒号答题式；代码里 sanitizeCandidates 只兜底，不许啃正文。
+  const sys = `${DE_DRAFT_BASE}\n${DE_DRAFT_SYSTEM_HUMAN}\n${riskHigh ? '风险高：其中必须有一条明确劝停或要求先备份确认。\n' : ''}【他本人就这么说话，照这个语气写，别学助手的腔】\n${voice.length ? voice.join('\n') : '（这次没抽到他之前的话）'}`;
 
   let candidates: string[] = [];
   let draftErr = '';
@@ -378,7 +365,7 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
         // thinking…」「So the three replies: …」，我的断言只盯中文元词，全绿放行还提交上去，同一个错犯第二遍）。
         const zhCount = (t.match(/[\u4e00-\u9fa5]/g) || []).length;
         if (zhCount < 4 || zhCount / Math.max(1, t.length) < 0.45 || /\b(the|and|but|wait|also|so|must|rule|reply|replying)\b/i.test(t)) continue;
-        if (/用户|对方|角色|验收|量级|情绪|接住|语气样本|三条|照这个语气|每条|^\s*>|💭|让我(们)?(先|再|仔细)?看|我需要|助手刚说|替他写|作为\s*AI|风险\s*(无|低|中|高)|^\s*(推进|收窄|叫停|认账收尾|挑一点让它证明|直接答|先要证据再答|方案[AB])\s*[:：]/.test(t)) continue;
+        // [2026-09-26 根治·与 dsh 同步] 去掉思考草稿腔/元词命中这批"擦屁股"内容正则 —— 老提示词又长又自相矛盾才逼出脏候选再靠正则擦，新提示词说人、无标签就够。
         // 🔴 实测卡片上出现过 `["…","…"]` 残渣：模型把两条塞进一个 JSON 数组字符串里，旧代码整坨当一条。
         // 先摊平成多条，再逐条走上面的判废与去重。
         const pieces = (t.startsWith('[') || t.includes('","') ? t.replace(/^\[|\]$/g, '').split('","') : [t])
@@ -391,18 +378,9 @@ export async function localDe(turns: DeHistoryTurn[], cfg: DeConfig, extra?: str
     } catch (e) { draftErr = (e as Error).message.slice(0, 160); break; }
   }
   candidates = candidates.slice(0, 3);
-  // 🔴 与网页侧同一道代码闸门（老大硬要求"每条带验收"，光写在提示词里不算落实）：
-  // 模型漏写就补一句；补的句子自己必须能被同一条正则认出，否则补了等于没补（09-25 自查抓出的乌龙）。
-  // 位置必须在候选生成之后 —— 上一版插在 candidates 声明之前，TS 直接 TDZ 报错、/de 会崩（fe73faf 那次）。
-  {
-    const hasCheck = /算完|算数|给我看|贴出来|贴过来|贴给我|发我|发过来|列出来|证明|核对|截图|日志原文/
-    for (let i = 0; i < candidates.length; i++) {
-      // 只给"像句人话"的候选补验收（≥10 字）；短成一坨的碎句别糊上统一尾巴装成真货（09-25 实测三条垃圾被补成三条验收句，更像真的）
-      if (candidates[i].length >= 10 && !hasCheck.test(candidates[i])) candidates[i] = candidates[i].replace(/[。！.]+$/, '') + '。做完把证据贴出来给我看。'
-    }
-  }
-
-  const out: DeResult['candidates'] = candidates.map((text, i) => ({ text, p: 0, role: roles[i] ?? '' }));
+  // [2026-09-26 根治·与 dsh 同步] 拆掉「给候选硬补『做完把证据贴出来给我看』验收尾巴」—— 它正是老设计造
+  // 空壳句的元凶（强制每条带验收 →「改完把日志贴给我，就算完事」这种没动作的空壳），新提示词不再强制验收。
+  const out: DeResult['candidates'] = candidates.map((text, i) => ({ text, p: 0, role: '' }));
   // [2026-09-26 老大选 C] 不再排序、不再算「拟用 %」。原来这段先问聊天模型要概率、不通再问决策模型
   // 选最优，两边都只喂候选前 120 字、八维判断一个字没喂 —— 那个分布没有预测力，还把硬凑的数
   // 伪装成数据（09-25 他就抓到过"满屏拟用 0%"的假数据）。三条并列按起草顺序给，ranked 恒为 false，

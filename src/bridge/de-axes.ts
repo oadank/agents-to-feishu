@@ -101,3 +101,63 @@ export function roleBlock(axes: string[]): string {
   }
   return lines.join('\n');
 }
+
+/** 候选必须是能直接按回车发的原话（真源 = dsh-input-tools/lib/de-axes.js，09-26 真跑照出的病）。
+ *  只剥四种明确带分隔符的答题前缀；剥完必须还是一句能发的话，否则原样退回 —— 上一版把
+ *  「第一条必须是两个不同方案」啃成「条必须是…」就是缺了这道退回判断。 */
+const META = /^\s*(要?照抄|注意|提示|说明|补充|以上|以下|记住|请忽略)[^。！？\n]{0,20}[:：]/;
+const AXIS_WORDS = '表态|改范围|换路径|换人|要证据|加约束|定完成标准|停/推迟';
+const LEAD = [
+  new RegExp('^\\s*(第\\s*)?[1-3一二三]\\s*[条项]\\s*(?:' + AXIS_WORDS + ')?\\s*[:：、，]\\s*'),
+  new RegExp('^\\s*[【\\[]\\s*(?:' + AXIS_WORDS + ')\\s*[】\\]]\\s*[:：]?\\s*'),
+  new RegExp('^\\s*(?:' + AXIS_WORDS + ')\\s*[:：\\-—]+\\s*'),
+  new RegExp('^\\s*[1-3]\\s*[.、)）]\\s+'),
+];
+export function stripLead(s: string): string {
+  const raw = String(s || '').trim();
+  if (!raw) return '';
+  let t = raw;
+  for (let i = 0; i < LEAD.length; i++) t = t.replace(LEAD[i], '');
+  t = t.trim();
+  const ok = t.length >= 6 && !/^[、，：:/\-—]/.test(t) && t.length >= raw.length - 14;
+  return ok ? t : raw;
+}
+export function sanitizeCandidates(list: string[]): string[] {
+  const arr = list || [];
+  const out: string[] = [];
+  for (const raw of arr) {
+    const t = stripLead(raw).replace(/，(?=[。，、；])|(?<=[，、；])。。/g, '');
+    if (!t || META.test(t)) continue;
+    out.push(t);
+  }
+  return out.length >= 2 ? out : arr.slice();
+}
+// 判废「思考草稿腔」（真源 = dsh-input-tools/lib/de-axes.js）。2026-09-26 三次真跑实测漏法：
+//   「表态 + 方案: 选 A? He wants 表态. Let's say: …」「… — need evidence: 拿什么回来.」
+//   「选 C? Or define what counts as done: … Maybe: …」—— 整句中文占多数，旧的汉字占比闸门拦不住。
+const DRAFT_TELL: RegExp[] = [
+  /\b(he wants|she wants|let'?s say|need evidence|or define|counts as done|maybe\b|i'?ll|you could|should be|so first|then we|what to do|e\.g\.|for example|such as|done criterion|narrow scope)\b/i,
+  /[A-Za-z][a-z.']{1,}(?:\s+[a-z']{2,}){3}/,
+  new RegExp('^\\s*(?:' + AXIS_WORDS + ')\\s*[+＋·、,，/｜|]\\s*'),
+  /^\s*["“『].+["”』]\s*[—\-–:：]\s*\S/,
+  /^\s*(item|条)\s*\d+\s*[（(]?[^）)]{0,8}[)）]?\s*[:：]/i,
+  /(点明[^，。；]{0,6}(动什么|改什么)|主语是\s*["“」]|指助手|范围缩到|完成标准\s*=|每条都?要?在句尾|拿什么回来给你?他看|示例口吻)/,
+  /^\s*(message|item|reply|option|candidate)\s*\d+/i,
+  /((^\s*动什么\s*[:：])|(\b(?:Acceptance|Rollback|Plan|Scope|Action)\s*[:：]))/i,
+  /^\s*[（(]\s*(?:表态|改范围|换路径|换人|要证据|加约束|定完成标准|停\/推迟|劝停)/,
+  /^\s*(?:[A-Za-z][A-Za-z0-9'._-]*\s+){2}[A-Za-z]/,];
+export function isDraftChatter(t: string): boolean {
+  const s = String(t || '');
+  for (const re of DRAFT_TELL) { if (re.test(s)) return true; }
+  return false;
+}
+/** 只讲"怎么算做完"、没讲"要干什么"的句子 —— 扔掉重写（真源 = dsh-input-tools/lib/de-axes.js）。
+ *  实测两条：「改完把…日志贴给我，就算完事」「怎么算做完了：把…贴回来，我确认了再重启」。
+ *  只认句首位置与"就算完事"收尾，不猜词义（前两版剥词/动词白名单都栽过）。 */
+const ACCEPT_LEAD = /^\s*(改完|做完|跑完|弄完|完成后|改好后|搞定后|怎么算做完|怎么算完|算完|验收标准|验收)/;
+const ACCEPT_TAIL = /(就算完事|就算完|算做完了|就算做完了)/;
+export function isShell(t: string): boolean {
+  const s = String(t || '').trim();
+  if (!s) return false;
+  return ACCEPT_LEAD.test(s) || ACCEPT_TAIL.test(s);
+}
