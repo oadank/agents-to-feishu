@@ -99,18 +99,30 @@ export class FeishuClient {
     return json.data?.message_id ?? null;
   }
 
-  /** 增量更新卡片 element（cardkit.v1.cardElement.content，带 sequence） */
-  async updateCardElement(cardId: string, elementId: string, content: string, sequence: number): Promise<boolean> {
+  /**
+   * 增量更新卡片 element（cardkit.v1.cardElement.content，带 sequence）。
+   *
+   * [T-0016 2026-09-26] 返回值从 boolean 改为三态，因为长任务实测每次都要**白失败两次**才降级：
+   * 飞书流式通道有自己的生存期，过期后先报 200850（card streaming timeout），此后一律
+   * 300309（streaming mode is closed）——这种「通道已死」重试没有意义（旧代码紧跟着再发一次，
+   * 必然二次报错，dsh-err.log 里成对刷屏）。
+   *  - 'ok'    成功
+   *  - 'dead'  流式通道已关/已过期，调用方应立刻关流式 + 整卡 PATCH，别再重试
+   *  - 'retry' 其它错误（限流/瞬态/竞态），可重试一次
+   */
+  async updateCardElement(cardId: string, elementId: string, content: string, sequence: number): Promise<'ok' | 'retry' | 'dead'> {
     const resp = await this.sdk.cardkit.v1.cardElement.content({
       path: { card_id: cardId, element_id: elementId },
       data: { content, sequence },
     });
     if (resp?.code !== 0 && resp?.code !== undefined) {
-      console.warn(`[feishu] updateCardElement FAILED seq=${sequence} code=${resp?.code} msg=${resp?.msg}`);
-      return false;
+      const code = Number(resp.code);
+      const dead = code === 200850 || code === 300309;
+      console.warn(`[feishu] updateCardElement FAILED${dead ? '[stream-dead]' : ''} seq=${sequence} code=${resp?.code} msg=${resp?.msg}`);
+      return dead ? 'dead' : 'retry';
     }
     console.log(`[feishu] updateCardElement OK seq=${sequence} len=${content.length}`);
-    return true;
+    return 'ok';
   }
 
   /**

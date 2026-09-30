@@ -325,6 +325,9 @@ export function buildStreamMarkdown(layers: TurnLayers): string {
   return parts.join('\n\n');
 }
 
+/** 卡片正文字符硬顶（飞书侧限制留足余量）；超过即有损截尾，长答案须另发完整文件。 */
+export const FINAL_CARD_CHAR_CAP = 28000;
+
 /**
  * 最终态：工具块("🔧 工具执行") --- 思考(1500 截尾) --- 正文，段间全部 --- 分隔。
  * 对齐旧 replace_preview（2297-2318 行）。
@@ -333,15 +336,18 @@ export function buildFinalMarkdown(layers: TurnLayers): string {
   const parts: string[] = [];
   if (layers.toolLines.length > 0) parts.push(toolsBlock(layers.toolLines, false));
   if (layers.thinking.trim()) parts.push(thinkingBlock(layers.thinking, 1500));
-  parts.push(layers.text.trim() || '（空回复）');
+  parts.push(layers.text.trim() || (layers.toolLines.length > 0
+    ? `（模型执行了 ${layers.toolLines.length} 次工具调用但未写出正文总结 —— 可回一句「总结一下」或「继续」催收）`
+    : '（空回复）'));
   if (layers.error) parts.push(errorBlock(layers.error));
   let combined = parts[0];
   for (let i = 1; i < parts.length; i++) {
     combined += '\n\n---\n\n' + parts[i];
   }
-  // 飞书卡片长度兜底：超长保留末尾（正文在最后）
-  const MAX_CARD_CHARS = 28000;
-  if (combined.length > MAX_CARD_CHARS) combined = combined.slice(combined.length - MAX_CARD_CHARS);
+  // 飞书卡片长度兜底：超长保留末尾（正文在最后）。
+  // 🔴 这是「只留尾部」的有损截断：长任务的结论常在前半段，所以 engine 侧对超过本上限的
+  //    最终答案会另发一份完整文件（见 deliverFullAnswerAsFile），卡片只当可读预览。
+  if (combined.length > FINAL_CARD_CHAR_CAP) combined = combined.slice(combined.length - FINAL_CARD_CHAR_CAP);
   return combined;
 }
 
