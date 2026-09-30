@@ -1,0 +1,4 @@
+interface:
+  display_name: "H3 · 真人漫画分镜"
+  short_description: "将漫画分镜改编为 H3 真人短片提示词，支持角色替换、装备继承与实景转换"
+  default_prompt: "使用 $h3-storyboard-live-manga，把漫画分镜和人物参考转换为 H3 真人成片提示词。"

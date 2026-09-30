@@ -347,3 +347,25 @@ CDP 工具、登录服务、知识库流水线、yt-dlp 插件、自检脚本、
   - 调试想保留现场：设 `DOUYIN_KEEP_PAGE=1`（不收尾）
   - 也可单独手动收尾：`node C:\D\opt\tools\yt-dlp\park_page.mjs`
 - 自检一条命令：`node C:\D\opt\tools\yt-dlp\test\selfcheck.mjs`（22 项：排序语义 / 两个后端 / 插件结构 / 无盲取 page）
+
+## 🔴 2026-09-23 补丁：`sniff_download.mjs` 的"下错片"三重防护（老大点名打的，已实装+已验证）
+
+**事故**：同一条 RAG 视频（真身 189.64s / 1080p），`sniff_download.mjs` 抓回 **3840×2160 / 292.39s 的别人的片子**（抽帧一看：Mac 上讲 Codex 做插件）。
+
+**根因（两处叠加，缺一不可）**
+1. 播放器 metadata 没就绪 → 导航后固定 `sleep(10s)+sleep(8s)` 读 `video.duration` 拿到 **0**；而时长筛写的是 `sameClip = r => !playDur || !r.dur || |Δ| <= DUR_TOL` —— **锚点为 0 时短路成恒真，等于把筛选静默关掉**（不是"放宽"，是"关掉"，最坏的那种失效）。
+2. 那次还 `SSR 里没定位到本条 aweme 的子树`（抖音改版），候选全来自详情接口里的 `recommendations` —— **几百路都是别人的视频**，于是按"像素最高"下成了那条 4K。
+
+**修法（本机真源已改，`engine/` 快照已 sync）**
+1. **锚点改轮询**：最多 40×500ms 等 `video.duration` 变 finite，不再赌固定 sleep。
+2. **第二锚点**：播放器到底不给时，从 JSON 里**本条 aweme** 的 `duration` / `video.duration` 兜（抖音该字段常是毫秒，`>2000` 自动折算成秒）。
+3. 🔴 **两条锚点都没有 = 硬失败 exit 7**，并直接打印改用签名中转 / 插件的命令。**绝不允许"无锚点裸奔挑清晰度"**。风险自担可 `ALLOW_NO_ANCHOR=1` 强跑（会打警告：成片未经内容校验）。
+4. **第三道筛（比时长更硬）**：`walk()` 递归时携带 `ctxId`（碰到带 `aweme_id/awemeId/vid` 且长度 ≥8 的节点就换上下文，长度门槛用来躲开清晰度档对象上那些短 id），每条候选打上归属 id → **只留本条 aweme 的档**；scoped 里一条音频都没有时，音频仍从全量挑但**必须过时长筛**（防把别人的原声合进本片）。`info.json` 新增 `aweme_id / anchor_dur_sec / scoped_list_size`。
+5. 顺手补一刀：`audR` 以前**完全不做时长校验**（理论上能把别人的歌合成本片），现在同样过 `sameClip`。
+
+**验证（同一条链接重跑）**：锚点 0 → 自动兜到 189.64s；候选 422 → 按 id 收敛 37 路；产物 **1920×1080 / 189.64s / 带 aac 音轨**，抽帧确认画面就是那条 RAG 片。`RESOLVE_JSON=1`（插件的抓流兜底后端）冒烟同样通过，且现在吐真实 `duration` 而不是 `null`。
+备份：`%TEMP%\sniff_download.mjs.bak-20260923-anchor`。
+
+**新增诊断脚本 `recon/feed_probe.mjs`**：`node C:\D\opt\tools\yt-dlp\recon\feed_probe.mjs "<视频页|搜索页|推荐流URL>" [目标秒数]`
+→ 列出页面/接口里每条 aweme 的 `id / 时长 / 最高分辨率 / 作者 / 标题片段`，第 2 个参数传秒数即**按时长贴近排序**。用来"只记得画面、不记得链接"地反查片子（下错片追责、按体型捞片都靠它）。跑完照例 `park_page.mjs` 收尾。
+⚠️ 已知局限：只读首屏 SSR + 当时拦到的接口，**推荐流是随机的**，不滚动只捞到 20~36 条；搜索页同理（实测 10 条）。要广撒网得配滚动。

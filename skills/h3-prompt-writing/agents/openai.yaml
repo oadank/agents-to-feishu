@@ -1,0 +1,4 @@
+interface:
+  display_name: "H3 · 官方提示词"
+  short_description: "编写符合 MiniMax H3 官方结构的各类视频提示词"
+  default_prompt: "Use $h3-prompt-writing to rewrite this multimodal request into a MiniMax H3 generation prompt."

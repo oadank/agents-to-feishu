@@ -1,0 +1,4 @@
+interface:
+  display_name: "图片分镜 · 动漫战斗"
+  short_description: "把漫画或文字需求整理成可生图的连续战斗分镜提示词"
+  default_prompt: "使用 $img-storyboard-fight，将漫画、人物参考或文字战斗需求整理为连贯的多格战斗分镜图提示词，不生成图片或 H3 视频提示词。"

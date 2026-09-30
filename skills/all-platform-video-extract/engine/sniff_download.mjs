@@ -58,15 +58,33 @@ const title = await rpc('Runtime.evaluate', { expression: 'document.title' }).th
 // 🔴 锚点：真正在播的那条视频的时长与地址。推荐流 SSR 里混着几百条别的视频，
 //    只按分辨率挑会下错片（实测把 26 秒 4K 竖屏当成目标下载），必须用时长对齐来筛。
 const href = await rpc('Runtime.evaluate', { expression: 'location.href' }).then((r) => String(r.result?.value || '')).catch(() => '');
-const playDur = await rpc('Runtime.evaluate', { expression: `(function(){var v=document.querySelector('video');return v&&v.duration&&isFinite(v.duration)?v.duration:0})()` }).then((r) => Number(r.result?.value) || 0).catch(() => 0);
+// 🔴 锚点必须**轮询等**播放器 metadata 真就绪，不能固定 sleep 后读一次赌运气。
+//   2026-09-23 事故：那次读回 0（导航后 10s+8s 还没 ready），下面的时长过滤器
+//   `!playDur ||` 短路成恒真 = 筛选被静默关掉，结果按像素最高下成了推荐流里
+//   别人的 4K 视频（目标 189.6s/1080p，抓回 292.4s/3840x2160）。
+let playDur = 0;
+const readDur = () => rpc('Runtime.evaluate', { expression: `(function(){var v=document.querySelector('video');return v&&v.duration&&isFinite(v.duration)?v.duration:0})()` }).then((r) => Number(r.result?.value) || 0).catch(() => 0);
+for (let i = 0; i < 40 && !playDur; i++) { playDur = await readDur(); if (!playDur) await sleep(500); }
 const playSize = await rpc('Runtime.evaluate', { expression: `(function(){var v=document.querySelector('video');return v&&v.videoWidth?v.videoWidth+'x'+v.videoHeight:''})()` }).then((r) => String(r.result?.value || '')).catch(() => '');
-console.log(`播放锚点: 时长 ${playDur.toFixed(2)}s  播放器分辨率 ${playSize || '?'}  地址 ${href.slice(0, 60)}`);
+console.log(`播放锚点: 时长 ${playDur.toFixed(2)}s  播放器分辨率 ${playSize || '?'}  地址 ${href.slice(0, 60)}${playDur ? '' : '  ⚠️ 播放器没给时长，改从详情 JSON 兜（见下）'}`);
 
 // 递归收集任何"带地址 + 带清晰度信息"的对象，字段位置全不猜，改版也扛得住
-function walk(node, found, depth = 0) {
+// 🔴 ctxId：一路递归时记住"当前这个对象属于哪条 aweme"。抖音详情响应里带着
+//   recommendations（别人的视频），光靠时长筛是赌运气，id 对得上才是硬证据。
+let metaDur = 0; // 播放器没给时长时的第二锚点：本条 aweme 在 JSON 里的 duration
+function walk(node, found, depth = 0, ctxId = '') {
   if (depth > 16 || node === null || typeof node !== 'object') return;
-  if (Array.isArray(node)) { for (const n of node) walk(n, found, depth + 1); return; }
+  if (Array.isArray(node)) { for (const n of node) walk(n, found, depth + 1, ctxId); return; }
   const urls = [];
+  // 本节点若自带 aweme 标识就是新上下文，否则沿用父级（aweme id 都是 19 位数字，
+  // 长度门槛用来躲开清晰度档对象上那些短 id / 数字字段）
+  const rawId = node.aweme_id ?? node.awemeId ?? node.awemeID ?? node.vid;
+  const selfId = rawId !== undefined && rawId !== null && String(rawId).length >= 8 ? String(rawId) : ctxId;
+  if (selfId && awemeId && selfId === String(awemeId)) {
+    const d = [node.duration, node.video && node.video.duration, node.video && node.video.total_duration]
+      .map(Number).filter((n) => n > 0)[0];
+    if (d && !metaDur) metaDur = d > 2000 ? d / 1000 : d; // 抖音字段单位不统一：>2000 按毫秒处理
+  }
   const push = (x) => { if (typeof x === 'string' && x.length > 8 && !/^data:/.test(x)) urls.push(x); };
   if (Array.isArray(node.uri_list)) node.uri_list.forEach(push);
   if (node.play_addr && typeof node.play_addr === 'object') (node.play_addr.uri_list || []).forEach(push);
@@ -92,9 +110,9 @@ function walk(node, found, depth = 0) {
     const h266 = /bytevc2|hvc2|h266|vvc/.test(urlText + ' ' + own);
     const wm = /unwatermarked|watermark=0/.test(urlText) ? 0 : (/watermark=1|watermarked/.test(urlText) ? 1 : -1);
     const size = Number(node.data_size ?? node.size ?? 0) || 0;
-    found.push({ urls, px, br, size, dur, h265, h266, wm, res: (node.width || '?') + 'x' + (node.height || '?'), keys: Object.keys(node).join(','), def: String(node.definition ?? node.quality ?? node.label ?? node.ratio ?? '') });
+    found.push({ urls, px, br, size, dur, h265, h266, wm, aweme: selfId || '', res: (node.width || '?') + 'x' + (node.height || '?'), keys: Object.keys(node).join(','), def: String(node.definition ?? node.quality ?? node.label ?? node.ratio ?? '') });
   }
-  for (const k of Object.keys(node)) walk(node[k], found, depth + 1);
+  for (const k of Object.keys(node)) walk(node[k], found, depth + 1, selfId);
 }
 const renditions = [];
 
@@ -126,6 +144,17 @@ for (const d of jsonReqs.slice(0, 40)) {
 }
 ws.close();
 
+// 🔴 第二锚点：播放器没吐时长，就用详情 JSON 里本条 aweme 的 duration 顶上
+if (!playDur && metaDur) { playDur = metaDur; console.log(`播放锚点缺失 → 改用详情 JSON 的本条时长 ${metaDur.toFixed(2)}s`); }
+if (!playDur && process.env.ALLOW_NO_ANCHOR !== '1') {
+  console.error('!! 两条时长锚点都没拿到（播放器 metadata 未就绪 + JSON 里也没有本条 duration）。');
+  console.error('   没有锚点还挑清晰度 = 在推荐流里裸奔：2026-09-23 就是这样把别人的 4K 视频下回来的。');
+  console.error('   换签名中转后端（按 aweme id 取档，天然不混流）：node C:\\D\\opt\\tools\\yt-dlp\\resolve_signed.mjs "<URL>"');
+  console.error('   或走插件：yt-dlp --plugin-dirs C:\\D\\opt\\tools\\yt-dlp\\plugins "<URL>"');
+  console.error('   确认风险自担、硬要跑：ALLOW_NO_ANCHOR=1 再执行一次。');
+  process.exit(7);
+}
+
 const norm = (u) => (u.startsWith('http') ? u : 'https://' + u.replace(/^\/\//, ''));
 const isAudio = (u) => /media-audio|audio_mp4|type=audio|\baudio\b/i.test(u);
 // SSR 数据里混着封面、图标、预取地址，必须只认媒体域名/后缀，否则会把 jpg 当视频下
@@ -139,18 +168,33 @@ const sameClip = (r) => !playDur || !r.dur || Math.abs(r.dur - playDur) <= DUR_T
 // 默认**分辨率优先**（老大 2026-09-19 定）：目的是做知识库，画质对转写没帮助，
 // HEVC 反而更清晰更省盘。要喂剪映/老设备时设 PREFER_H264=1 改回 H.264 优先。
 const preferH264 = process.env.PREFER_H264 === '1';
-const vidR = renditions.filter((r) => r.urls.some((u) => looksMedia(norm(u)) && !isAudio(norm(u))) && sameClip(r))
+// 🔴 第三道筛（比时长更硬）：候选对象上带得出 aweme id 的，只留本条。
+//   详情响应里的 recommendations 混着几百路别人的清晰度，2026-09-23 那次就是栽在
+//   "SSR 没裁到子树 + 时长锚点为 0" 双失效上，光靠时长筛等于赌运气。
+const isAudR = (r) => r.urls.every((u) => isAudio(norm(u)));
+const scopedR = awemeId ? renditions.filter((r) => r.aweme === String(awemeId)) : [];
+let pool = renditions;
+if (scopedR.length) {
+  pool = scopedR;
+  // 音轨常挂在另一层、ctxId 传不下去：scoped 里一条音频都没有时，音频仍从全量挑，
+  // 但必须过时长锚点，否则会把别人的原声合进来
+  if (!scopedR.some(isAudR) && renditions.some(isAudR)) pool = scopedR.concat(renditions.filter((r) => isAudR(r) && sameClip(r)));
+  if (pool.length !== renditions.length) console.log(`候选按 aweme ${awemeId} 收敛：${renditions.length} → ${pool.length} 路`);
+} else if (awemeId && renditions.length) {
+  console.log(`!! 清单里没一条带本条 aweme id（抖音字段又改版？），只靠时长锚点筛 ${renditions.length} 路`);
+}
+const vidR = pool.filter((r) => r.urls.some((u) => looksMedia(norm(u)) && !isAudio(norm(u))) && sameClip(r))
   // 排序优先级：不可播编码(h266)垫底 → 带水印垫底 → 可选 h264 优先 → 分辨率 → 体积 → 码率
   // 🔴 水印必须排在 h264 偏好**前面**：否则 PREFER_H264=1 时，带水印的 h264 会挤掉无水印的 1080p
   .sort((a, b) => (Number(!!a.h266) - Number(!!b.h266))
     || ((a.wm === 1 ? 1 : 0) - (b.wm === 1 ? 1 : 0))
     || (preferH264 ? Number(!!a.h265) - Number(!!b.h265) : 0)
     || (b.px - a.px) || (b.size - a.size) || (b.br - a.br));
-const audR = renditions.filter((r) => r.urls.every((u) => isAudio(norm(u)))).sort((a, b) => b.br - a.br);
+const audR = pool.filter((r) => isAudR(r) && sameClip(r)).sort((a, b) => b.br - a.br);
 const uniqNet = [...new Map(media.map((m) => [m.url.split('?')[0] + '|' + m.url.slice(-40), m])).values()].sort((a, b) => b.length - a.length);
 
 console.log(`标题: ${title}`);
-console.log(`候选：清晰度清单 ${renditions.length} 路（视频 ${vidR.length}/音频 ${audR.length}），网络媒体响应 ${media.length} 条，JSON 接口 ${jsonReqs.length} 个`);
+console.log(`候选：清晰度清单 ${renditions.length} 路 → 收敛后 ${pool.length} 路（视频 ${vidR.length}/音频 ${audR.length}），时长锚点 ${playDur ? playDur.toFixed(1) + 's' : '无'}，网络媒体响应 ${media.length} 条，JSON 接口 ${jsonReqs.length} 个`);
 vidR.slice(0, 8).forEach((r, i) => console.log(`  [清单${i}] ${r.res || '?'} ${r.size ? (r.size / 1048576).toFixed(1) + 'MB' : '?'} ${r.dur ? Math.round(r.dur) + 's ' : ''}${r.h266 ? 'H.266/不可播' : r.h265 ? 'HEVC/AV1' : 'H.264'}${r.wm === 1 ? ' 带水印' : r.wm === 0 ? ' 无水印' : ''}${process.env.DUMP_KEYS ? '\n        字段: ' + r.keys : ''}`));
 // 🔴 2026-09-21 新增 RESOLVE_JSON=1：给 yt-dlp 插件当"只解析不下载"的后端用。
 // 输出一行带唯一前缀的 JSON（诊断日志仍在前面，消费方按前缀找这一行即可，不用把日志改道）
@@ -267,7 +311,9 @@ else { renameSync(vraw, final); }
 
 const probe = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,width,height', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1', final], { encoding: 'utf8' });
 const kv = {}; probe.stdout.replace(/\r/g, '').split('\n').forEach((l) => { const i = l.indexOf('='); if (i > 0) kv[l.slice(0, i)] = l.slice(i + 1); });
-const info = { source_url: VIDEO, title, saved_at: new Date().toISOString(), engine: 'browser-sniff', video: { file: 'video.mp4', bytes: (stat(final)), width: kv.width, height: kv.height, codec: kv.codec_name, duration_sec: kv.duration }, audio: gotAudio ? { file: 'audio.m4a', bytes: stat(afile) } : null, picked_from: chosen.from, rendition_list_size: renditions.length };
+const info = { source_url: VIDEO, aweme_id: awemeId || null, anchor_dur_sec: playDur || null, title, saved_at: new Date().toISOString(), engine: 'browser-sniff', video: { file: 'video.mp4', bytes: (stat(final)), width: kv.width, height: kv.height, codec: kv.codec_name, duration_sec: kv.duration }, audio: gotAudio ? { file: 'audio.m4a', bytes: stat(afile) } : null, picked_from: chosen.from, rendition_list_size: renditions.length, scoped_list_size: pool.length };
+if (!playDur) console.log('⚠️ 无时长锚点跑出来的成片未经内容校验（ALLOW_NO_ANCHOR=1），务必自己看一眼画面/时长');
+if (playDur && Math.abs(Number(kv.duration) - playDur) > DUR_TOL) console.log(`⚠️ 成片时长 ${kv.duration}s 与锚点 ${playDur.toFixed(1)}s 差得有点多，请人工复核是不是下错片`);
 writeFileSync(join(DIR, 'info.json'), JSON.stringify(info, null, 2), 'utf8');
 console.log(`结果: ${kv.width}x${kv.height} ${Math.round(Number(kv.duration) || 0)}秒 | video ${(info.video.bytes / 1048576).toFixed(1)}MB | audio ${(asize / 1048576).toFixed(1)}MB`);
 console.log('目录: ' + DIR);

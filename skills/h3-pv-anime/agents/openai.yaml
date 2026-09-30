@@ -1,0 +1,4 @@
+interface:
+  display_name: "H3 · 动漫 PV"
+  short_description: "根据参考图编写导演式 MiniMax H3 动漫 PV 视频提示词"
+  default_prompt: "使用 $h3-pv-anime，根据这张参考图编写一条 MiniMax H3 动漫 PV 视频提示词。"

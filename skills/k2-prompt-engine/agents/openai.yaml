@@ -1,0 +1,4 @@
+interface:
+  display_name: "K2 提示词引擎"
+  short_description: "K2 二次元 人像摄影与仙宫场景纯 SFW 提示词路由"
+  default_prompt: "使用 $k2-prompt-engine 为我的 Krea 2 二次元插画、人像摄影或东方仙宫场景需求生成提示词。"

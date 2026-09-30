@@ -1,0 +1,4 @@
+interface:
+  display_name: "H3 擦擦导演台"
+  short_description: "MiniMax H3 单图首帧极限擦边 I2VA 提示词"
+  default_prompt: "使用 $h3-edge-i2v，把这张图作为 0.00 秒首帧写成 5-15 秒不露点的擦边图生视频提示词。"

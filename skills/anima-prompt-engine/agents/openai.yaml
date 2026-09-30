@@ -1,0 +1,4 @@
+interface:
+  display_name: "ANIMA 提示词引擎"
+  short_description: "ANIMA3 纯 SFW 画面内容提示词生成器"
+  default_prompt: "使用 $anima-prompt-engine 把我的画面需求写成一行 SFW 内容提示词。"

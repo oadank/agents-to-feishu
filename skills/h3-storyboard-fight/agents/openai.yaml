@@ -1,0 +1,4 @@
+interface:
+  display_name: "H3 · 动漫战斗分镜"
+  short_description: "将战斗分镜转成因果清楚、节奏高燃的 H3 提示词"
+  default_prompt: "使用 $h3-storyboard-fight 分析这些战斗分镜，先给出 P 段划分、时长、战斗链、演出方向、阅读顺序与参考映射，确认后再写 MiniMax H3 正式提示词。"
