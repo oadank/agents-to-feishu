@@ -156,13 +156,19 @@ export class MiMoProvider implements RuntimeProvider {
     }
   }
 
-  async resetSession(sessionKey?: string): Promise<void> {
-    if (sessionKey) {
-      this.sessions.delete(sessionKey);
-      this.diskDelete(sessionKey); // [09-25] 用户 /new 同步销掉落盘赎回记录，重启后不被"复活"（09-20 裁决：绝不复活）
-      this.autoc.clear(sessionKey); // [T-0030] /new 清该会话的告警段号，重新起算
-      rtLog(`[mimo] resetSession key=${sessionKey.slice(0, 8)}`);
+  async resetSession(sessionKey?: string, oldSessionKey?: string): Promise<void> {
+    // [T-0031 批四] 两把尺子对齐 zcode(31cd9f0)/dsh：桥 resetSession(chatId, 旧sessionKey)，
+    // 而 sessions/diskSids/autoc 全按 streamChat 的 sessionKey=session.id 存 → 用第一参(chatId)
+    // 恒 miss ⇒ 旧会话映射、落盘赎回记录、告警段号都清不掉（泄漏 + 旧账本可能被重启复活）。
+    const canon = oldSessionKey || sessionKey;
+    if (!canon && !sessionKey) return;
+    const keys = new Set<string>([canon, sessionKey].filter((x): x is string => !!x));
+    for (const k of keys) {
+      this.sessions.delete(k);
+      this.diskDelete(k); // [09-25] /new 同步销掉落盘赎回记录，重启后不被"复活"（09-20 裁决：绝不复活）
+      this.autoc.clear(k); // [T-0030] /new 清该会话的告警段号，重新起算
     }
+    rtLog(`[mimo] resetSession canon=${(canon || '').slice(0, 8)} 清 ${keys.size} 键`);
   }
 
   async interrupt(sessionKey?: string): Promise<void> {
