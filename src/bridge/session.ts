@@ -185,6 +185,16 @@ export class SessionManager {
 
   /** 记录一轮对话（context 最多保留 20 条） */
   appendContext(session: Session, userText: string, assistantText: string): void {
+    // 🔴 T-0017 乙（2026-09-30 老大令）：**空正文的 assistant 轮绝不写进历史**。
+    // 实测代价：workbuddy 的 20 条滚动上下文里曾有 7 条是空的（引擎拒答/被取消留下的），
+    // 这些空轮会被重新喂给模型 ⇒ 它以为"这句话我已经答过了"，表现就是漏答、答非所问、
+    // 以及老大最恨的一句："我交给你们的任务，没着落"。
+    // 引擎侧本来已保证失败轮补一句如实的话（engine.ts 的 T-0017 闸门），这里是第二道闸：
+    // 真收到空正文，就**整轮不记**（不记也比记一条假的好），下一轮正常回答时会重新带上上下文。
+    if (!(assistantText || '').trim()) {
+      console.warn(`[session] appendContext 跳过空 assistant 轮（user 前 40 字=${(userText || '').slice(0, 40).replace(/\s+/g, ' ')})`);
+      return;
+    }
     session.context.push({ role: 'user', content: userText });
     session.context.push({ role: 'assistant', content: assistantText });
     if (session.context.length > 20) {

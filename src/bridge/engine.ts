@@ -29,6 +29,7 @@ import {
   buildFinalMarkdown,
   buildErrorMarkdown,
   buildDividerText,
+  FINAL_CARD_CHAR_CAP,
   toolStartLine,
   STREAM_ELEMENT_ID,
   type DividerInfo,
@@ -83,6 +84,12 @@ export interface EngineOptions {
 const FLUSH_INTERVAL_MS = 25;
 const TEXT_FLUSH_INTERVAL_MS = Number(process.env.CTI_TEXT_FLUSH_MS || 1200);
 const THINKING_BUFFER_CAP = 20000;
+/**
+ * 上游（阿里云 token-plan / litellm 网关）判定「本会话已超上下文预算」并要求另开会话。
+ * 桥若不自动重开，该 chat 每一轮都会被同一个引擎会话挡掉：表现为发消息石沉大海，
+ * 且无人工干预永不自愈（2026-09-26 单日命中 732 次，集中在 12:26–15:58）。
+ */
+const UPSTREAM_NEEDS_FRESH_SESSION = /start a fresh session|exceeds safe context budget/i;
 
 /** 从回复正文提取 agent 专门写的「【语音】…」口语块（TTS 念人话用，不念整段回复）。无块返回空串 */
 function extractVoiceBlock(text: string): string {
@@ -597,6 +604,13 @@ export class MessageEngine {
     return po.enabled && stripOptimizePrefix(text.trim(), po.prefixes) !== null;
   }
 
+  /** /compact 判定（2026-09-29）：09-19 起 /compact 不再是桥本地快命令，而是透传引擎跑一整轮
+   *  CLI 压缩（耗时分钟级、非幂等）——不再符合「命令豁免去重」的前提，判重必须收回，
+   *  否则飞书 SDK 重复投递的第二份（同 mid）绕过判重 → 压缩跑两遍（09-29 /p 双发同款坑） */
+  isCompactCommand(text: string): boolean {
+    return text.trim() === '/compact';
+  }
+
   /** ⚡ 提示词优化配置：实时读 config-store（5 秒缓存）——设置页勾选即生效，bot 无需重启 */
   private promptOptimizeCfg(): PromptOptimizeConfig {
     if (this._poCache && Date.now() - this._poCache.at < 5000) return this._poCache.cfg;
@@ -823,16 +837,17 @@ export class MessageEngine {
     const render = async (markdown: string, isFinal = false): Promise<boolean> => {
       if (cardId) {
         seq += 1;
-        let ok = await this.opts.feishu.updateCardElement(cardId, STREAM_ELEMENT_ID, markdown, seq);
-        if (!ok) {
+        let res = await this.opts.feishu.updateCardElement(cardId, STREAM_ELEMENT_ID, markdown, seq);
+        if (res === 'retry') {
           // 2026-08-30 修复流式抽风（老大实测：写一半突然重写/闪全，终卡才正常）：
           // element 失败后不能直接降级整卡 PATCH——骨架 streaming_mode 仍开着，
           // 整卡覆盖会和 CardKit 流式渲染交替打架。处理：先重试一次（瞬态/竞态）；
           // 仍失败则先关流式（settings streaming=false）再整卡 PATCH，消除交替源。
+          // [T-0016] 只对 'retry' 重试；流式已死(200850/300309)直接降级，省掉必然的第二次报错。
           seq += 1;
-          ok = await this.opts.feishu.updateCardElement(cardId, STREAM_ELEMENT_ID, markdown, seq);
+          res = await this.opts.feishu.updateCardElement(cardId, STREAM_ELEMENT_ID, markdown, seq);
         }
-        if (ok) {
+        if (res === 'ok') {
           if (isFinal) {
             seq += 1;
             const summaryText = markdown.replace(/\s+/g, ' ').trim().slice(0, 120) || '✅ 回答完成';
@@ -841,7 +856,7 @@ export class MessageEngine {
           }
           return true;
         }
-        console.warn(`[engine] cardElement update failed ×2, close streaming + whole-card PATCH`);
+        console.warn(`[engine] cardElement update failed (${res === 'dead' ? 'stream-dead' : 'retry-exhausted'}), close streaming + whole-card PATCH`);
         seq += 1;
         const summaryText = markdown.replace(/\s+/g, ' ').trim().slice(0, 120) || '✅ 回答完成';
         await this.opts.feishu.updateCardSettings(cardId, summaryText, seq, false).catch(() => {});
@@ -1070,6 +1085,10 @@ export class MessageEngine {
             hadError = true;
             // 不覆盖已有内容：错误追加到 layers 末尾，走正常渲染保留已显示的正文/工具
             layers.error = ev.message;
+            // 上游点名"另开会话"⇒ 等效自动 /new，否则该 chat 永久哑火（见正则注释）。
+            if (UPSTREAM_NEEDS_FRESH_SESSION.test(ev.message)) {
+              this.forceFreshSession(session, chatId, '上游判定本会话上下文已超预算');
+            }
             await quiesce();
             const okErr = await render(buildStreamMarkdown(layers));
             // [根治 A② 2026-09-15] 走到这里时卡片流式通道常常已经自己超时关掉了
@@ -1087,7 +1106,11 @@ export class MessageEngine {
         }
       }
 
-      if (!hadError) {
+      // 长任务投递韧性：本轮即使以错误收场（上游 429、无输出看门狗、引擎被复位…），
+      // 只要已经产出正文或工具轨迹，就必须走终态投递 —— 否则用户看到的是"忙了半小时，
+      // 一句答案都没落下"，且 appendContext / onReplySent（自动回执）一并被跳过，
+      // 派活方永远等不到回音。错误原文仍由 buildFinalMarkdown 附在末尾，不粉饰失败。
+      if (!hadError || layers.text.trim() || layers.toolLines.length > 0) {
         await quiesce();
         // 语音：只取 agent 专门写的【语音】… 口语文本生成语音（不转整段回复），并把该块从卡片/历史移除
         voiceText = extractVoiceBlock(layers.text);
@@ -1098,6 +1121,24 @@ export class MessageEngine {
           const missing = [...new Set(claims.map((cm) => cm[1]).filter((p) => { try { return !fs.existsSync(p); } catch { return false; } }))];
           if (missing.length > 0) { layers.text += `\n\n⚠️ 报告未落盘：${missing.slice(0, 3).join(' ; ')}`; console.log(`[engine] 产物警告 chat=${chatId.slice(0, 12)} missing=${missing.length}`); }
         } catch { /* 警告失败绝不拦正文 */ }
+        // 🔴 T-0017 乙（2026-09-30 老大令「甲+乙」）：失败轮**必须回一句如实的人话**，不许空着收场。
+        // 实测病症：workbuddy 一轮里调了 21~29 次工具，最后 FINAL text.len=0 —— 用户侧就是
+        // "忙了半天，一个字都没有"（09-29 定性为失忆的一部分）；而且空正文会顺着下面的
+        // appendContext 写进滚动历史（引擎拒答/被取消的空轮就是这么攒到 7 条的），
+        // 再顺着 onReplySent 把一份**空内容**转给派活方，两边同时"已读不回"。
+        // 注意：这里不粉饰成功——把已知原因原样端出来，让人一眼看出这轮失败了、以及为什么失败。
+        if (!layers.text.trim()) {
+          const why0 = (layers.error || '').trim().replace(/\s+/g, ' ');
+          const why = why0
+            ? why0.slice(0, 200)
+            : hadError
+              ? '引擎本轮报错（无更多细节）'
+              : layers.toolLines.length
+                ? `本轮调了 ${layers.toolLines.length} 次工具后没有产出结论${layers.thinking.trim() ? '（思考有输出，但没落成回答）' : ''}`
+                : '引擎本轮没有产出正文';
+          layers.text = `⚠️ 这轮我没答上来：${why}\n需要的话把原话再发一次，或让我换个路子再来。`;
+          console.log(`[engine] T-0017 失败轮补人话 chat=${chatId.slice(0, 12)} 原因=${why.slice(0, 90)}`);
+        }
         const finalText = buildFinalMarkdown(layers);
         // [2026-09-25 老大选方案A] 机器人自己知道刚回了什么：飞书「读消息」接口对流式卡片只回
         // 「请升级至最新版本客户端，以查看内容」占位，/de 走读接口就拿不到对面那句话的正文。
@@ -1105,9 +1146,14 @@ export class MessageEngine {
         try { rememberAssistantSaid(chatId, finalText); } catch { /* 记不上也不许影响发正文 */ }
         console.log(`[engine] FINAL text.len=${layers.text.length} thinking.len=${layers.thinking.length} tools=${layers.toolLines.length} finalText.len=${finalText.length}`);
         const ok = await render(finalText, true);
+        // 卡片是「有损预览」（超 28000 只留末尾），长答案另补发一份完整文件。
+        await this.deliverFullAnswerAsFile(chatId, finalText);
         if (!ok) {
           console.warn(`[engine] final PATCH failed, fallback to text`);
-          const fallback = dividerInfo ? `${finalText}\n\n${buildDividerText(dividerInfo)}` : finalText;
+          const body = finalText.length > FINAL_CARD_CHAR_CAP
+            ? `${finalText.slice(0, FINAL_CARD_CHAR_CAP)}\n\n……（超长，完整内容见上条文件）`
+            : finalText;
+          const fallback = dividerInfo ? `${body}\n\n${buildDividerText(dividerInfo)}` : body;
           await this.sendError(chatId, fallback);
         } else if (this.opts.showAgentDivider) {
           // litellm 中转 bot（如 gemini）：CLI 不吐 usage → 从 LiteLLM 记账库按时间窗补拉本轮
@@ -1337,6 +1383,41 @@ export class MessageEngine {
       this.streamCards.delete(chatId);
       // 本任务结束：若 activeTaskMid 仍指向自己则清除（让插队 interrupt 检测到"旧任务已结束"）
       if (this.activeTaskMid.get(chatId) === (_replyToMessageId ?? undefined)) this.activeTaskMid.delete(chatId);
+    }
+  }
+
+  /**
+   * 上游点名要求另开会话时的自愈：清空桥侧上下文 + 标记下一条消息起新引擎会话，
+   * 与 provider 的 onSessionLost 走同一套 pendingFresh 语义（'user-new' ⇒ 下条绝不赎回旧会话）。
+   */
+  private forceFreshSession(session: Session, chatId: string, why: string): void {
+    if (session.pendingFresh) return; // 本轮已排过，别重复告知用户
+    session.context = [];
+    session.pendingFresh = true;
+    session.pendingFreshReason = 'user-new';
+    this.opts.sessions.persist();
+    console.log(`[engine] auto /new on upstream rejection (${why}) chat=${chatId.slice(0, 12)}`);
+    void this.sendCommandCard(chatId, `🔄 ${why}，已自动开新会话，下一条消息直接发即可。`);
+  }
+
+  /**
+   * 长答案完整投递：卡片正文超 FINAL_CARD_CHAR_CAP 时 buildFinalMarkdown 只保留**末尾**，
+   * 而长任务的结论往往在前半段 —— 用户等于拿不到答案。这里把整份正文落盘成 .md
+   * 以文件消息补发，卡片继续当可读预览。失败只记日志，绝不阻塞主回复。
+   */
+  private async deliverFullAnswerAsFile(chatId: string, fullText: string): Promise<void> {
+    if (fullText.length <= FINAL_CARD_CHAR_CAP) return;
+    try {
+      const dir = path.join(os.tmpdir(), 'agents-to-feishu-answers');
+      fs.mkdirSync(dir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const file = path.join(dir, `answer-${stamp}-${chatId.slice(-6)}.md`);
+      fs.writeFileSync(file, fullText, 'utf8');
+      const fileKey = await this.opts.feishu.uploadFile(file, 'stream');
+      await this.opts.feishu.sendFile(chatId, fileKey);
+      console.log(`[engine] 长答案补发完整文件 len=${fullText.length} file=${path.basename(file)}`);
+    } catch (e) {
+      console.warn(`[engine] 长答案补发文件失败（不阻塞主回复）:`, e);
     }
   }
 
