@@ -132,16 +132,24 @@ function withLock<T>(fn: () => T): T {
   const dir = taskboardDir();
   fs.mkdirSync(dir, { recursive: true });
   const lp = lockPath();
-  let held = false;
-  try {
-    const fd = fs.openSync(lp, 'wx');
-    fs.writeSync(fd, String(process.pid));
-    fs.closeSync(fd);
-    held = true;
-  } catch {
+  const tryGrab = (): boolean => {
+    try {
+      const fd = fs.openSync(lp, 'wx');
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      return true;
+    } catch { return false; }
+  };
+  let held = tryGrab();
+  if (!held) {
     const ageMs = Date.now() - (fs.statSync(lp, { throwIfNoEntry: false })?.mtime.getTime() ?? 0);
     if (ageMs < 15_000) throw new Error('任务账正被另一个写入方占用（稍后重试，本次不硬写）');
-    try { fs.rmSync(lp, { force: true }); } catch { /* 陈旧锁清理失败则照旧写入 */ }
+    // [T-0031 批三] 陈旧锁：清掉后必须【重新抢锁】再写。旧写法 rmSync 后直接落到 fn()，
+    // held 仍是 false（既不持锁又裸跑写）——两个进程同时撞陈旧锁时，A 删锁未建的瞬间
+    // B 的 wx 可能抢中，两边一起 loadBoard→改→saveBoard，读改写丢更新，正是这把锁要防的。
+    try { fs.rmSync(lp, { force: true }); } catch { /* 清理失败下面重抢也会失败，转而拒 */ }
+    held = tryGrab();
+    if (!held) throw new Error('任务账锁刚被其他写入方重新抢占（稍后重试，本次不硬写）');
   }
   try {
     return fn();
@@ -277,6 +285,9 @@ export function claimTask(id: string, input: { by?: string; baseRev?: number; ta
     if (busy && input.takeOver) {
       busy.status = 'blocked';
       busy.reopens.push({ at: now(), by, from: 'doing', to: 'blocked', why: `被 ${t.id} 接管（同分片 ${t.shard}）` });
+      // [T-0031 批三] 被接管任务必须推版本号：否则被让路方手里 baseRev=旧 rev，随后
+      // updateTask 的 checkRev 照样放行 → 基于已失效状态硬盖，乐观锁对"被接管"这次变更全盲。
+      busy.rev += 1;
       touch(b, busy, { by, action: 'yield', from: 'doing', to: 'blocked', note: `同分片让路给 ${t.id}` });
     }
     const from = t.status;
@@ -311,7 +322,7 @@ export function updateTask(id: string, input: UpdateInput): BoardResult {
     if (revErr) return revErr;
 
     const next = input.status;
-    if (next && !(next in FLOW_RANK)) return { ok: false, error: `不认的状态：${next}（可用 ${Object.keys(FLOW_RANK).join('/')}）` };
+    if (next && !Object.hasOwn(FLOW_RANK, next)) return { ok: false, error: `不认的状态：${next}（可用 ${Object.keys(FLOW_RANK).join('/')}）` };
     if (next) {
       const cur = FLOW_RANK[t.status];
       const tgt = FLOW_RANK[next];
@@ -373,8 +384,15 @@ export function updateTask(id: string, input: UpdateInput): BoardResult {
 }
 
 function checkRev(t: TaskRecord, baseRev?: number): BoardResult | null {
-  if (baseRev === undefined || baseRev === null || Number.isNaN(Number(baseRev))) return null;
-  if (Number(baseRev) === t.rev) return null;
+  // [T-0031 批三] 只有【没带 baseRev】(undefined/null) 才跳过对账；传了但不是有限数
+  // （'abc'/NaN/Infinity/对象）是调用方 bug 或被篡改的载荷，必须显式拒——旧写法用
+  // Number.isNaN(Number(baseRev)) 把非法值当"没带"静默放行，等于对非法输入关掉乐观锁。
+  if (baseRev === undefined || baseRev === null) return null;
+  const n = Number(baseRev);
+  if (!Number.isFinite(n)) {
+    return { ok: false, conflict: true, task: t, error: `baseRev 非法（${JSON.stringify(baseRev)}）：要带数字版本号，或不带（不校验）——不许拿非法值静默绕过对账` };
+  }
+  if (n === t.rev) return null;
   return {
     ok: false, conflict: true, task: t,
     error: `版本对不上：${t.id} 你基于第 ${baseRev} 版改，现在已经是第 ${t.rev} 版。本次未落账 —— 先看 current 再决定让路还是换算后重提（别硬盖别人的改动）。`,
