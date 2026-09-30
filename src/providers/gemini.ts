@@ -147,12 +147,17 @@ export class GeminiProvider implements RuntimeProvider {
     }
   }
 
-  async resetSession(sessionKey?: string): Promise<void> {
+  async resetSession(sessionKey?: string, oldSessionKey?: string): Promise<void> {
     // gemini 跨消息靠 sessionKey → app-server 会话映射复用上下文；重置时清掉对应映射，
     // 下条消息（freshSession=true）会为新 sessionKey 开全新会话。
-    if (sessionKey) {
-      this.sessions.delete(sessionKey);
-      rtLog(`[gemini] resetSession key=${sessionKey.slice(0, 8)} -> dropped, next msg opens fresh session`);
+    // [T-0031 批四] 两把尺子对齐 zcode(31cd9f0)：桥 resetSession(chatId, 旧sessionKey)，而 sessions
+    // 按 streamChat 的 sessionKey=session.id 存 → 用第一参(chatId)恒 miss，旧映射清不掉（泄漏，
+    // 只靠 MAX_SESSIONS LRU 兜底）。canon=oldSessionKey||sessionKey 优先。
+    const canon = oldSessionKey || sessionKey;
+    if (canon) {
+      this.sessions.delete(canon);
+      if (sessionKey && sessionKey !== canon) this.sessions.delete(sessionKey);
+      rtLog(`[gemini] resetSession canon=${canon.slice(0, 8)} -> dropped, next msg opens fresh session`);
     } else {
       this.sessions.clear();
       rtLog(`[gemini] resetSession: all sessions dropped`);
