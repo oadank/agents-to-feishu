@@ -288,6 +288,9 @@ export function createDeeptutorProvider(): RuntimeProvider {
 
     let turnId = '';
     let done = false;
+    // [T-0031 批二] 是否真收到本轮终态帧（done/completed/failed/cancelled）——
+    // 没有终态的 close = 连接被对端关掉（服务端优雅重启/超时踢线），半截话不能冒充正常说完
+    let sawTurnEnd = false;
     const eventQueue: StreamEvent[] = [];
     let wake: (() => void) | null = null;
 
@@ -376,6 +379,7 @@ export function createDeeptutorProvider(): RuntimeProvider {
         return;
       }
       if (type === 'done' || msg.status === 'completed' || msg.status === 'failed' || msg.status === 'cancelled') {
+        sawTurnEnd = true;
         const st = String(msg.status ?? (type === 'done' ? 'completed' : ''));
         if (st === 'failed') push({ type: 'error', message: String((meta as { error?: string }).error ?? '本轮执行失败') });
         done = true;
@@ -386,7 +390,12 @@ export function createDeeptutorProvider(): RuntimeProvider {
       // 其余事件（stage_start/progress/thinking/result…）桥接层不需要，静默丢弃
     });
 
-    ws.once('close', () => { done = true; wake?.(); wake = null; });
+    ws.once('close', () => {
+      // [T-0031 批二] 区分"本轮真结束"与"连接被对端关掉"：无终态帧的 close 必须报错，
+      // 否则用户拿到一条无告警的半截答案（DeepTutor 服务端优雅重启/超时踢线走的就是这条）。
+      if (!sawTurnEnd && !done) push({ type: 'error', message: 'DeepTutor 连接在回合结束前断开（服务端关闭/踢线），回复可能被截断——可重发本条重试' });
+      done = true; wake?.(); wake = null;
+    });
     ws.once('error', (err: Error) => {
       push({ type: 'error', message: `DeepTutor WS 错误: ${err.message}` });
       done = true;
