@@ -18,7 +18,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Query, SDKMessage, SDKUserMessage, Options } from '@anthropic-ai/claude-agent-sdk';
-import type { RuntimeProvider, StreamChatParams, StreamEvent } from './types.js';
+import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
+import { AutoCompact } from '../bridge/auto-compact.js';
 import { readCtiMcpDefs } from './shared/per-session-mcp.js';
 import { buildClaudeBuiltinServer, setCurrentChatId } from '../tools/claude-tools.js';
 import type { ClaudeBuiltinServer } from '../tools/claude-tools.js';
@@ -87,6 +88,12 @@ function savedSessionFileExists(id: string): boolean {
   return !anyRootReadable;
 }
 
+// ── 自动压缩（2026-09-30 任务单 1 建成；任务单 2 抽成公共模块 src/bridge/auto-compact.ts）──
+// 三层触发（兜底=用量/预防=轮数·小时/手动）与状态落盘已收口到公共模块；env 约定
+// CTI_CLAUDE_AUTOCOMPACT*（CTI_<BOT>_AUTOCOMPACT* 通式）与单家版完全同名，行为不变。
+// 本文件保留的只有 claude 特有部分：窗口取值链（CLAUDE_CODE_MAX_CONTEXT_TOKENS 优先）、
+// 裸 /compact 压缩轮（runAutoCompact）、boundary 播报来源标注（pendingAutoCompactLabel）。
+
 // usage 落盘统一由 bridge 层承担（engine.ts 消费 {type:'usage'} 事件 → src/bridge/stats.ts recordStats），
 // 此处不再 provider 内落盘（否则双写）。状态条缓存命中率/上下文数据源：~/.dsh/claude-bot/stats/。
 
@@ -105,11 +112,14 @@ function savedSessionFileExists(id: string): boolean {
  *   zcode-provider.ts:543-565 的 pendingRetryPrompt 重投模式），指数退避 1s/2s/4s，最多 MAX_RETRIES 次。
  */
 const MAX_RETRIES = Number(process.env.CTI_CLAUDE_MAX_RETRIES ?? 3);
-const STALL_MS = Number(process.env.CTI_CLAUDE_STALL_MS ?? 300_000); // 5min 零事件 → 判定卡死（已开吐字的长任务）
+const STALL_MS = Number(process.env.CTI_CLAUDE_STALL_MS ?? 1_200_000); // 20min 零事件 → 判定卡死（与 dsh T-0016 同口径：长工具调用中间本就全静默）
 // 票 claude-1（2026-09-20 老大令"根治 claude"）：首包阈值与进程丢失识别。
 // 原设计无论有没有开始吐字一律死等 300s，且重试只重投 prompt 不重建进程 ⇒
 // 引擎子进程静默退出后，用户要等 15 分钟才看到"网关约 300s 无响应"（还是口甩锅文案）。
 const STALL_FIRST_MS = Number(process.env.CTI_CLAUDE_STALL_FIRST_MS ?? 60_000); // 60s 连首包都没有 → 疑进程不在
+// [2026-09-29] /compact 等斜杠命令轮：CLI 压缩大会话期间不吐正文事件（只发桥不透传的 status 心跳），
+// 实测 75 万 token 会话压缩要 135s+ —— 60s 首包阈值必杀。命令轮放宽到 10min（可调）。
+const SLASH_FIRST_MS = Number(process.env.CTI_CLAUDE_SLASH_FIRST_MS ?? 600_000);
 const PROCESS_LOST_RE = /引擎进程已退出|引擎本轮无响应|Claude 进程已释放/;
 /** 瞬态、可重试的错误特征（出现在 error 事件 message 里：gateway/SDK 原始细节） */
 const RETRYABLE_RE = /502|503|504|429|backend request failed|ECONNRESET|ETIMEDOUT|timed out|socket hang up|network error|gateway|rate.?limit/i;
@@ -207,6 +217,20 @@ export class ClaudeProvider implements RuntimeProvider {
   /** 桥接内置工具（Phase 1）：工具依赖 + 进程内工具 server。attachBridgeTools 接线，ensureProcess 注入 */
   private toolDeps: BridgeToolDeps = {};
   private sdkMcp: ClaudeBuiltinServer | null = null;
+
+  // ── 自动压缩状态（2026-09-30；任务单 2 起判定/落盘在公共模块 AutoCompact）──
+  /** 三层判定 + compact-state-claude.json 读写，日志路由回本家 rtLog 保 [claude] 前缀 */
+  private readonly autoc = new AutoCompact({ log: (m) => rtLog(`[claude] ${m}`) });
+  /** 桥自办自动压缩轮的播报标签：pump 收到 compact_boundary 时用它标来源——CLI 对桥发起的
+   *  /compact 也报 trigger=manual，来源必须桥自己标（任务单 09-30）。轮末清空。 */
+  private pendingAutoCompactLabel: string | null = null;
+
+  /** claude 窗口取值链（单家版原样保留）：CLAUDE_CODE_MAX_CONTEXT_TOKENS 优先，阈值随窗口 env 缩放 */
+  private contextWindowTokens(): number {
+    return Number(process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS)
+      || Number(process.env.CTI_BOT_CLAUDE_CONTEXT_WINDOW)
+      || 200_000;
+  }
 
   constructor() {
     this.cliPath = process.env.CTI_CLAUDE_CLI_PATH
@@ -395,6 +419,25 @@ export class ClaudeProvider implements RuntimeProvider {
               else if (b.type === 'thinking' && b.thinking) sink.emit({ type: 'thinking', text: b.thinking });
               else if (b.type === 'tool_use') sink.emit({ type: 'tool', tool: b.name || 'tool', input: JSON.stringify(b.input ?? '').slice(0, 200), status: 'done' });
             }
+          } else if (msg.type === 'system' && (msg as { subtype?: string }).subtype === 'compact_boundary') {
+            // [2026-09-29] 压缩边界播报：/compact 或自动压缩成功时 SDK 发 compact_boundary
+            // （sdk.d.ts L3729，compact_metadata.trigger='manual'|'auto' + pre/post_tokens）。
+            // 此前 pump 不认识这条消息 ⇒ 就算压缩真发生了桥也一声不吭，老大无从验证。
+            const meta = (msg as { compact_metadata?: { trigger?: string; pre_tokens?: number; post_tokens?: number } }).compact_metadata ?? {};
+            const sink = this.activeSink();
+            if (sink) this.autoc.markCompacted(sink.chatId); // [2026-09-30] 计数重置唯一入口：手动/自动都靠这条 boundary（防抖时刻在模块内记）
+            if (sink) {
+              const pre = typeof meta.pre_tokens === 'number' ? Math.round(meta.pre_tokens) : null;
+              const post = typeof meta.post_tokens === 'number' ? Math.round(meta.post_tokens) : null;
+              const nums = pre != null && post != null ? `（${pre.toLocaleString()} → ${post.toLocaleString()} tokens）`
+                : pre != null ? `（压缩前 ${pre.toLocaleString()} tokens）` : '';
+              // [2026-09-30] 来源标注：桥自办的自动压缩用自带标签（CLI 对桥发起的 /compact 也报
+              // trigger=manual，来源必须桥自己标——任务单 09-30）；用户手敲的 /compact 按 CLI 报「手动」。
+              const autoLabel = this.pendingAutoCompactLabel;
+              const src = autoLabel ? `自动·${autoLabel}` : (meta.trigger === 'auto' ? '自动' : '手动');
+              sink.emit({ type: 'text', text: `\n✅ 上下文已压缩（${src}）${nums}\n` });
+              rtLog(`[claude] compact_boundary src=${src} trigger=${meta.trigger ?? '?'} pre=${meta.pre_tokens ?? '?'} post=${meta.post_tokens ?? '?'}`);
+            }
           } else if (msg.type === 'result') {
             const r = msg as {
               is_error?: boolean;
@@ -498,6 +541,11 @@ export class ClaudeProvider implements RuntimeProvider {
 
   async resetSession(_key?: string): Promise<void> {
     clearSavedSessionId();
+    // [2026-09-30 自动压缩] /new 归零：claude 的 CLI 上下文是全 bot 共享的常驻进程，
+    // /new 释放进程 = 上下文清零 ⇒ 所有会话的压缩计数一并归零（不归零会拿空上下文去压，
+    // CLI 回 "Not enough messages to compact." 纯浪费一轮）。
+    this.autoc.clear();
+    rtLog('[claude] resetSession: 压缩计数已全部归零（/new）');
     rtLog('[claude] resetSession: 清除持久化会话（/new）');
     // 2026-08-29 修复：/new 必须真正重置，不能是 no-op。
     // 对齐老项目 inbound-handler.ts:362-375 的 resetProviderCache 语义 —— 老项目是 kill 底层
@@ -543,6 +591,45 @@ export class ClaudeProvider implements RuntimeProvider {
     rtLog('[claude] dispose');
   }
 
+  // ── 自动压缩：桥自办压缩轮（三层判定与状态落盘在公共模块 AutoCompact）──
+
+  /**
+   * 桥自办的一轮自动压缩：以本会话身份发裸 /compact（8 字符直进 CLI，不拼人设/历史——
+   * 拼前缀会退化成普通聊天，09-29 实测；斜杠分支的 SLASH_FIRST_MS=600s 看门狗覆盖大会话
+   * 2 分钟+ 的压缩期，75 万 token 实测 135s）。须在外层轮 yield done 之前跑完，播报才进得了
+   * 本轮卡片；期间新消息照常在引擎队列排队（现有队列已覆盖）。
+   * 本轮正文已产出，压缩失败不连坐：降级为文本警告，计数不动（兜底层下轮还会再试）。
+   */
+  private async *runAutoCompact(
+    params: StreamChatParams,
+    trig: { kind: 'usage' | 'prevention'; label: string; detail: string },
+  ): AsyncGenerator<StreamEvent> {
+    this.pendingAutoCompactLabel = trig.label;
+    rtLog(`[claude] 自动压缩触发[${trig.kind}] ${trig.detail} → 发起裸 /compact session=${params.sessionKey.slice(0, 8)}`);
+    try {
+      yield { type: 'text', text: `\n🧹 上下文自动压缩启动（${trig.label}）——大会话约需 1~2 分钟，期间卡片静止属正常…\n` };
+      for await (const ev of this.streamChat({
+        text: '/compact',
+        sessionKey: params.sessionKey,
+        workdir: params.workdir,
+        systemPrompt: '',
+        history: [],
+        freshSession: false,
+      })) {
+        if (ev.type === 'error') {
+          rtLog(`[claude] 自动压缩轮失败（计数保留，下轮再试）: ${ev.message.slice(0, 200)}`);
+          yield { type: 'text', text: `\n⚠️ 自动压缩未完成：${ev.message.slice(0, 160)}——下轮对话结束后会自动再试。\n` };
+        } else if (ev.type === 'done') {
+          continue; // 内层轮的 done 不外透：外层马上自己发 done
+        } else {
+          yield ev; // boundary 播报（pump 已按来源标注）/usage/正文直通
+        }
+      }
+    } finally {
+      this.pendingAutoCompactLabel = null;
+    }
+  }
+
   async *streamChat(params: StreamChatParams): AsyncGenerator<StreamEvent> {
     await Promise.resolve();
     try { this.ensureProcess(params.workdir); } catch (e) {
@@ -553,11 +640,18 @@ export class ClaudeProvider implements RuntimeProvider {
     // 新建会话时注入历史上下文（含 /compact 产出的摘要）。
     // 对齐老项目 compact.ts applyCompactResult：摘要作为会话开头内容进入，后续模型自然携带。
     // 2026-08-29 修复：此前 session.context 从未被消费，/compact 压缩完就丢，命令还谎称会带上。
-    const historyText = params.freshSession && params.history && params.history.length > 0
+    // [2026-09-29] 斜杠命令（/compact 等）必须【裸文本】进 CLI 才会触发 CLI 原生斜杠命令派发：
+    // SDK 只对 leading-slash 消息做 dispatch（sdk.d.ts "slash-command dispatch"，client_composed 才跳过）。
+    // 此前每轮把人设拼在正文前面 ⇒ CLI 收到「<人设>\n\n/compact」不派发 ⇒ 模型当普通文本"回答"
+    // （09-29 实测：/compact 三连发全变成聊天回复，还调了 skill_read，压缩零发生）。
+    // 命令轮不拼人设、不拼 history —— 人设早已活在会话上下文里，压缩必须归引擎（老大令 09-19）。
+    const rawText = (params.text ?? '').trim();
+    const isSlashCommand = rawText.startsWith('/');
+    const historyText = !isSlashCommand && params.freshSession && params.history && params.history.length > 0
       ? params.history.map((m) => `[${m.role === 'user' ? '用户' : '助手'}]\n${m.content}`).join('\n\n')
       : '';
     const body = historyText ? `${historyText}\n\n---\n\n${params.text}` : params.text;
-    const fullPrompt = params.systemPrompt ? `${params.systemPrompt}\n\n${body}` : body;
+    const fullPrompt = isSlashCommand ? rawText : (params.systemPrompt ? `${params.systemPrompt}\n\n${body}` : body);
     const q = this.q!, queue = this.queue!;
     if (!q || !queue) { yield { type: 'error', message: 'Claude 进程未就绪' }; yield { type: 'done' }; return; }
 
@@ -575,7 +669,7 @@ export class ClaudeProvider implements RuntimeProvider {
       let gotEvent = false; // 本轮是否收到过任何引擎事件（用于区分"首包就没来"与"吐到一半断了"）
       // 票 claude-1：首包阈值单独设（默认 60s）。原先无论有没有开始吐字都死等 STALL_MS=300s
       // ⇒ 引擎进程已死时用户要干等 5 分钟才见到一个字，三次重试 = 15 分钟。
-      const stallLimit = () => (gotEvent ? STALL_MS : STALL_FIRST_MS);
+      const stallLimit = () => (gotEvent ? STALL_MS : (isSlashCommand ? SLASH_FIRST_MS : STALL_FIRST_MS));
       const stallTimer = setInterval(() => {
         if (Date.now() - lastEventAt >= stallLimit()) {
           stalled = true;
@@ -601,12 +695,21 @@ export class ClaudeProvider implements RuntimeProvider {
       liveQueue.push({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: fullPrompt }] }, parent_tool_use_id: null, shouldQuery: true });
 
       let doneErr: string | null = null;
+      let turnUsage: UsageInfo | null = null; // 本轮 result 真实用量（兜底层判据）
       try {
         for await (const ev of out) {
           if (ev.type === 'text' || ev.type === 'thinking' || ev.type === 'tool' || ev.type === 'usage') {
+            if (ev.type === 'usage') turnUsage = ev.usage;
             yield ev; // 正文/思考/工具/用量：透传给引擎，不中断
           } else if (ev.type === 'done') {
             clearInterval(stallTimer);
+            // [2026-09-30 自动压缩] 三层触发判定只在【一轮正常对话完全结束】后做（流式轮中绝不插手）。
+            // 触发 = 桥以本会话身份再发一轮裸 /compact（在 yield done 之前跑完，播报进本轮卡片；
+            // 期间新消息照常在引擎队列排队）。斜杠轮跳过——手动 /compact 的计数重置靠 boundary 事件。
+            if (!isSlashCommand && params.sessionKey) {
+              const trig = this.autoc.decision(params.sessionKey, turnUsage, { windowTokens: this.contextWindowTokens() });
+              if (trig) yield* this.runAutoCompact(params, trig);
+            }
             yield { type: 'done' };
             return; // 正常收尾
           } else if (ev.type === 'error') {
