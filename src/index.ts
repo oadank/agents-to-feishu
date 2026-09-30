@@ -526,34 +526,46 @@ let wsLastIncomingAt = Date.now();
 
 let myBotOpenId: string | null = null;
 let myBotOpenIdPromise: Promise<string | null> | null = null;
-/** 本 bot 的 open_id（群聊 @ 过滤用），启动后获取一次 */
+let myBotOpenIdNextRetryAt = 0;
+/** 本 bot 的 open_id（群聊 @ 过滤用），启动后获取一次。
+ *  [T-0031 批三] 只有【拿到非空 id】才长期缓存；拿 token 失败/无 open_id 等【非抛错】的空结果
+ *  过去会把 myBotOpenIdPromise 永久停在 resolved(null) 上（`if (promise) return promise` 短路），
+ *  此后 @ 过滤永远降级为不过滤直到重启——正是注释承诺要治、却只在 throw 分支治了一半的洞。
+ *  现在空结果一律撤销缓存 + 60s 冷却（防每条群消息打飞书 token 端点），过点自动重试。 */
 function getMyBotOpenId(): Promise<string | null> {
+  if (myBotOpenId) return Promise.resolve(myBotOpenId);
   if (myBotOpenIdPromise) return myBotOpenIdPromise;
+  if (Date.now() < myBotOpenIdNextRetryAt) return Promise.resolve(null);
   myBotOpenIdPromise = (async () => {
+    const giveUp = (why: string): null => {
+      myBotOpenIdPromise = null;
+      myBotOpenIdNextRetryAt = Date.now() + 60_000;
+      console.log(`[agents-to-feishu] 本 bot open_id 未取到（${why}），@ 过滤暂降级为不过滤，60s 后重试`);
+      return null;
+    };
     try {
       const st = readStore();
       const a = st.agents.find((x) => x.id === (process.env.CTI_BOT || ''));
-      if (!a?.appId || !a?.appSecret) return null;
+      if (!a?.appId || !a?.appSecret) return giveUp('缺 appId/appSecret');
       const r = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ app_id: a.appId, app_secret: a.appSecret }),
       });
       const j = (await r.json()) as { tenant_access_token?: string };
-      if (!j.tenant_access_token) return null;
+      if (!j.tenant_access_token) return giveUp('无 tenant_access_token');
       const r2 = await fetch('https://open.feishu.cn/open-apis/bot/v3/info', {
         headers: { Authorization: `Bearer ${j.tenant_access_token}` },
         signal: AbortSignal.timeout(10_000),
       });
       const j2 = (await r2.json()) as { bot?: { open_id?: string } };
       myBotOpenId = j2?.bot?.open_id ?? null;
-      console.log(`[agents-to-feishu] 本 bot open_id=${myBotOpenId ? myBotOpenId.slice(0, 12) : '(未取到)'}（群聊@过滤用）`);
+      if (!myBotOpenId) return giveUp('bot info 无 open_id');
+      console.log(`[agents-to-feishu] 本 bot open_id=${myBotOpenId.slice(0, 12)}（群聊@过滤用）`);
       return myBotOpenId;
     } catch (e) {
       // P1 修复：失败不缓存 promise，下条群消息自动重试（否则直到重启都不过滤）
-      myBotOpenIdPromise = null;
-      console.log(`[agents-to-feishu] 本 bot open_id 获取失败（@ 过滤降级为不过滤，下条消息重试）: ${(e as Error).message}`);
-      return null;
+      return giveUp((e as Error).message);
     }
   })();
   return myBotOpenIdPromise;
@@ -592,6 +604,10 @@ async function handleIncoming(
   // 09-30 起命令消息（/new 等）也不再豁免：台账带"失败撤销"，首轮真抛异常时下一次重投仍能补做，
   // 所以不会吞命令；而继续豁免的代价实测过——/new 被重推两遍 = 连着清两次记忆。
   const isCommand = text.trim().startsWith('/') && !engine.isOptimizeTrigger(text) && !engine.isDeCommand(text) && !engine.isCompactCommand(text);
+  // [T-0031 批三] 命令分发/优化判断一律用【图片合并前】的原始文本：发图后补一句 /new 时，
+  // 下面 757 会把"[用户发来一张图片…]\n"拼到 text 前面，handleCommand 取 split(/\s+/)[0]
+  // 会把图片提示语当命令名 → "未知命令"（isCommand 此刻还是按原文算的 true，前后打架）。
+  const textForCommand = text;
   if (fullId) {
     const verdict = beginId(fullId);
     if (verdict !== 'new') {
@@ -799,13 +815,13 @@ async function handleIncoming(
   // 🔴 不许把它塞进 isCommand 链：为了让它参与去重（SDK 会把同一条消息重复投递，见 L473），
   // isCommand 已刻意排除 /de；若仍按老写法在 isCommand 分支里判 /de，就永远不会命中，
   // 结果是把 "/de …" 当普通消息喂给对面 AI —— 2026-09-25 我自己引入的回归，日志实证过。
-  if (engine.isDeCommand(text)) {
+  if (engine.isDeCommand(textForCommand)) {
     console.log(`[agents-to-feishu] 执行 /de chat=${chatId.slice(0, 20)} mid=${fullId.slice(0, 24)}`);
     await engine.runDeCommand(chatId);
     return;
   }
-  if (isCommand && !engine.isOptimizeTrigger(text)) {
-    await handleCommand(text, chatId, engine, sessions);
+  if (isCommand && !engine.isOptimizeTrigger(textForCommand)) {
+    await handleCommand(textForCommand, chatId, engine, sessions);
     return;
   }
 
