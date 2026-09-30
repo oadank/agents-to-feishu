@@ -22,7 +22,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export interface CompactState { lastCompactAt: number; turnsSinceCompact: number; updatedAt: number }
+export interface CompactState {
+  lastCompactAt: number;
+  turnsSinceCompact: number;
+  updatedAt: number;
+  /** C 类（无压缩能力引擎）兜底告警防刷屏：已播过的 10% 用量段号（70%→7，80%→8…） */
+  lastWarnedBand?: number;
+}
 
 /** 三层判定结论：label 进播报（自动·<label>），detail 进日志 */
 export interface AutoCompactTrigger { kind: 'usage' | 'prevention'; label: string; detail: string }
@@ -110,6 +116,42 @@ export class AutoCompact {
     st.updatedAt = Date.now();
     this.lastBoundaryAt = Date.now();
     this.save();
+  }
+
+  /**
+   * C 类（无压缩通道、CLI 也不自带的引擎）兜底告警判定：used ≥ RATIO×窗口 → 播一次。
+   * 防刷屏：同会话每跨一个 10% 用量段只发一次（70% 段一次、80% 段再一次…），
+   * 段号落盘（lastWarnedBand），/new 清账后重新起算。返回 null=本轮不播。
+   * @param used 真实用量（各家 provider 把自家字段映射后的 hit+input 或 usage_update.used）
+   * @param windowTokens 窗口：优先传 usage_update.size（各家白送），缺省回 env
+   */
+  floorWarning(sessionKey: string, used: number, windowTokens?: number): { pct: number; band: number; hoursDesc: string } | null {
+    if (!sessionKey || used <= 0) return null;
+    const win = windowTokens && windowTokens > 0
+      ? windowTokens
+      : (Number(process.env[`CTI_BOT_${this.bot.toUpperCase()}_CONTEXT_WINDOW`]) || 200_000);
+    const ratioRaw = Number(process.env[`CTI_${this.bot.toUpperCase()}_AUTOCOMPACT_RATIO`]);
+    const ratio = ratioRaw > 0 ? ratioRaw : 0.70;
+    const pct = Math.min(100, Math.round((used / win) * 100));
+    const floorPct = Math.round(ratio * 100);
+    if (pct < floorPct) return null;
+    const band = Math.floor(pct / 10);
+    const st = this.stateFor(sessionKey);
+    // 注意 ?? -1：段号从 0 起（ratio 调得很小时 pct 可能落 0 段），默认 0 会把首条告警吞掉
+    if ((st.lastWarnedBand ?? -1) >= band) return null;
+    st.lastWarnedBand = band;
+    st.updatedAt = Date.now();
+    this.save();
+    const hours = (Date.now() - st.lastCompactAt) / 3_600_000;
+    const hoursDesc = hours >= 1 ? `已 ${Math.round(hours)} 小时` : '从未';
+    this.log(`兜底告警[${sessionKey.slice(0, 8)}] used=${used}/${win}=${pct}% ≥ 阈值 ${floorPct}%，播第 ${band} 段（防刷屏）`);
+    return { pct, band, hoursDesc };
+  }
+
+  /** C 类告警文案统一收口（mimo/openclaw/opencode/deeptutor 共用，别各写各的） */
+  static floorWarningText(pct: number, hoursDesc: string, engineLabel: string): string {
+    const paren = hoursDesc === '从未' ? '本会话从未压缩' : `${hoursDesc}未压缩`;
+    return `\n⚠️ 上下文已达 ${pct}%（${paren}），${engineLabel}无自动压缩能力——建议发 /new 释放上下文，否则长对话质量会逐渐劣化。\n`;
   }
 
   /** /new 归零：传 sessionKey 只清该会话；不传清全部（claude 的 CLI 上下文是全 bot 共享的常驻进程） */
