@@ -35,6 +35,8 @@ import { fileURLToPath } from 'node:url';
 import { sendAsUserToBot } from './tools/lark-tools.js';
 import { registerPending, consumePending, manualReceiptRecent, peekPending } from './bridge/auto-receipt.js';
 import { assertWindows, windows, type Windows } from './bridge/windows.js';
+// 🔴 09-30 消息号幂等台账（落盘）：配合"先回执后干活"根治飞书重推，详见该文件头注释的三段证据链
+import { beginId, finishId, failId } from './bridge/msg-dedup.js';
 import { classifyEcho, newEchoLedger, prune as pruneEchoLedger, echoStats, markWake, isAckOnly, normalizeBody } from './bridge/echo-guard.js';
 import { markTurn, clearTurn, readTurnFile, turnLogFile, resolveOwnRtLog } from './bridge/turn-ledger.js';
 
@@ -338,6 +340,19 @@ async function main(): Promise<void> {
       const fromBot = consumePending(chatId);
       if (!fromBot) return;
       const me = process.env.CTI_BOT || 'unknown';
+      // 🔴 T-0017 乙（2026-09-30 老大令「甲+乙」）：**空回复绝不转发**。引擎侧现在失败轮会补一句
+      // 如实的话（engine.ts 同一票），正常不会再空；这条是第二道闸 —— 真空了不发一条
+      // 「(自动回执)」后面啥都没有的假回执（派活方会以为"它在干"，其实早收场了），
+      // 而是明确通报"这轮没产出、任务没结果"，这才叫有着落。
+      if (!replyText.trim()) {
+        rtLog(`[auto-receipt] 本轮 ${me} 正文为空 → 不发空回执，改发失败通报给 ${fromBot}`);
+        try {
+          await sendAsUserToBot(fromBot, `[${me}]（本轮未产出·非结果）\n我这轮没有生成有效回复（引擎拒答或被中断），你派的事**没有结果**，请重发或改派。`);
+        } catch (e) {
+          rtLog(`[auto-receipt] 失败通报也没送出: ${(e as Error).message}`);
+        }
+        return;
+      }
       // 🔴 票 T-0019① 自环闸·第一刀：待回执对象是自己（模型 to=自己 / 回执原路弹回）→ 绝不转发。
       if (fromBot === me) {
         rtLog(`[echo] skip 自环转发：本 bot(${me}) 的回复对象登记成了自己（chat=${chatId.slice(0, 12)}）`);
@@ -370,11 +385,25 @@ ${trimmed}`);
   // WebSocket 长连接（事件订阅）
   const dispatcher = new lark.EventDispatcher({}).register({
     'im.message.receive_v1': async (data: unknown) => {
-      try {
-        await handleIncoming(data as FeishuMessageEventData, engine, sessions, bot.allowedUsers);
-      } catch (e) {
-        console.error(`[agents-to-feishu] handleIncoming error:`, e);
-      }
+      // 🔴 09-30 根治"同一条消息被推两遍"（老大定性：这是最大的 bug）。
+      // 病灶：官方 SDK 的 handleEventData 是「`yield eventDispatcher.invoke(...)` 返回后，才把
+      // code:200 的回执帧 sendMessage 回平台」；而我们过去在这里 `await` 整轮对话（几十秒~900s），
+      // 平台等不到回执就按重推机制在 ~20s 再推同一条（09-29 四家 43 对实测：第二遍全落在
+      // 18.5~20.3 秒；对照组——毫秒级返回的 /help 零重推 ⇒ 因果坐实）。
+      // 修法：**回调立刻返回**（SDK 当场给平台回执），整轮活丢后台跑；异常在后台自己兜住，
+      // 并撤销该消息号的幂等标记，让下一次重投/人工重发仍能补做（绝不吞消息）。
+      // 注意 card.action.trigger 不这么改：它必须把处理结果当响应 return 回去（飞书靠这个原子换卡片），
+      // 且它本来就毫秒级返回，不会触发重推。
+      const midForAck = (data as { message?: { message_id?: string } })?.message?.message_id ?? '';
+      void (async () => {
+        try {
+          await handleIncoming(data as FeishuMessageEventData, engine, sessions, bot.allowedUsers);
+          finishId(midForAck);
+        } catch (e) {
+          console.error(`[agents-to-feishu] handleIncoming error（后台轮，已回执，标记撤销后重投可补做）:`, e);
+          failId(midForAck);
+        }
+      })();
     },
     // 卡片按钮回调（插队卡：interrupt:yes/no/cancel:chatId:messageId）
     // ⚠️ 必须 return 处理结果（含 card:{type:'raw',data:新卡}）：SDK 会把它作为回调响应发回飞书，
@@ -487,8 +516,10 @@ ${trimmed}`);
 }
 
 /** 统一入口：解析事件 → 鉴权 → 命令 / 消息 */
-const processedMessageIds = new Set<string>();  // 去重：飞书 SDK 偶发对同一条消息 dispatch 多次
-const MAX_PROCESSED_IDS = 500;
+// 去重不再用内存 Set（09-30 根治）：旧实现 `new Set` + 按条数 LRU，进程一重启就清空，
+// 正卡在重启窗口的重投会被当成新消息再跑一遍（09-29「/compact 连跑两轮」即此）。
+// 现在用落盘台账（in-flight / done / 失败撤销），并把命令消息也纳入判重。
+// 因果链与实测数据写在 src/bridge/msg-dedup.ts 头注释里（飞书重推机制 + SDK 回调返回后才发 ack）。
 
 // ws-watch 基准：最后一条收到的事件时间（含 message_read 等非消息事件回调外的所有 handleIncoming）
 let wsLastIncomingAt = Date.now();
@@ -550,39 +581,40 @@ async function handleIncoming(
   rtLog(`[handleIncoming] chat=${chatId} mid=${fullId.slice(0, 24)} text=${text.slice(0, 100)}`);
   wsLastIncomingAt = Date.now();
 
-  // 命令消息豁免去重：命令幂等（重复执行无害），必须保证不被 SDK 重复 dispatch 在首次执行前判重跳过
-  // （否则 /new 等边命令可能"被吞"）。普通消息仍正常去重。先 trim 防前导空格/不可见字符。
-  // [2026-09-21] ⚡ 优化触发（/p 等）虽以 / 开头但不是命令、不幂等（重复=双份优化+双份喂稿+
-  // 插队卡幽灵），不得豁免去重——老大实测"优化后弹插队卡"即 SDK 重复投递的第二份绕过判重所致。
-  // [2026-09-25 老大实测「触发 2 次」] /de 同样不幂等（重复=多张卡+多份 token），不得豁免去重。
-  const isCommand = text.trim().startsWith('/') && !engine.isOptimizeTrigger(text) && !engine.isDeCommand(text);
-  if (fullId && processedMessageIds.has(fullId) && !isCommand) {
-    rtLog(`[handleIncoming] SKIP duplicate mid=${fullId.slice(0, 24)}`);
-    return;
-  }
+  // ── 去重（消息号幂等，落盘台账 src/bridge/msg-dedup.ts）──────────────────────
+  // 为什么会有第二遍（09-30 根治，三段证据）：① 飞书对事件有**重推机制**——没及时拿到"已收到"
+  // 回执就再推一遍，官方要求消费方按事件唯一号自行幂等；② 官方 SDK 是**等我们的回调返回**才发
+  // ack 帧；③ 我们过去把整轮对话 `await` 在回调里 ⇒ 一轮超过 ~20s 就**必然**被重推。
+  // 实测：09-29 四家 43 对重复，第二遍间隔全在 18.5~20.3 秒；毫秒级返回的 /help 零重推。
+  // 主修在上面的 im.message.receive_v1：**先回执、活丢后台**；这里退居兜底。
+  // 历史判据（仍然有效）：/p、/de、/compact 虽然以 / 开头但不是命令、**不幂等**（重复=双份优化
+  // +双份喂稿+插队卡幽灵 / 多张卡多份 token / 整轮压缩跑两遍），09-21、09-25、09-29 老大三次实测踩过。
+  // 09-30 起命令消息（/new 等）也不再豁免：台账带"失败撤销"，首轮真抛异常时下一次重投仍能补做，
+  // 所以不会吞命令；而继续豁免的代价实测过——/new 被重推两遍 = 连着清两次记忆。
+  const isCommand = text.trim().startsWith('/') && !engine.isOptimizeTrigger(text) && !engine.isDeCommand(text) && !engine.isCompactCommand(text);
   if (fullId) {
-    processedMessageIds.add(fullId);
-    // LRU 简单清理
-    if (processedMessageIds.size > MAX_PROCESSED_IDS) {
-      const first = processedMessageIds.values().next().value;
-      if (first) processedMessageIds.delete(first);
+    const verdict = beginId(fullId);
+    if (verdict !== 'new') {
+      rtLog(`[handleIncoming] SKIP duplicate mid=${fullId.slice(0, 24)}（${verdict === 'done' ? '已处理完' : '正在处理中'}；命令同样拦）`);
+      return;
     }
-    // 群聊仅@回复（2026-08-31）：群消息必须 @ 本 bot 才处理（对人类和 bot 一致，天然防循环）
-    if (msg.chat_type === 'group' && (readStore().settings?.groupMentionOnly ?? true) !== false) {
-      const myId = await getMyBotOpenId();
-      // @所有人：①mentions 里 id 为 "all"（飞书 UI 标准）②部分客户端/lark-cli 发的 @所有人
-      // mentions 为空但原始 content 里有 <at user_id="all">——两条路都要认，否则全员漏收
-      const rawAtAll = text.includes('@_all'); // lark-cli 文本方式 @所有人 的占位符（无真 mention）
-      const mentioned = myId ? (msg.mentions ?? []).some((mn) => {
-        const oid = mn.id?.open_id || '';
-        const uid = mn.id?.user_id || '';
-        const name = mn.name || '';
-        return oid === myId || oid === 'all' || uid === 'all' || /所有人|everyone/i.test(name);
-      }) || rawAtAll : true;
-      if (!mentioned) {
-        rtLog(`[handleIncoming] SKIP 群消息未@本bot mid=${fullId.slice(0, 24)}`);
-        return;
-      }
+  }
+
+  // 群聊仅@回复（2026-08-31）：群消息必须 @ 本 bot 才处理（对人类和 bot 一致，天然防循环）
+  if (msg.chat_type === 'group' && (readStore().settings?.groupMentionOnly ?? true) !== false) {
+    const myId = await getMyBotOpenId();
+    // @所有人：①mentions 里 id 为 "all"（飞书 UI 标准）②部分客户端/lark-cli 发的 @所有人
+    // mentions 为空但原始 content 里有 <at user_id="all">——两条路都要认，否则全员漏收
+    const rawAtAll = text.includes('@_all'); // lark-cli 文本方式 @所有人 的占位符（无真 mention）
+    const mentioned = myId ? (msg.mentions ?? []).some((mn) => {
+      const oid = mn.id?.open_id || '';
+      const uid = mn.id?.user_id || '';
+      const name = mn.name || '';
+      return oid === myId || oid === 'all' || uid === 'all' || /所有人|everyone/i.test(name);
+    }) || rawAtAll : true;
+    if (!mentioned) {
+      rtLog(`[handleIncoming] SKIP 群消息未@本bot mid=${fullId.slice(0, 24)}`);
+      return;
     }
   }
 
