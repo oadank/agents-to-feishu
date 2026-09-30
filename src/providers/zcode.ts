@@ -309,9 +309,17 @@ export class ZcodeProvider implements RuntimeProvider {
     catch (e) { console.warn('[zcode] prepare pre-spawn failed:', e); }
   }
 
-  async resetSession(sessionKey?: string): Promise<void> {
-    // /new：真重置——server 端 close 会话 + 丢弃映射，下一条消息必然全新会话
-    const keys = sessionKey ? [sessionKey] : [...this.sessions.keys()];
+  async resetSession(sessionKey?: string, oldSessionKey?: string): Promise<void> {
+    // [T-0031 批三] 两把尺子对齐 dsh：桥把 resetSession(chatId, 旧sessionKey) 的第一参传的是
+    // chatId，而本 provider 的 sessions/落盘账本全按 streamChat 用的 session.id 为键
+    // （engine.ts:962 sessionKey=session.id，/new 时已被换成新 uuid、旧值只在第二参）。
+    // 旧实现只用第一参 → this.sessions.get(chatId) 恒 miss ⇒ 引擎侧 session/close 从不发、
+    // 落盘账本删空（app-server 侧会话永久泄漏）。存档那把尺子（oldSessionKey）优先。
+    if (!sessionKey && !oldSessionKey) {
+      // 全清（极少）：保留旧语义，清所有
+    }
+    const canon = oldSessionKey || sessionKey;
+    const keys = canon ? [canon, ...(sessionKey && sessionKey !== canon ? [sessionKey] : [])] : [...this.sessions.keys()];
     for (const k of keys) {
       const s = this.sessions.get(k);
       if (s) {
@@ -321,7 +329,7 @@ export class ZcodeProvider implements RuntimeProvider {
       this.sessions.delete(k);
       deletePersistedSession(k);
     }
-    rtLog(`[zcode] resetSession: ${keys.length} 个会话已清`);
+    rtLog(`[zcode] resetSession: ${keys.length} 个会话已清（canon=${(canon || '(全清)').slice(0, 8)}）`);
   }
 
   async interrupt(): Promise<void> {
