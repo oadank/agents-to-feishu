@@ -423,7 +423,8 @@ export class HermesProvider implements RuntimeProvider {
   })();
 
     // 消费队列（流式）——与 prompt 后台任务并发，事件到达即吐（卡片实时更新）
-    void promptTask;
+    // [T-0031 批四] 同 gemini：promptTask 万一 finally/兜底抛，裸 void=unhandledRejection，显式兜住。
+    promptTask.catch((e) => console.warn('[hermes] promptTask 未捕获异常（兜底，不杀进程）:', e));
     try {
       while (true) {
         if (queue.length > 0) { yield queue.shift()!; continue; }

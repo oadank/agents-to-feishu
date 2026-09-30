@@ -269,6 +269,15 @@ async function main(): Promise<void> {
     }
     process.env.CTI_RT_LOG = plan.file;
   }
+  // [T-0031 批四] 进程级最后防线：任何漏网的 unhandledRejection 记全栈进 rt.log + console，但【不杀进程】。
+  // Node ≥15 默认把未处理的 promise 拒绝直接 exit —— 一个没人接的后台 promise 就能把 bot 打崩。批一
+  // 只堵了 doFlush 那颗最大的雷，本条防的是"下一颗没看见的"。各 void 点应尽量自带局部 .catch，这里只兜底，
+  // 绝不改成 process.exit（服务在 nssm 下靠进程活着保 WS，杀一次断一次真实会话）。
+  process.on('unhandledRejection', (reason) => {
+    const m = reason instanceof Error ? `${reason.message}\n${reason.stack ?? '(无栈)'}` : String(reason);
+    console.error('[agents-to-feishu] ⚠️ 未处理 promise 拒绝（已兜住，进程继续存活）:', m);
+    try { rtLog(`[unhandledRejection] ${m.slice(0, 2000)}`); } catch { /* 日志写不进也不能再抛 */ }
+  });
   // 🔴 票 T-0019③（2026-09-29 dsh）：窗口启动闸门。位置有讲究——必须在 config.env 灌回 process.env
   // 之后（否则读不到配置中心下发的值）、RT_LOG 定位之后（否则报错进不了日志）。
   // 四条不变量任一条不合格就当场抛：nssm 下表现为「该 bot 起不来 + 日志点名是哪条、当前值多少」，

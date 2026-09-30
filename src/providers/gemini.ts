@@ -486,7 +486,9 @@ export class GeminiProvider implements RuntimeProvider {
     })();
 
     // 消费队列（流式）——与 prompt 后台任务并发，事件到达即吐（卡片实时更新）
-    void promptTask;
+    // [T-0031 批四] promptTask 是并发后台任务，正常靠内部 try/catch 收口；万一 finally/兜底抛，
+    // 裸 void = unhandledRejection。显式 .catch 记日志不杀（批一已点名此处为残余雷）。
+    promptTask.catch((e) => console.warn('[gemini] promptTask 未捕获异常（兜底，不杀进程）:', e));
     try {
       while (true) {
         if (queue.length > 0) { yield queue.shift()!; continue; }

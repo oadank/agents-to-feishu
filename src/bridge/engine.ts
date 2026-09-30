@@ -237,7 +237,7 @@ export class MessageEngine {
     // [2026-09-19 票1·断头轮补投递] 开机扫账：上一进程被杀/重启腰斩的轮次，图已捕获未投递的
     // 都留在台账里，这里延迟几秒（等飞书客户端就绪）补发。无陈账则静默。
     const bootDelay = parseInt(process.env.CTI_BOOT_RESCUE_DELAY_MS || '2500', 10);
-    setTimeout(() => { void this.rescuePendingDeliveriesOnBoot(); }, bootDelay);
+    setTimeout(() => { this.rescuePendingDeliveriesOnBoot().catch((e) => console.warn('[engine] rescuePendingDeliveriesOnBoot 异常（补投链某步抛错，不影响启动）:', e)); }, bootDelay);
   }
 
   // ── [2026-09-19 票1] 断头轮产物台账 ──
@@ -407,7 +407,7 @@ export class MessageEngine {
       const timer = setTimeout(() => {
         this.autoInterruptTimers.delete(chatId);
         console.log(`[engine] auto-interrupt fired chat=${chatId}`);
-        void this.doAutoInterrupt(chatId);
+        this.doAutoInterrupt(chatId).catch((e) => console.warn('[engine] doAutoInterrupt 异常:', e));
       }, this.autoInterruptMs());
       this.autoInterruptTimers.set(chatId, timer);
     } catch (e) {
@@ -671,7 +671,10 @@ export class MessageEngine {
       await this.opts.feishu.sendCardHttp(chatId, buildSimpleCard(text));
     } catch (e) {
       console.warn(`[engine] sendCommandCard failed, fallback text:`, e);
-      await this.opts.feishu.sendText(chatId, text);
+      // [T-0031 批四] 兜底降级本身再抛（sendText 也是飞书 HTTP）会让本方法 reject；两处调用点都是
+      // fire-and-forget（void this.sendCommandCard），reject = unhandledRejection。这里把降级也兜住，
+      // 保证"发命令卡片"绝不因网络抖动把桥搞崩——最坏就是这条系统提示没送达。
+      try { await this.opts.feishu.sendText(chatId, text); } catch (e2) { console.warn('[engine] sendCommandCard 降级纯文本也失败（放弃，不抛）:', e2); }
     }
   }
 
