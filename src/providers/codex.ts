@@ -6,6 +6,8 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { CodexAppServerClient, type CodexServerMessage } from './codex/codex-app-server-client.js';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
 
@@ -76,12 +78,39 @@ async function callOpenmemBypass(userText: string): Promise<string> {
   }
 }
 
+/**
+ * 🔴 2026-10-14 修 C 类（T-0023 勘察结论：codex 账本不落盘）：
+ * 会话线程映射此前纯内存（new Map），桥/app-server 进程一换代即丢 ⇒ 下一条消息走
+ * thread/start 新建对话 = 重启后失忆（症状被影子历史注入遮成\"看起来还记得\"）。
+ * 参照 workbuddy.ts 落盘法：sessionKey → threadId 持久化到 runtime/sessions-codex-acp.json，
+ * 进程重启后仍能 thread/resume 赎回真历史。路径惰性求值（模块加载早于 CTI_USER_HOME 注入）。
+ */
+const CODEX_MAP_FILE = (): string => path.join(
+  process.env.CTI_USER_HOME || os.homedir(), '.agents-to-feishu', 'runtime', 'sessions-codex-acp.json',
+);
+
 export class CodexProvider implements RuntimeProvider {
   readonly name = 'codex';
 
   private client: CodexAppServerClient | null = null;
-  /** [2026-09-02] 会话线程映射：sessionKey → codex threadId，实现跨消息真连续（thread/resume）。 */
+  /** [2026-09-02] 会话线程映射：sessionKey → codex threadId，实现跨消息真连续（thread/resume）。
+   *  [2026-10-14] 改为落盘持久化（构造时 load、每次 set/delete 时 save），修重启后失忆。 */
   private threadIds = new Map<string, string>();
+
+  constructor() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(CODEX_MAP_FILE(), 'utf8')) as Record<string, string>;
+      for (const [k, v] of Object.entries(raw)) if (typeof v === 'string' && v) this.threadIds.set(k, v);
+    } catch { /* 首跑无文件 */ }
+  }
+
+  /** 落盘（原子性靠 writeFileSync 覆盖；失败不拦主流程，最坏退化成旧的内存行为）。 */
+  private saveThreadIds(): void {
+    try {
+      fs.mkdirSync(path.dirname(CODEX_MAP_FILE()), { recursive: true });
+      fs.writeFileSync(CODEX_MAP_FILE(), JSON.stringify(Object.fromEntries(this.threadIds)), 'utf8');
+    } catch { /* 落盘失败不拦主流程 */ }
+  }
 
   private async ensureClient(): Promise<CodexAppServerClient> {
     if (!this.client) {
@@ -119,6 +148,7 @@ export class CodexProvider implements RuntimeProvider {
     // 下一条消息 thread/start 开全新对话。清空 key 对应映射即可，其他会话不受影响。
     if (sessionKey) this.threadIds.delete(sessionKey);
     else this.threadIds.clear();
+    this.saveThreadIds();
     rtLog(`[codex] resetSession: thread mapping cleared (key=${sessionKey ? 'yes' : 'all'})`);
   }
 
@@ -152,7 +182,7 @@ export class CodexProvider implements RuntimeProvider {
     // 原生全量上下文=真记忆）；/new（freshSession）丢弃旧线程开新对话；
     // resume 失败回退 thread/start + history 注入（保底，与 claude.ts 同款）。
     const sessionKey = params.sessionKey || '';
-    if (params.freshSession) this.threadIds.delete(sessionKey);
+    if (params.freshSession) { this.threadIds.delete(sessionKey); this.saveThreadIds(); }
     const prevThreadId = this.threadIds.get(sessionKey);
     let threadId = '';
     let resumed = false;
@@ -191,6 +221,7 @@ export class CodexProvider implements RuntimeProvider {
     // 简单防膨胀：映射超过 64 个会话时整体清空（丢失的只是续聊能力，可自愈重建）
     if (this.threadIds.size > 64) this.threadIds.clear();
     this.threadIds.set(sessionKey, threadId);
+    this.saveThreadIds();
     rtLog(`[codex] thread ${resumed ? 'resumed' : 'created'}: ${threadId.slice(0, 8)} (session=${sessionKey.slice(0, 12)})`);
 
     // 订阅 → push 事件
