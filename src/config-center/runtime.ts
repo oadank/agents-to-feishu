@@ -346,9 +346,14 @@ export async function readBalanceView(provider: ProviderDef | undefined): Promis
 // bot 经 LiteLLM(:4000) 中转时，状态条按"真实上游"分流读余额/配额：
 //   GwV4F → gateway.henry-gao.com → GW 余额；ArkV4F → volces → Ark 配额；其余上游无公开余额接口。
 // /model/info 用 master key（bot env 的 LITELLM_API_KEY/OPENAI_API_KEY 即是），结果缓存 5 分钟。
-let litellmModelMapCache: { map: Record<string, string>; at: number } | null = null;
+//
+// [2026-10-14 修 last-wins 缺陷] 旧实现 `map[model_name] = api_base` 一组多腿时**只留最后一条**
+// （JS 对象赋值后写覆盖先写）。实测 codex-model 曾有 4 条腿（glm→dsv4.1→DS官方→agnes），
+// 最终解析成 agnes ⇒ 状态栏余额恒判成 kind='none'，明明第 3 条腿是真 DS 官方也看不到钱。
+// 现改成同组所有腿都收下（去重保序），由 readLitellmUpstreamView 按优先级判类型。
+let litellmModelMapCache: { map: Record<string, string[]>; at: number } | null = null;
 
-export async function readLitellmModelMap(baseURL: string): Promise<Record<string, string>> {
+export async function readLitellmModelMap(baseURL: string): Promise<Record<string, string[]>> {
   const now = Date.now();
   if (litellmModelMapCache && now - litellmModelMapCache.at < 300_000) return litellmModelMapCache.map;
   const key = process.env.LITELLM_API_KEY || process.env.OPENAI_API_KEY || '';
@@ -360,24 +365,103 @@ export async function readLitellmModelMap(baseURL: string): Promise<Record<strin
     });
     if (!resp.ok) return litellmModelMapCache?.map ?? {};
     const data: any = await resp.json().catch(() => null);
-    const map: Record<string, string> = {};
+    const map: Record<string, string[]> = {};
     for (const m of (data?.data ?? []) as Array<Record<string, unknown>>) {
       const base = (m?.litellm_params as Record<string, unknown> | undefined)?.api_base;
-      if (m?.model_name && typeof base === 'string') map[String(m.model_name)] = base;
+      if (!m?.model_name || typeof base !== 'string' || !base) continue;
+      const name = String(m.model_name);
+      (map[name] ??= []);
+      if (!map[name].includes(base)) map[name].push(base);
     }
     litellmModelMapCache = { map, at: now };
     return map;
   } catch { return litellmModelMapCache?.map ?? {}; }
 }
 
-/** 解析 LiteLLM 模型组的上游用量视图：gw→GW 余额；ark→Ark 配额；其他上游无公开接口返回 null。 */
-export async function readLitellmUpstreamView(modelGroup: string, baseURL: string): Promise<{ balance: BalanceView | null; usage: ArkUsageView | null; kind: 'gw' | 'ark' | 'none' }> {
+/** 解析 LiteLLM 模型组的上游用量视图：gw→GW 余额；ark→Ark 配额；deepseek→官方余额；其他无公开接口。 */
+export async function readLitellmUpstreamView(modelGroup: string, baseURL: string): Promise<{ balance: BalanceView | null; usage: ArkUsageView | null; kind: 'gw' | 'ark' | 'deepseek' | 'none' }> {
   const map = await readLitellmModelMap(baseURL);
-  const base = (map[modelGroup] || '').toLowerCase();
-  if (base.includes('henry-gao')) return { balance: await readGwBalance(), usage: null, kind: 'gw' };
-  if (base.includes('volces') || base.includes('volcengine') || base.includes('ark.cn-beijing')) return { balance: null, usage: await readArkUsage(), kind: 'ark' };
+  const bases = (map[modelGroup] ?? []).map((b) => b.toLowerCase());
+  if (!bases.length) return { balance: null, usage: null, kind: 'none' };
+  // [T-0033 2026-10-03 老大选 A] DeepSeek 官方直连挂在 litellm 后面的情形。实测 litellm /model/info：
+  // DV4F → api_base=https://api.deepseek.com → openai/deepseek-flash。此前本函数没有 deepseek 档，
+  // engine 的 effKind 永远取不到 'deepseek' ⇒ 状态栏 Balance 段对 dsh 这类 litellm 路由的 bot 恒空。
+  // 判序说明：provider `deepseek-official` 自身 baseUrl 写的是 gateway.henry-gao.com，会先命中 gw 档，
+  // 本档只负责"走 litellm 但上游是真 DeepSeek 官方"这条路（余额读 api.deepseek.com/user/balance，实测 200）。
+  //
+  // [2026-10-14 多腿优先级] 一组多腿时**不能只看一条**：按"有余额/配额接口的上游"优先判定，
+  // 否则组里混一条无接口的腿（agnes/本地 shim）就会把整组的余额判成 none。
+  // 顺序 gw → ark → deepseek：与旧单腿判序一致，只是现在在多条腿间挑。
+  const any = (pred: (b: string) => boolean) => bases.some(pred);
+  if (any((b) => b.includes('henry-gao'))) return { balance: await readGwBalance(), usage: null, kind: 'gw' };
+  if (any((b) => b.includes('volces') || b.includes('volcengine') || b.includes('ark.cn-beijing')))
+    return { balance: null, usage: await readArkUsage(), kind: 'ark' };
+  if (any((b) => b.includes('api.deepseek.com') || b.includes('deepseek.com')))
+    return { balance: await readDeepSeekBalance(), usage: null, kind: 'deepseek' };
   return { balance: null, usage: null, kind: 'none' };
 }
+
+// ── wb-shim 模型消耗系数（2026-10-14 老大令：状态栏显示消耗系数）──
+// 链路：litellm /model/info（组名→上游模型名，已有 5min 缓存）+ wb-shim :18796 /v1/models
+// （模型→credits_rate 如 "x0.06 credits"）。两级缓存各 5 分钟，任一失败返回 null 不阻塞卡片。
+let wbCreditsRateCache: { map: Record<string, string>; at: number } | null = null;
+
+/** wb-shim /v1/models：模型名 → credits_rate 字符串（如 "x0.06 credits"）。 */
+export async function readWbCreditsRates(): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (wbCreditsRateCache && now - wbCreditsRateCache.at < 300_000) return wbCreditsRateCache.map;
+  // key 从 litellm wb-* 腿的 api_key 语义（bot env LITELLM_API_KEY 对 wb-shim 也是它认的 Bearer）
+  const key = process.env.LITELLM_API_KEY || process.env.OPENAI_API_KEY || '';
+  const map: Record<string, string> = {};
+  try {
+    const resp = await fetch('http://127.0.0.1:18796/v1/models', {
+      headers: { authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (resp.ok) {
+      const data: any = await resp.json().catch(() => null);
+      for (const m of (data?.data ?? []) as Array<Record<string, unknown>>) {
+        if (typeof m?.id === 'string' && typeof m?.credits_rate === 'string') map[m.id] = m.credits_rate;
+      }
+    }
+  } catch { /* 失败用旧缓存 */ }
+  if (Object.keys(map).length > 0) wbCreditsRateCache = { map, at: now };
+  return wbCreditsRateCache?.map ?? map;
+}
+
+/** 组名 → 消耗系数（如 "x0.06"）：litellm 组名解析成上游模型名后查 wb-shim 目录。
+ *  非 wb-* 组（不走 wb-shim）返回 null，状态栏不显示该段。 */
+export async function readModelCreditsRate(modelGroup: string, litellmBaseURL: string): Promise<string | null> {
+  const map = await readLitellmModelMap(litellmBaseURL); // 组名 → api_base 列表（判是否 wb-shim）
+  // readLitellmModelMap 只存 api_base；组名→模型名需要另拉一次 /model/info 的完整数据。
+  // 简化：wb-shim 腿的模型名与组名后缀一致率不高，直接解析真实模型名。
+  // [2026-10-14] map 值是数组（一组多腿）：任一条腿是 wb-shim(:18796) 就算这组走 shim。
+  const bases = (map[modelGroup] ?? []).map((b) => b.toLowerCase());
+  if (!bases.some((b) => b.includes('18796'))) return null; // 不走 wb-shim 的组没有积分系数概念
+  const rates = await readWbCreditsRates();
+  if (!rates || Object.keys(rates).length === 0) return null;
+  // 从 litellm /model/info 拿真实模型名（openai/<model> → <model>，-intl 后缀也认）
+  try {
+    const key = process.env.LITELLM_API_KEY || process.env.OPENAI_API_KEY || '';
+    const resp = await fetch(`${litellmBaseURL.replace(/\/+$/, '')}/model/info`, {
+      headers: { authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (resp.ok) {
+      const data: any = await resp.json().catch(() => null);
+      for (const m of (data?.data ?? []) as Array<Record<string, unknown>>) {
+        if (m?.model_name === modelGroup) {
+          const full = String((m?.litellm_params as Record<string, unknown>)?.model || '');
+          const model = full.replace(/^openai\//, '');
+          if (rates[model]) return rates[model];
+          if (rates[`${model}-intl`]) return rates[`${model}-intl`]; // 国际版后缀
+        }
+      }
+    }
+  } catch { /* 拉不到就算了 */ }
+  return null;
+}
+
 
 // ── 汇总 ──
 
