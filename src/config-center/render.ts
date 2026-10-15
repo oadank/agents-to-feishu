@@ -887,10 +887,13 @@ function cliModelName(providerId: string, modelId: string): string {
 // （codex=/v1/responses，claude=/v1/messages），不是供应商是谁。
 // 白名单成员 = 实测该协议端点通者；🔴 增删须附 openmem 实测记录 id，禁止拍脑补。
 //   codex-model/GwV4F/Gwglm5.3：litellm 组实测 /v1/responses 通（bb07220c）
-//   claude-model：anthropic/deepseek-v4-flash-0731@GW（e58210eb claude 细则）
+//   claude-sonnet-4-5：原 claude-model 组，4 条腿同为 anthropic 协议上游（glm5.3/
+//     dsv4.1@wb-shim、DS 官方、agnes）；2026-10-15 因官方 claude-code CLI 2.1.283
+//     模型白名单不认 claude-model（不发请求、干等超时）而改名，协议未变。
+//   claude-model：保留为兼容别名组，litellm 侧仍指向同一批上游。
 export const MODEL_PROTOCOL_ALLOWLIST: Record<'codex' | 'claude', readonly string[]> = {
   codex: ['codex-model', 'GwV4F', 'Gwglm5.3'],
-  claude: ['claude-model'],
+  claude: ['claude-sonnet-4-5', 'claude-model'],
 };
 
 /**
