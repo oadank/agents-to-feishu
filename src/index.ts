@@ -188,7 +188,38 @@ function pruneImageFiles(): void {
 function rtLog(msg: string): void {
   const file = process.env.CTI_RT_LOG || '';
   if (!file) return;
-  try { fs.appendFileSync(file, `[${new Date().toISOString()}] ${msg}\n`, 'utf-8'); } catch {}
+  try {
+    rotateRtLogIfBig(file);
+    fs.appendFileSync(file, `[${new Date().toISOString()}] ${msg}\n`, 'utf-8');
+  } catch {}
+}
+
+/**
+ * 票 T-0043（2026-10-17）：rt.log 5MB 滚动保护。
+ *
+ * 病灶：rt.log 由 nssm 之外的本进程 appendFileSync 直写，无任何上限。
+ * dsh 的 rt.log 曾涨到 90KB 没事，但 ws 强制重启/退避日志在聋的 bot 上是
+ * 每 15s 一条的量级——dsh-rt.log 实测 12 小时写穿 2.7 万行 err 同源日志，
+ * 真聋起来 *-rt.log 会无限膨胀，直到把 D 盘写满（nssm 对 stdout/err 也一样，
+ * 但那个至少还有 Windows 侧的 Event Log 兜底，rt.log 什么都没有）。
+ *
+ * 修法：append 前量一次身高，超 5MB 就把当前文件让位成 `<name>.log.1`
+ * （只留一档旧档，再老直接扔），新日志从空文件重新长。appendFileSync
+ * 每次调用都 stat 一次的成本可忽略（rt.log 是分钟级低频写）。
+ * 失败只静默——观测面绝不影响数据面（与 turn-ledger 的落盘失败同口径）。
+ */
+const RT_LOG_MAX_BYTES = 5 * 1024 * 1024;
+const rtLogRotated = new Set<string>();
+function rotateRtLogIfBig(file: string): void {
+  if (rtLogRotated.has(file)) return;
+  try {
+    const st = fs.statSync(file);
+    if (st.size < RT_LOG_MAX_BYTES) return;
+    const old = `${file}.1`;
+    try { fs.unlinkSync(old); } catch { /* 没有旧档 */ }
+    fs.renameSync(file, old);
+    rtLogRotated.add(file); // 本进程内让位一次就够，别每次 append 都翻旧账
+  } catch { /* 观测面失败静默 */ }
 }
 
 const BOT_RUNTIMES: Record<string, () => RuntimeProvider> = {
@@ -431,22 +462,36 @@ ${trimmed}`);
   // ── WS 保活（2026-09-19 票1：ws-keepalive）────────────────────────────────
   // 病灶：SDK 默认 pingInterval=120s，且【没有任何 pong 看门狗】——发完 ping 就不管了。
   // 一旦 TCP 半开（NAT 超时 / 对端静默丢包 / CLOSE 帧丢失），socket 仍报 OPEN，
-  // 连接变"僵尸"：不再收事件、也不触发 close→重连。实测 reasonix 曾连续静默 84 分钟
-  // 而进程毫不知情（logs/reasonix-err-*.log 里 81 条 ws-watch 告警）。
+  // 连接变"僵尸"：不再收事件、也不触发 close→重连。
   //
-  // 修法（两处，都不改 SDK 源码）：
+  // 🔴 票 T-0043（2026-10-17 老大亲验）：45s 看门狗是**误诊**，已放宽到 300s。
+  // 实测证据链：
+  //   ① 09-17 凌晨 dsh-rt.log 12 小时 23 次"检测到断连→重连成功"，恢复只需 15-25s；
+  //   ② 同期 dsh-err.log 12 条"强制 terminate + 重启连接"（触发条件=重连 stuck>62s），
+  //      dsh-out.log "ws client ready" x287；而从未聋过的 claude/gemini/mimo 等 9 家
+  //      全程 x1 —— 45s 阈值把"网络抖动后 1 分钟内自行恢复的连接"当场判死，
+  //      强杀→重连→再强杀，dsh 一夜被千刀万剐 287 次，反而把好连接磨成半开死连接。
+  // 根因侧证（环境事实，非本代码可修）：全机流量走 Clash TUN（Mihomo Meta Tunnel），
+  // 长连接经过 mihomo conntrack，偶发 30-90s 不出帧（trickle 状态）；飞书侧看连接还活着，
+  // 45s 阈值就是对这种正常抖动过敏。
+  //
+  // 修法（三处，都不改 SDK 源码）：
   //   ① wsConfig.pingInterval：SDK 构造函数只暴露 pingTimeout，pingInterval 不在
   //      IConstructorParams 白名单里 → 构造时传不进去。但 SDK 在 start() 里会
   //      updateWs({pingInterval: ClientConfig.PingInterval*1000}) 用服务端值覆盖，
   //      所以必须【start() 之后再改】。ping 本身不依赖连接状态，改完立刻按新间隔跑。
   //   ② wsConfig.pingTimeout：SDK 原生 pong 看门狗。发 ping 后 N 秒内无任何入站帧
-  //      → terminate() → 走 SDK 标准 close→重连流程。这是治"僵尸连接"的关键。
-  //      取 45s（> 30s ping 间隔，留一个 ping 周期的余量；飞书 pong 通常 <1s）。
+  //      → terminate() → 走 SDK 标准 close→重连流程。这是治"真僵尸连接"的关键。
+  //      取 300s（10 个 ping 周期）：判别口径从"45 秒没回音就是死"放宽到"五分钟没任何
+  //      入站帧才是死"——飞书空闲时本来就只有 pong，偶发 trickle 不该杀。
+  //   ③ idle-refresh（本次新增）：连接建立超过 30 分钟且持续无入站帧时，主动
+  //      terminate + start() 翻新一次。治"连接看起来没死、但底层已僵"的长尾场景
+  //      （NAT 表老化 / mihomo 长连接 conntrack 回收），代价只是几分钟收不到消息。
   const wsClient = new lark.WSClient({
     appId: bot.appId,
     appSecret: bot.appSecret,
     loggerLevel: lark.LoggerLevel.info,
-    wsConfig: { pingTimeout: 45 },
+    wsConfig: { pingTimeout: 300 },
   });
   await wsClient.start({ eventDispatcher: dispatcher });
 
@@ -458,7 +503,7 @@ ${trimmed}`);
     if (wsCfg?.updateWs) {
       wsCfg.updateWs({ pingInterval: 30_000 });
       const eff = wsCfg.getWS?.().pingInterval;
-      rtLog(`[ws-keepalive] pingInterval=${eff}ms（30s 心跳）+ pingTimeout=45s（pong 看门狗已启用）`);
+      rtLog(`[ws-keepalive] pingInterval=${eff}ms（30s 心跳）+ pingTimeout=300s（pong 看门狗已启用，T-0043 由 45s 放宽）`);
     } else {
       rtLog(`[ws-keepalive] ⚠️ 未能取到 SDK wsConfig.updateWs，pingInterval 保持默认 120s`);
     }
@@ -488,6 +533,36 @@ ${trimmed}`);
   const BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000];
   const backoffFor = (n: number) => BACKOFF_MS[Math.min(n, BACKOFF_MS.length - 1)];
 
+  // T-0043 idle-refresh 基准：本进程见过的最后一次入站帧（任何帧都算，由
+  // patch 后的 dispatcher 回调刷新）。连接建立早于 connectStartedAt 才计时，
+  // 免得上连未稳就误翻新。
+  let lastInboundAt = Date.now();
+  let connectStartedAt = Date.now();
+  /** 30 分钟无任何入站帧 → 视为长尾僵连接，主动翻新（见 ws-keepalive 注③） */
+  const IDLE_REFRESH_MS = 30 * 60_000;
+  /** 翻新最小间隔：刚翻新过就别紧接着再翻（防 terminate 后 SDK 慢启动把计时器骗亮） */
+  let lastRefreshAt = 0;
+
+  /** 取当前 ws 实例（鸭子类型，SDK 私有字段）；拿不到返回 null */
+  const getWsInstance = (): { terminate?: () => void } | null => {
+    try {
+      const inst = (wsClient as unknown as { wsConfig?: { getWSInstance?: () => { terminate?: () => void } | null } }).wsConfig?.getWSInstance?.();
+      return inst ?? null;
+    } catch { return null; }
+  };
+  /** 强杀 + 重启一条龙（看门狗两条路径共用；失败只 log，绝不上抛） */
+  const forceRecycle = (why: string): void => {
+    console.warn(`[agents-to-feishu] [ws-watch] ${why}，强制 terminate + 重启连接`);
+    try { getWsInstance()?.terminate?.(); } catch { /* best effort */ }
+    lastReconnectAt = Date.now();
+    lastRefreshAt = Date.now();
+    lastInboundAt = Date.now();
+    connectStartedAt = Date.now();
+    void wsClient.start({ eventDispatcher: dispatcher }).catch((e: unknown) => {
+      console.error(`[agents-to-feishu] [ws-watch] 强制重启失败: ${(e as Error).message}`);
+    });
+  };
+
   // SDK 内部重连成功后重置计数
   (wsClient as unknown as { onReconnected?: () => void }).onReconnected = () => {
     if (reconnectAttempts > 0) {
@@ -495,6 +570,7 @@ ${trimmed}`);
     }
     reconnectAttempts = 0;
     lastReconnectAt = Date.now();
+    lastInboundAt = Date.now();
   };
   // SDK 进入重连时记录起点
   (wsClient as unknown as { onReconnecting?: () => void }).onReconnecting = () => {
@@ -503,23 +579,65 @@ ${trimmed}`);
     rtLog(`[ws-backoff] 检测到断连，第 ${reconnectAttempts} 次重连（SDK 固定 120s 间隔，外层退避上限 ${backoffFor(reconnectAttempts)}ms）`);
   };
 
-  // 兜底看门狗：SDK 重连卡死时强制重置
+  // 兜底看门狗（15s 一拍，两条独立职责，互不遮挡）：
+  //   A. 重连卡死：reconnectAttempts>0 且 stuck 超过 backoff 上限 + 60s 余量
+  //      → 强杀重启（T-0043 实测：SDK 的 120s 固定间隔在 mihomo 抖动后常卡死，
+  //        必须外层介入）。保留原日志前缀 [ws-backoff] 便于与历史日志对照。
+  //   B. idle 翻新：没在重连、连接活着，但 30 分钟没有任何入站帧 → 主动翻新。
+  //      静默期也刷 rt.log（原 ws-watch 教训：纯静默=无法取证，只刷 err 会挨骂）。
   setInterval(() => {
-    if (reconnectAttempts <= 0) return;
-    const stuckMs = Date.now() - lastReconnectAt;
-    const cap = backoffFor(reconnectAttempts) + 60_000; // 给 SDK 一个周期 + 余量
-    if (stuckMs > cap) {
-      console.warn(`[agents-to-feishu] [ws-backoff] 重连已卡 ${Math.round(stuckMs / 1000)}s（上限 ${Math.round(cap / 1000)}s），强制 terminate + 重启连接`);
-      try {
-        const inst = (wsClient as unknown as { wsConfig?: { getWSInstance?: () => { terminate?: () => void } | null } }).wsConfig?.getWSInstance?.();
-        inst?.terminate?.();
-      } catch { /* best effort */ }
-      lastReconnectAt = Date.now();
-      void wsClient.start({ eventDispatcher: dispatcher }).catch((e: unknown) => {
-        console.error(`[agents-to-feishu] [ws-backoff] 强制重启失败: ${(e as Error).message}`);
-      });
+    if (reconnectAttempts > 0) {
+      const stuckMs = Date.now() - lastReconnectAt;
+      const cap = backoffFor(reconnectAttempts) + 60_000; // 给 SDK 一个周期 + 余量
+      if (stuckMs > cap) {
+        forceRecycle(`[ws-backoff] 重连已卡 ${Math.round(stuckMs / 1000)}s（上限 ${Math.round(cap / 1000)}s）`);
+      }
+      return;
+    }
+    const idleMs = Date.now() - lastInboundAt;
+    if (idleMs > IDLE_REFRESH_MS && Date.now() - connectStartedAt > IDLE_REFRESH_MS) {
+      // 只在"连接已存活超过 idle 阈值"时才翻新：新连接的前 30 分钟豁免，
+      // 避免启动风暴里反复自杀。
+      if (Date.now() - lastRefreshAt > IDLE_REFRESH_MS) {
+        rtLog(`[ws-watch] 连接已静默 ${Math.round(idleMs / 60_000)} 分钟无入站帧，主动翻新（idle-refresh）`);
+        forceRecycle(`[ws-watch] idle-refresh（静默 ${Math.round(idleMs / 60_000)} 分钟）`);
+      }
     }
   }, 15_000).unref?.();
+
+  // ── 入站帧活性追踪（idle-refresh 的时钟来源）────────────────────────────────
+  // 为什么挂在 socket 的 'message' 上，而不是包 dispatcher.invoke：
+  //   飞书的所有入站帧（含 pong）都从 SDK 的
+  //     `wsInstance.on('message', buffer => { clearLiveness(); ... })`
+  //   进来（node-sdk 1.74.0 index.js:102600）。pong 是应用层数据帧
+  //   （method=control, headers.type=pong）， SDK 在 handleControlData 里就地处理，
+  //   **不经过 dispatcher.invoke** —— 所以包 dispatcher 只能看到真正的消息事件，
+  //   看不到 pong。而空闲连接上 99% 的入站帧恰恰就是 pong。包 dispatcher 会让
+  //   "一条健康的空闲连接"看起来 30 分钟没收到任何帧，被 idle-refresh 误杀。
+  // 挂 socket 'message'（只读旁听，不拦截、不影响 SDK 自己的 handler）
+  //   能看到包括 pong 在内的每一帧，这才是真实的活性信号。
+  //
+  // 另一个坑：SDK 每次重连都 `new WebSocket(...)`（index.js:102386）换一个新实例，
+  // 旧实例被丢弃。所以不能只在启动时挂一次 —— 必须定期检查实例是否换过，
+  // 换过就重新挂钩（挂过的实例用 WeakSet 去重，避免同一 socket 堆监听器）。
+  const hookedSockets = new WeakSet<object>();
+  type MessageSocket = { on?: (ev: string, cb: () => void) => void };
+  const hookInbound = (): void => {
+    try {
+      const inst = (wsClient as unknown as { wsConfig?: { getWSInstance?: () => MessageSocket | null } }).wsConfig?.getWSInstance?.();
+      if (!inst || typeof inst.on !== 'function') return;
+      if (hookedSockets.has(inst)) return;
+      hookedSockets.add(inst);
+      inst.on('message', () => { lastInboundAt = Date.now(); });
+      // 新 socket 一到就重置"连接已存活"起点，idle-refresh 的 30 分钟从这一刻重新计
+      connectStartedAt = Date.now();
+      lastInboundAt = Date.now();
+    } catch { /* 旁听失败不影响主链路 */ }
+  };
+  hookInbound();
+  // 重连换实例后要及时补挂：跟着 15s 看门狗一起跑，开销可忽略
+  const hookTimer = setInterval(hookInbound, 5_000);
+  hookTimer.unref?.();
 
   console.log(`[agents-to-feishu] 飞书 WebSocket 已连接，等待消息…`);
 }
