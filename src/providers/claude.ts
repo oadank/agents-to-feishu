@@ -292,6 +292,17 @@ export class ClaudeProvider implements RuntimeProvider {
       ANTHROPIC_BASE_URL: this.baseUrl,
       PATH: buildWindowsPath(process.env.PATH),
     };
+    // 🔴 LocalSystem systemprofile 修正（2026-10-17 实弹修复）：
+    // claude-code CLI 用 %USERPROFILE%\.claude\projects\<cwd编码>\<sessionId>.jsonl 读会话历史。
+    // bot 以 LocalSystem 跑时 USERPROFILE 默认指向 C:\Windows\system32\config\systemprofile，
+    // CLI 在那儿读不到 oadan 的历史 ⇒ resume 报 "No conversation found with session ID"
+    // ⇒ 引擎 0ms 秒退 ⇒ 3 次重试全挂，用户看到"引擎进程已重建 3 次，可重发"（实弹现场 10-17）。
+    // 与 workbuddy.ts:100-101 / zcode.ts:106-110 / reasonix.ts:65-66 同款修正，显式兜底。
+    const ctiUserHome = process.env.CTI_USER_HOME || 'C:\\Users\\oadan';
+    if (env.USERPROFILE === undefined || String(env.USERPROFILE).includes('systemprofile')) env.USERPROFILE = ctiUserHome;
+    if (env.HOME === undefined || String(env.HOME).includes('systemprofile')) env.HOME = ctiUserHome;
+    if (env.APPDATA === undefined || String(env.APPDATA).includes('systemprofile')) env.APPDATA = path.join(ctiUserHome, 'AppData', 'Roaming');
+    if (env.LOCALAPPDATA === undefined || String(env.LOCALAPPDATA).includes('systemprofile')) env.LOCALAPPDATA = path.join(ctiUserHome, 'AppData', 'Local');
     // 走到这里 authToken 必然有值（无值已在上面抛错），直接赋值即可。
     env.ANTHROPIC_AUTH_TOKEN = authToken;
     // 2026-09-11 修复（配置中心穿透）：同理，模型名也要以配置中心为准 ——
@@ -340,6 +351,12 @@ export class ClaudeProvider implements RuntimeProvider {
                   if (/openmem|mh_tool|mh_search|mh_ask/i.test(toolName)) {
                     if (/github|git\b|token|凭据/i.test(cmd)) gatePassed.add(sid + ':github');
                     if (/飞书|lark|feishu|消息|群|chat/i.test(cmd)) gatePassed.add(sid + ':lark');
+                    if (/\brea\b|逆向|反编译|reverse[- ]?engineer|mcp__rea/i.test(cmd)) gatePassed.add(sid + ':rea');
+                    return {};
+                  }
+                  // 领官方 REA 技能 → 解除 rea 域（2026-10-15 加）
+                  if (/^skill$/i.test(toolName) && /reverse-engineer-anything/i.test(cmd)) {
+                    gatePassed.add(sid + ':rea');
                     return {};
                   }
                   const GH_CMD = /(?:^|[;&|])\s*gh\s+(?:api|release|repo|pr|issue|run|auth)\b/i;
@@ -354,16 +371,26 @@ export class ClaudeProvider implements RuntimeProvider {
                   if (LARK.test(cmd) || /^lark_(send|reply)/i.test(toolName)) {
                     hits.push(['lark', '飞书', '飞书操作规范']);
                   }
+                  // REA 逆向域（2026-10-15 加，与 dsh-api-gate v0.5 同源）：mcp__rea__* 工具 + CLI 直跑 rea 都拦
+                  const REA_TOOL = /^mcp__rea__/;
+                  const REA_CLI = /(?:^|[;&|])\s*(?:npx\s+-y\s+)?rea(?:-agents)?(?:@[\w.]+)?\s/i;
+                  if (REA_TOOL.test(toolName) || REA_CLI.test(cmd)) {
+                    hits.push(['rea', 'REA 逆向', 'reverse-engineer-anything 技能']);
+                  }
                   for (const [id, label, preset] of hits) {
                     const key = sid + ':' + id;
                     if (gatePassed.has(key)) continue;
                     if (gateDenied.has(key)) { gatePassed.add(key); continue; }
                     gateDenied.add(key);
+                    // rea 域的解除路径是领官方技能，不是 openmem 成品答案（2026-10-15 加）
+                    const unlock = id === 'rea'
+                      ? `skill(name="${preset}")`
+                      : `mcp__openmem__mh_tool(name="${preset}")`;
                     return {
                       hookSpecificOutput: {
                         hookEventName: 'PreToolUse',
                         permissionDecision: 'deny',
-                        permissionDecisionReason: `拦下：这是${label}操作，但本会话你还没查过对应的通道/规范就动手了。先调成品答案（秒回、内容准确）：mcp__openmem__mh_tool(name="${preset}")；拿到后再重试本次操作。（本会话该闸门只拦一次）`,
+                        permissionDecisionReason: `拦下：这是${label}操作，但本会话你还没查过对应的通道/规范就动手了。先调（拿到内容再重试本次操作）：${unlock}。（本会话该闸门只拦一次）`,
                       },
                     };
                   }
