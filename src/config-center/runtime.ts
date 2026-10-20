@@ -403,10 +403,10 @@ export async function readLitellmUpstreamView(modelGroup: string, baseURL: strin
 
 // ── wb-shim 模型消耗系数（2026-10-14 老大令：状态栏显示消耗系数）──
 // 链路：litellm /model/info（组名→上游模型名，已有 5min 缓存）+ wb-shim :18796 /v1/models
-// （模型→credits_rate 如 "x0.06 credits"）。两级缓存各 5 分钟，任一失败返回 null 不阻塞卡片。
+// （模型→credits_rate 如 "x0.08 credits"）。两级缓存各 5 分钟，任一失败返回 null 不阻塞卡片。
 let wbCreditsRateCache: { map: Record<string, string>; at: number } | null = null;
 
-/** wb-shim /v1/models：模型名 → credits_rate 字符串（如 "x0.06 credits"）。 */
+/** wb-shim /v1/models：模型名 → credits_rate 字符串（如 "x0.08 credits"）。 */
 export async function readWbCreditsRates(): Promise<Record<string, string>> {
   const now = Date.now();
   if (wbCreditsRateCache && now - wbCreditsRateCache.at < 300_000) return wbCreditsRateCache.map;
@@ -429,7 +429,7 @@ export async function readWbCreditsRates(): Promise<Record<string, string>> {
   return wbCreditsRateCache?.map ?? map;
 }
 
-/** 组名 → 消耗系数（如 "x0.06"）：litellm 组名解析成上游模型名后查 wb-shim 目录。
+/** 组名 → 消耗系数（如 "x0.08"）：litellm 组名解析成上游模型名后查 wb-shim 目录。
  *  非 wb-* 组（不走 wb-shim）返回 null，状态栏不显示该段。 */
 export async function readModelCreditsRate(modelGroup: string, litellmBaseURL: string): Promise<string | null> {
   const map = await readLitellmModelMap(litellmBaseURL); // 组名 → api_base 列表（判是否 wb-shim）
@@ -533,4 +533,57 @@ export async function readLitellmTurnUsage(modelGroup: string, sinceTs: number):
     console.warn('[runtime] readLitellmTurnUsage failed:', e instanceof Error ? e.message : e);
     return null;
   }
+}
+
+// ── 本轮积分消耗（2026-10-21 老大令：bot 也要像 WorkBuddy 一样显示消耗）──
+// 数据源：wb-shim 的 /v1/conv-ids（它按 convId 记账，requestId 就是官方账主键）。
+// 归属：bot 一轮 = 一条飞书消息从收到到回完，时间边界天然明确，
+//     取「本轮开始时刻之后、最近的那一个 turn」即可，不用像 dsh 那样按消息时间猜。
+// 失败一律返回 null，绝不阻塞卡片。
+export interface WbShimTurnCredit { credit: number; requests: number; startT: number; endT: number; }
+
+const WB_SHIM_BASE = 'http://127.0.0.1:18796';
+
+/** 取「自 sinceTs 起最近一轮」的积分消耗。无数据/失败返回 null。 */
+export async function readWbShimTurnCredit(sinceTs: number): Promise<WbShimTurnCredit | null> {
+  try {
+    // [2026-10-21] key 只从环境读，不硬编码（仓库可能公开）。
+    // 🔴 bot 的 LITELLM_API_KEY 是打 litellm(:4000) 的 sk-xxx，**过不了** :18796 鉴权（实测 401）；
+    // 真正能过的是 lc-/in-/db- 开头那把，必须由 WB_SHIM_KEY 注入。没配就静默不显示。
+    const key = process.env.WB_SHIM_KEY || '';
+    if (!key) return null;
+    // 往前多看 30 秒：bot 收到消息到真正发出第一次模型请求有间隔
+    const from = Math.max(0, sinceTs - 30_000);
+    const url = `${WB_SHIM_BASE}/v1/conv-ids?since=${from}&until=${Date.now() + 5_000}`;
+    const resp = await fetch(url, {
+      headers: { authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(6_000),
+    });
+    if (!resp.ok) return null;
+    const data: any = await resp.json().catch(() => null);
+    const turns = Array.isArray(data?.turns) ? data.turns : [];
+    if (turns.length === 0) return null;
+    // 本轮 = 最后一个 turn（按 startT 升序，服务端已排好）
+    const t = turns[turns.length - 1];
+    const credit = Number(t?.credit) || 0;
+    const ids = Array.isArray(t?.ids) ? t.ids : [];
+    return {
+      credit: Math.round(credit * 100) / 100,
+      requests: ids.length,
+      startT: Number(t?.startT) || 0,
+      endT: Number(t?.endT) || 0,
+    };
+  } catch (e) {
+    console.warn('[runtime] readWbShimTurnCredit failed:', e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
+/** 该模型组是否走 wb-shim（决定要不要显示积分消耗）。 */
+export async function usesWbShim(modelGroup: string, litellmBaseURL: string): Promise<boolean> {
+  try {
+    const map = await readLitellmModelMap(litellmBaseURL);
+    const bases = (map[modelGroup] ?? []).map((b) => b.toLowerCase());
+    return bases.some((b) => b.includes('18796'));
+  } catch { return false; }
 }

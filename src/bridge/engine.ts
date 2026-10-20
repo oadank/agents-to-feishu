@@ -25,7 +25,13 @@ import {
   buildInterruptSkeleton,
   buildInterruptFinalCard,
   buildInterruptStatusText,
-  buildStreamMarkdown,
+  buildStreamCard,
+  flattenStream,
+  StreamView,
+  EL_STATUS,
+  EL_TOOLS,
+  EL_THINK,
+  EL_DIVIDER,
   buildFinalMarkdown,
   buildErrorMarkdown,
   buildDividerText,
@@ -33,13 +39,14 @@ import {
   toolStartLine,
   STREAM_ELEMENT_ID,
   type DividerInfo,
+  type StreamViews,
   type TurnLayers,
 } from '../feishu/cards.js';
-import { readArkUsage, readGwBalance, readDeepSeekBalance, readArkUsageCached, readGwBalanceCached, readDeepSeekBalanceCached, readLitellmUpstreamView, readLitellmTurnUsage } from '../config-center/runtime.js';
+import { readArkUsage, readGwBalance, readDeepSeekBalance, readArkUsageCached, readGwBalanceCached, readDeepSeekBalanceCached, readLitellmUpstreamView, readLitellmTurnUsage, readModelCreditsRate, readWbShimTurnCredit, usesWbShim } from '../config-center/runtime.js';
 import { recordStats } from './stats.js';
 
 // 状态行固定全局显示项（管所有 agent；缺省全显示）
-export const DIVIDER_FIELDS = ['agent', 'model', 'provider', 'dir', 'session', 'cache', 'avg', 'context', 'usage', 'balance'];
+export const DIVIDER_FIELDS = ['agent', 'model', 'provider', 'dir', 'session', 'cache', 'avg', 'context', 'usage', 'balance', 'rate'];
 const PROVIDER_SHORT: Record<string, string> = { 'volc-ark': 'Ark', gw: 'GW', 'deepseek-official': 'DeepSeek', litellm: 'LiteLLM' };
 
 /** ⚡ 提示词优化触发前缀匹配：命中返回剥去前缀的正文（空正文=光杆前缀，按未命中处理），未命中返回 null */
@@ -84,6 +91,13 @@ export interface EngineOptions {
 const FLUSH_INTERVAL_MS = 25;
 const TEXT_FLUSH_INTERVAL_MS = Number(process.env.CTI_TEXT_FLUSH_MS || 1200);
 const THINKING_BUFFER_CAP = 20000;
+// ── T-0032 2026-10-02 流式实测参数（口径来源：本机脚本 + 群里真实卡片）──
+/** 单卡通货流式硬上限实测 ≈605s（超了必 code=200850 card streaming timeout）→ 540s 主动换通道 */
+const STREAM_REOPEN_MS = 540_000;
+/** 降级整卡 PATCH 的最小间隔：旧值等于没有节流（FLUSH 25ms 机枪重画 = 抽搐的另一半来源） */
+const PATCH_MIN_MS = 1200;
+/** 静默心跳：超过这个时长没有任何成功推送，就原地重写状态行（"已用 Ns"，看着知道没卡死） */
+const HEARTBEAT_IDLE_MS = 2500;
 /**
  * 上游（阿里云 token-plan / litellm 网关）判定「本会话已超上下文预算」并要求另开会话。
  * 桥若不自动重开，该 chat 每一轮都会被同一个引擎会话挡掉：表现为发消息石沉大海，
@@ -308,7 +322,9 @@ export class MessageEngine {
   }
 
   /** LiteLLM 中转时解析出的真实上游类型（viewLoaded 预取阶段填充；同步读用） */
-  private litellmUpstreamKind: 'gw' | 'ark' | 'none' = 'none';
+  private litellmUpstreamKind: 'gw' | 'ark' | 'deepseek' | 'none' = 'none';
+  /** wb-shim 腿的消耗系数（credits_rate，如 "x0.08 credits"）；非 wb-* 组保持 null 不显示 */
+  private modelCreditsRate: string | null = null;
 
   /**
    * 按 chat 串行入队执行（移植老项目 enqueueChatTask）。
@@ -759,6 +775,8 @@ export class MessageEngine {
                 // 解析模型组真实上游（GwV4F→GW / ArkV4F→Ark），并预取对应余额/配额进缓存
                 const v = await readLitellmUpstreamView(this.opts.modelGroup, this.opts.providerBaseUrl || '');
                 this.litellmUpstreamKind = v.kind;
+                // [2026-10-14 老大令] wb-shim 腿的组：预取消耗系数（credits_rate）进缓存
+                this.modelCreditsRate = await readModelCreditsRate(this.opts.modelGroup, this.opts.providerBaseUrl || '');
                 break;
               }
               default: break;
@@ -767,7 +785,7 @@ export class MessageEngine {
         })()
       : Promise.resolve();
     let acpSessionId: string | undefined;
-    const buildDivider = (): DividerInfo | undefined => {
+    const buildDivider = (tail?: string): DividerInfo | undefined => {
       if (!this.opts.showAgentDivider) return undefined;
       console.log(`[engine][divider] chat=${chatId} sessionId=${session.id.slice(0,8)} acpSessionId=${acpSessionId?.slice(0,8)||'(none)'}`);
       const stats = readCacheStats(this.opts.contextWindow ?? 1_000_000, acpSessionId);
@@ -793,10 +811,12 @@ export class MessageEngine {
         ...(stats
           ? { cacheHitRate: stats.lastRate, cacheAvgRate: stats.avgRate, contextPercent: stats.contextPercent, contextUsed: stats.contextUsed, contextLimit: stats.contextLimit }
           : {}),
-        usage,
-        balance,
-        fields: DIVIDER_FIELDS,
-      };
+      usage,
+      balance,
+      creditsRate: this.modelCreditsRate,
+      fields: DIVIDER_FIELDS,
+      ...(tail ? { tail } : {}),
+    };
     };
     const dividerInfo = buildDivider(); // 骨架快照
 
@@ -844,42 +864,115 @@ export class MessageEngine {
     let hadError = false;
     let seq = 0;
 
-    // ── 流式模式说明（2026-08-29 二次修复）──
-    // 流式由【创建时】骨架 config.streaming_mode:true 开启（cards.ts，官方文档唯一有效方式）。
-    // 此前在此处调 updateCardSettings(streaming=true) 是假成功（code=0 但不生效），导致每轮
-    // 首次 element 增量更新必 300309 → 降级整卡 PATCH。此处不再开流式，只在终态关闭。
+    // ── 流式渲染（T-0032 2026-10-02 重写；实测口径见 cards.ts 顶部注释）──
+    // 一张卡四个元素并行流式：状态行允许原地重写（心跳计时用），工具/思考/正文**严格只增**。
+    // 只增 = 官方打字机永远走「末尾追加」；旧单元素每帧整体重排 = 老大实测的「打印一半又重新打印」。
+    const sv = new StreamView(dividerInfo);
+    const pushed: Record<string, string> = {
+      [EL_STATUS]: '', [EL_TOOLS]: '', [EL_THINK]: '', [STREAM_ELEMENT_ID]: '',
+      // 骨架里状态栏就是这个值 → 初始化为它，首帧不会白推一次
+      [EL_DIVIDER]: sv.views().divider,
+    };
+    const EL_KEYS: Array<{ id: string; key: keyof StreamViews; appendOnly: boolean }> = [
+      { id: EL_STATUS, key: 'status', appendOnly: false },
+      { id: EL_TOOLS, key: 'tools', appendOnly: true },
+      { id: EL_THINK, key: 'thinking', appendOnly: true },
+      { id: STREAM_ELEMENT_ID, key: 'text', appendOnly: true },
+      // 状态栏：关了 showAgentDivider（dividerInfo=undefined）就没有这个元素，不能推它
+      ...(dividerInfo ? [{ id: EL_DIVIDER, key: 'divider' as const, appendOnly: false }] : []),
+    ];
+    const streamStartAt = Date.now();
+    let streamOpenedAt = Date.now();
+    let lastPushOkAt = Date.now();
+    let lastPatchAt = 0;
+    let failStreak = 0;
+    let reflows = 0;
+    let pushes = 0;
+    /** 心跳状态行的"在干什么"（事件里更新：⏳ 等模型首字 / 💭 思考中 / 🔧 执行工具 / ✍️ 输出正文） */
+    let phase = '⏳ 等模型首字…';
 
-    /** 统一的卡片渲染出口：CardKit element 增量优先，失败降级整卡 PATCH */
-    const render = async (markdown: string, isFinal = false): Promise<boolean> => {
-      if (cardId) {
+    /** 通道续命：card.update 传 streaming_mode:true 的整卡 —— 实测唯一能把 200850/300309 救回来的写法
+     *  （settings(streaming=true) 重开无效，实测重开后仍 300309） */
+    const reopenStream = async (why: string): Promise<boolean> => {
+      if (!cardId) return false;
+      const v = sv.views();
+      seq += 1;
+      const ok = await this.opts.feishu.updateCardBody(cardId, buildStreamCard(v, dividerInfo), seq).catch(() => false);
+      if (!ok) {
+        console.warn(`[engine] reopen FAILED(${why}) → 降级整卡 PATCH`);
+        cardId = null;
+        return false;
+      }
+      for (const { id, key } of EL_KEYS) pushed[id] = v[key];
+      streamOpenedAt = Date.now();
+      console.log(`[engine] stream REOPENED(${why}) 本轮已跑 ${Math.round((Date.now() - streamStartAt) / 1000)}s`);
+      return true;
+    };
+
+    /** 一次流式刷新：只推变化过的元素。瞬态失败=丢一帧不降级；通道死亡=先续命；彻底没通道才整卡 PATCH */
+    const render = async (): Promise<boolean> => {
+      if (!cardId) {
+        const now = Date.now();
+        if (now - lastPatchAt < PATCH_MIN_MS) return true; // 内容累积在视图里，下一帧一起补上
+        lastPatchAt = now;
+        return this.opts.feishu.updateCardHttp(messageId, buildSimpleCard(flattenStream(sv.views()), buildDivider()));
+      }
+      if (Date.now() - streamOpenedAt > STREAM_REOPEN_MS) {
+        // 单卡通货流式 ~605s 硬上限，主动在 540s 换新通道，免得正打字被 200850 掐断
+        if (!(await reopenStream('proactive-9min'))) return false;
+      }
+      const v = sv.views();
+      let dirty = 0;
+      let transientFail = false;
+      for (const { id, key, appendOnly } of EL_KEYS) {
+        const want = v[key];
+        const had = pushed[id];
+        if (want === had) continue;
+        if (appendOnly && !want.startsWith(had)) {
+          reflows += 1;
+          console.warn(`[engine] NON-MONOTONIC el=${id} had=${had.length}→want=${want.length}（累计 ${reflows}，本帧该元素将整块重画）`);
+        }
+        dirty += 1;
         seq += 1;
-        let res = await this.opts.feishu.updateCardElement(cardId, STREAM_ELEMENT_ID, markdown, seq);
+        let res = await this.opts.feishu.updateCardElement(cardId, id, want, seq);
         if (res === 'retry') {
-          // 2026-08-30 修复流式抽风（老大实测：写一半突然重写/闪全，终卡才正常）：
-          // element 失败后不能直接降级整卡 PATCH——骨架 streaming_mode 仍开着，
-          // 整卡覆盖会和 CardKit 流式渲染交替打架。处理：先重试一次（瞬态/竞态）；
-          // 仍失败则先关流式（settings streaming=false）再整卡 PATCH，消除交替源。
-          // [T-0016] 只对 'retry' 重试；流式已死(200850/300309)直接降级，省掉必然的第二次报错。
           seq += 1;
-          res = await this.opts.feishu.updateCardElement(cardId, STREAM_ELEMENT_ID, markdown, seq);
+          res = await this.opts.feishu.updateCardElement(cardId, id, want, seq);
         }
         if (res === 'ok') {
-          if (isFinal) {
-            seq += 1;
-            const summaryText = markdown.replace(/\s+/g, ' ').trim().slice(0, 120) || '✅ 回答完成';
-            // 终态：关闭流式模式 + 写聊天列表摘要（对齐老项目 endPreview 关 streaming_mode）
-            await this.opts.feishu.updateCardSettings(cardId, summaryText, seq, false).catch(() => {});
-          }
-          return true;
+          pushed[id] = want;
+          lastPushOkAt = Date.now();
+          pushes += 1;
+          continue;
         }
-        console.warn(`[engine] cardElement update failed (${res === 'dead' ? 'stream-dead' : 'retry-exhausted'}), close streaming + whole-card PATCH`);
-        seq += 1;
-        const summaryText = markdown.replace(/\s+/g, ' ').trim().slice(0, 120) || '✅ 回答完成';
-        await this.opts.feishu.updateCardSettings(cardId, summaryText, seq, false).catch(() => {});
-        cardId = null; // 后续全走 PATCH（流式已关，不再有交替打架）
+        if (res === 'dead') return await reopenStream(`dead@${id}(seq=${seq})`);
+        transientFail = true;
       }
-      const card = buildSimpleCard(markdown, buildDivider());
-      return this.opts.feishu.updateCardHttp(messageId, card);
+      if (transientFail) {
+        failStreak += 1;
+        if (failStreak < 3) return true; // 抖动：丢帧即可，提前降级等于自己把流式弄死
+        console.warn('[engine] 流式连续 3 帧瞬态失败 → 降级整卡 PATCH');
+        cardId = null;
+        return false;
+      }
+      failStreak = 0;
+      if (dirty > 0) console.log(`[engine] stream push ok（累计 ${pushes} 次推送 / 重画 ${reflows} 次）`);
+      return true;
+    };
+
+    /** 终态：整卡覆盖成美化版（全程唯一一次重排）+ 关流式 + 写聊天列表摘要，此后绝不再走 element 通道 */
+    const renderFinal = async (markdown: string, freshDivider?: DividerInfo): Promise<boolean> => {
+      const div = freshDivider ?? buildDivider();
+      const summaryText = markdown.replace(/\s+/g, ' ').trim().slice(0, 120) || '✅ 回答完成';
+      if (cardId) {
+        seq += 1;
+        const ok = await this.opts.feishu.updateCardBody(cardId, buildSimpleCard(markdown, div), seq);
+        seq += 1;
+        await this.opts.feishu.updateCardSettings(cardId, summaryText, seq, false).catch(() => {});
+        return ok;
+      }
+      lastPatchAt = Date.now();
+      return this.opts.feishu.updateCardHttp(messageId, buildSimpleCard(markdown, div));
     };
 
     // ── 节流 PATCH：800ms 窗口内合并多次事件为一次更新；串行化防乱序 ──
@@ -893,10 +986,11 @@ export class MessageEngine {
       pendingFlush = true;
       const run = flushChain.then(async () => {
         pendingFlush = false;
-        const snapshot = buildStreamMarkdown(layers);
-        await render(snapshot);
+        sv.pushText(layers.text); // 正文元素只吃增量（layers.text 天然只增）
+        await render();
         if (pendingFlush) {
-          await render(buildStreamMarkdown(layers));
+          sv.pushText(layers.text);
+          await render();
         }
       });
       flushChain = run.catch(() => { /* 网络/临时错误：下轮事件会再刷 */ });
@@ -937,8 +1031,32 @@ export class MessageEngine {
       if (toolFlushTimer) return;
       toolFlushTimer = setTimeout(() => { toolFlushTimer = null; scheduleFlush(); }, 300);
     };
+    // ── 静默心跳（治「后台在跑、飞书上不动」）───────────────────────────────
+    // 工具执行/长思考时没有任何文本增量，旧实现此时卡片完全静止。
+    // 状态元素允许原地重写（实测短行重写代价极小），所以把计时放这里，正文元素保持纯追加。
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    /** 秒数格式化：<60 → `41s`；≥60 → `1m05s` */
+    const fmtElapsed = (sec: number): string =>
+      sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s`;
+    const startHeartbeat = (): void => {
+      if (heartbeat) return;
+      // 流式一开始就把状态栏切成【极简形态：整行只有一个秒数】（老大 2026-10-03 二次令 T-0037）。
+      // 上一版只是把 "🔧 执行工具 bash" 摘掉，但完整状态栏里 🤖/⚙️/☁️/📁路径/💬会话id 还占着一整行，
+      // 他的原话：过程中"还显示了路径呀之类的问题，太长了，应该只显示用多少秒"。
+      // 完整字段 + 本轮总耗时改由【终卡】一次性恢复（见 finalTail）。
+      sv.setDividerSeconds('⏳ 0s');
+      heartbeat = setInterval(() => {
+        const now = Date.now();
+        if (now - lastPushOkAt < HEARTBEAT_IDLE_MS) return; // 有内容在动就不插心跳
+        const el = Math.round((now - streamStartAt) / 1000);
+        sv.setDividerSeconds(`⏳ ${fmtElapsed(el)}`);
+        scheduleFlush();
+      }, 1000);
+      heartbeat.unref?.();
+    };
     /** 停止定时器并等待在途 PATCH 完成（防止最终卡被过期的流式视图覆盖） */
     const quiesce = async (): Promise<void> => {
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       // 节流兜底定时器也要清：否则 FINAL 渲染后被过期的流式视图覆盖（终卡闪回旧内容）
       if (textFlushTimer) { clearTimeout(textFlushTimer); textFlushTimer = null; }
@@ -956,6 +1074,7 @@ export class MessageEngine {
       // 2026-08-30 修复：语音回复规范每轮随文携带（此前 systemPrompt 仅会话首条注入，
       // 老会话不知道【语音】块约定 ⇒ TTS 对老会话失效，实测 claude/dsh 语音回复=0）
       const turnStartTs = Date.now(); // litellm 中转 bot 补拉用量用（按时间窗过滤记账库）
+      startHeartbeat(); // [T-0032] 静默期状态行心跳：工具/长思考没文本增量时卡片也要"在动"
       let gotRealUsage = false; // [票mm-1] 判据=usage 事件输入侧有量（能落盘 stats）才算真实；gemini 恒 input=0 → 放行补拉
       for await (const ev of provider.streamChat({
         // [09-20 老大令·去堆积] 语音规则每轮尾巴（VOICE_RULE_TURN ~90字/条，且随引擎历史
@@ -1001,6 +1120,7 @@ export class MessageEngine {
       })) {
         switch (ev.type) {
           case 'text':
+            phase = '✍️ 输出正文中';
             layers.text += ev.text;
             scheduleTextFlush();
             break;
@@ -1008,7 +1128,10 @@ export class MessageEngine {
             // 2026-09-01 思考层显示开关：false = 不积累（流式/终态卡片都无 💭 块）
             if (this.opts.showThinkingCards === false) break;
             if (ev.text.trim()) {
+              phase = '💭 思考中';
               layers.thinking = (layers.thinking + ev.text).slice(-THINKING_BUFFER_CAP);
+              // T-0032：流式元素单独喂增量（不受上面尾部窗口影响 = 窗口=改历史=整块重画）
+              sv.pushThinking(ev.text);
               // 2026-08-31 修思考层闪烁：thinking chunk 高频（hermes 8000+ 条），每次都刷=整块重绘。
               // 节流 ≥1.8s 一次；期间累积不丢，下个非 thinking 事件或节流到期兜底刷出。
               const now = Date.now();
@@ -1068,6 +1191,9 @@ export class MessageEngine {
             if (!ev.status || ev.status === 'running') {
               // 工具在跑：入历史（每条一行，对齐旧 1874 行格式）
               layers.toolLines.push(toolStartLine(ev.tool, ev.input));
+              // T-0032：流式侧只追加起始行；完成后**另起一行**打 ✅/❌，绝不回改已推字符
+              phase = `🔧 执行工具 ${ev.tool}`;
+              sv.pushToolLine(`· ${toolStartLine(ev.tool, ev.input)}`);
             } else {
               // 结束：找到第一条未标记的同名工具行打标（✅/❌），找不到则补一行
               const mark = ev.status === 'done' ? '✅' : '❌';
@@ -1076,6 +1202,8 @@ export class MessageEngine {
               );
               if (idx >= 0) layers.toolLines[idx] = `${mark} ${layers.toolLines[idx]}`;
               else layers.toolLines.push(`${mark} ${toolStartLine(ev.tool, ev.input)}`);
+              sv.pushToolLine(`${mark} ${ev.tool}`);
+              phase = `🔧 工具 ${ev.tool} ${ev.status === 'done' ? '完成' : '失败'}`;
             }
             scheduleToolFlush();
             break;
@@ -1113,7 +1241,10 @@ export class MessageEngine {
               this.forceFreshSession(session, chatId, '上游判定本会话上下文已超预算');
             }
             await quiesce();
-            const okErr = await render(buildStreamMarkdown(layers));
+            // [T-0032] 错误也要"只增"地贴进正文元素，再整卡收口：旧写法单元素重排 = 又抽一次
+            sv.pushText(layers.text);
+            sv.pushError(ev.message);
+            const okErr = await render();
             // [根治 A② 2026-09-15] 走到这里时卡片流式通道常常已经自己超时关掉了
             // （实测 code=200850 "card streaming timeout" / 300309 "streaming mode is
             // closed"）。render 失败如果不兜底，用户在飞书端看到的就是"永远停在第一帧、
@@ -1168,7 +1299,25 @@ export class MessageEngine {
         // 在这里留一份内存副本，/de 优先用这份（每个会话只留最近 3 条）。
         try { rememberAssistantSaid(chatId, finalText); } catch { /* 记不上也不许影响发正文 */ }
         console.log(`[engine] FINAL text.len=${layers.text.length} thinking.len=${layers.thinking.length} tools=${layers.toolLines.length} finalText.len=${finalText.length}`);
-        const ok = await render(finalText, true);
+        // 状态栏换装：流式期间的「只有秒数」退场，终卡恢复【完整字段 + 本轮总耗时】
+        // （老大 2026-10-03 令 T-0037：结果卡末尾也得留着耗时，别再出现"过程中有、结果就没了"）。
+        // [2026-10-21 老大令] 再加一段「本轮积分消耗」：走 wb-shim 的 bot 才显示。
+        // 取数：wb-shim /v1/conv-ids 按 convId 精确记账（见 runtime.readWbShimTurnCredit）。
+        // 失败/不适用一律不加，绝不阻塞卡片。
+        let credTail = '';
+        try {
+          if (await usesWbShim(this.opts.modelGroup, this.opts.providerBaseUrl || '')) {
+            const c = await readWbShimTurnCredit(turnStartTs);
+            if (c && c.credit > 0) {
+              credTail = ` · ⚡${c.credit.toFixed(2)} 积分`;
+              console.log(`[engine][wb-credit] model=${this.opts.modelGroup} credit=${c.credit} requests=${c.requests}`);
+            }
+          }
+        } catch { /* 积分显示失败不影响交付 */ }
+        const finalTail = `⏳ 用时 ${fmtElapsed(Math.round((Date.now() - streamStartAt) / 1000))}${credTail}`;
+        sv.restoreDivider();
+        sv.setDividerTail(finalTail); // 迟到的 element 推送也带耗时，不会把终卡刷回旧样式
+        const ok = await renderFinal(finalText, buildDivider(finalTail));
         // 卡片是「有损预览」（超 28000 只留末尾），长答案另补发一份完整文件。
         await this.deliverFullAnswerAsFile(chatId, finalText);
         if (!ok) {
@@ -1194,19 +1343,16 @@ export class MessageEngine {
           // Arc 用量/余额后台查询完成后再刷一次最终卡状态行（同步读新缓存；无则保持现状）
           await viewLoaded;
           try {
-            await render(buildFinalMarkdown(layers), true);
+            // [T-0032] 旧写法在这里再调一次 render(isFinal=true) 走 element 通道 —— 而上一行终态
+            // 已经 settings(streaming=false) 关掉流式，这次推送必 300309，然后触发"关流式+整卡
+            // PATCH"兜底，等于每轮都白白抽搐一次。终态刷新统一走 renderFinal（整卡 body + 摘要）。
+            const fresh = buildDivider(finalTail);
+            await renderFinal(buildFinalMarkdown(layers), fresh);
           } catch (e) {
             // [T-0031 批一 09-30 审计P1] 此时答案已完整交付：这次刷新失败绝不能落进外层
             // catch（外层会把已交付的终卡整体覆盖成错误块，还连带跳过 appendContext/
             // onReplySent）。注释承诺 best-effort，这里把保护补上——失败只留日志。
             console.warn(`[engine] 终态状态行刷新失败（不影响已交付答案）: ${e instanceof Error ? e.message : String(e)}`);
-          }
-          // 状态行含 model/context/session/balance 等可变字段（acpSessionId 在 usage 事件后才真实）。
-          // 流式 updateCardElement 只刷正文元素，此处用整卡 body 刷新状态行：session=claude 真实 id、
-          // 上下文按最新 stats、余额按最新缓存。失败不影响主回复（best-effort）。
-          if (cardId) {
-            const fresh = buildDivider();
-            await this.opts.feishu.updateCardBody(cardId, buildSimpleCard(buildFinalMarkdown(layers), fresh), ++seq).catch((e) => console.warn(`[engine] divider refresh failed:`, e));
           }
         }
         // 2026-08-31 重启保记忆：记录本轮对话（appendContext 内部 cap 20）+ 落盘
@@ -1401,7 +1547,13 @@ export class MessageEngine {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       try {
-        await render(buildErrorMarkdown(msg));
+        // [T-0032] 异常收口：错误块**追加**到正文元素（只增），再整卡落终态；
+        // 旧写法把整段错误塞进单元素重排 = 已输出的正文被回收重画
+        await quiesce();
+        sv.pushText(layers.text);
+        sv.pushError(msg);
+        const okEx = await render();
+        if (!okEx || !cardId) await renderFinal(`${layers.text.trim() ? layers.text + '\n\n' : ''}${buildErrorMarkdown(msg)}`);
       } catch {
         await this.sendError(chatId, `引擎异常：${msg}`);
       }
@@ -1409,6 +1561,7 @@ export class MessageEngine {
       // 15:55 家装案）。本轮已捕获产物有则补发+一句说明，无则静默。
       await this.rescueInterruptedRound(chatId, pendingImageIds, pendingGenFiles, layers, isToolSent);
     } finally {
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
       if (flushTimer) clearTimeout(flushTimer);
       // [T-0031 批三] 异常路径不经过 quiesce（只有正常收尾才调它清这三个）——外层 catch 渲染完
       // 错误卡后，若还有 ≤1.8s 内挂着的 text/think/tool 节流定时器，会在 handleText 返回后触发
