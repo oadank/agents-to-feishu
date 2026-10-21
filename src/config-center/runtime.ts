@@ -544,8 +544,17 @@ export interface WbShimTurnCredit { credit: number; requests: number; startT: nu
 
 const WB_SHIM_BASE = 'http://127.0.0.1:18796';
 
-/** 取「自 sinceTs 起最近一轮」的积分消耗。无数据/失败返回 null。 */
-export async function readWbShimTurnCredit(sinceTs: number): Promise<WbShimTurnCredit | null> {
+/**
+ * 取 bot 本轮（sinceTs 至今）的积分消耗。
+ * 🔴 不能取"最后一轮"——实测 openclaw 显示 0.47，那其实是同时段 dsh 会话的
+ * 两笔 deepseek(0.24+0.23) 混进了同一 turn：bot 只有 1 次 wb-step5(0 分)，
+ * 但切轮按 60s 间隔把它们并成了一轮。
+ * 所以这里按 **上游模型名过滤**：只统计属于本 bot 当前模型组的那些 id。
+ * @param sinceTs 本轮开始时刻（epoch ms）
+ * @param upstreamModel 该 bot 当前走的上游模型名（如 step-5-preview / glm-5.3-flash）；
+ *        给了就只算这个模型的 id，避免混进别的会话。
+ */
+export async function readWbShimTurnCredit(sinceTs: number, upstreamModel?: string): Promise<WbShimTurnCredit | null> {
   try {
     // [2026-10-21] key 只从环境读，不硬编码（仓库可能公开）。
     // 🔴 bot 的 LITELLM_API_KEY 是打 litellm(:4000) 的 sk-xxx，**过不了** :18796 鉴权（实测 401）；
@@ -554,7 +563,7 @@ export async function readWbShimTurnCredit(sinceTs: number): Promise<WbShimTurnC
     if (!key) return null;
     // 往前多看 30 秒：bot 收到消息到真正发出第一次模型请求有间隔
     const from = Math.max(0, sinceTs - 30_000);
-    const url = `${WB_SHIM_BASE}/v1/conv-ids?since=${from}&until=${Date.now() + 5_000}`;
+    const url = `${WB_SHIM_BASE}/v1/conv-ids?since=${from}&until=${Date.now() + 5_000}${upstreamModel ? `&model=${encodeURIComponent(upstreamModel)}` : ''}`;
     const resp = await fetch(url, {
       headers: { authorization: `Bearer ${key}` },
       signal: AbortSignal.timeout(6_000),
@@ -563,20 +572,53 @@ export async function readWbShimTurnCredit(sinceTs: number): Promise<WbShimTurnC
     const data: any = await resp.json().catch(() => null);
     const turns = Array.isArray(data?.turns) ? data.turns : [];
     if (turns.length === 0) return null;
-    // 本轮 = 最后一个 turn（按 startT 升序，服务端已排好）
-    const t = turns[turns.length - 1];
-    const credit = Number(t?.credit) || 0;
-    const ids = Array.isArray(t?.ids) ? t.ids : [];
+    // 取时间上覆盖本轮的那些 turn（可能与别的流量合并，靠 model 过滤后才是自己的）
+    const mine = turns.filter((t: any) => (Number(t?.endT) || 0) >= from);
+    if (mine.length === 0) return null;
+    let credit = 0;
+    let requests = 0;
+    let startT = Number.MAX_SAFE_INTEGER;
+    let endT = 0;
+    for (const t of mine) {
+      const ids = Array.isArray(t?.ids) ? t.ids : [];
+      credit += Number(t?.credit) || 0;
+      requests += ids.length;
+      startT = Math.min(startT, Number(t?.startT) || startT);
+      endT = Math.max(endT, Number(t?.endT) || 0);
+    }
     return {
       credit: Math.round(credit * 100) / 100,
-      requests: ids.length,
-      startT: Number(t?.startT) || 0,
-      endT: Number(t?.endT) || 0,
+      requests,
+      startT: startT === Number.MAX_SAFE_INTEGER ? 0 : startT,
+      endT,
     };
   } catch (e) {
     console.warn('[runtime] readWbShimTurnCredit failed:', e instanceof Error ? e.message : e);
     return null;
   }
+}
+
+/**
+ * 组名 → 上游模型名（如 wb-step5 → step-5-preview）。
+ * 给积分归属用：只统计该 bot 自己那个模型的记录，避免把同时段别的会话算进来。
+ */
+export async function resolveUpstreamModel(modelGroup: string, litellmBaseURL: string): Promise<string | null> {
+  try {
+    const key = process.env.LITELLM_API_KEY || process.env.OPENAI_API_KEY || '';
+    const resp = await fetch(`${litellmBaseURL.replace(/\/+$/, '')}/model/info`, {
+      headers: { authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!resp.ok) return null;
+    const data: any = await resp.json().catch(() => null);
+    for (const m of (data?.data ?? []) as Array<Record<string, unknown>>) {
+      if (m?.model_name !== modelGroup) continue;
+      const full = String((m?.litellm_params as Record<string, unknown>)?.model || '');
+      const name = full.replace(/^openai\//, '').replace(/^anthropic\//, '');
+      if (name) return name;
+    }
+  } catch { /* 拉不到不显示 */ }
+  return null;
 }
 
 /** 该模型组是否走 wb-shim（决定要不要显示积分消耗）。 */

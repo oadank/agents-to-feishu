@@ -42,7 +42,7 @@ import {
   type StreamViews,
   type TurnLayers,
 } from '../feishu/cards.js';
-import { readArkUsage, readGwBalance, readDeepSeekBalance, readArkUsageCached, readGwBalanceCached, readDeepSeekBalanceCached, readLitellmUpstreamView, readLitellmTurnUsage, readModelCreditsRate, readWbShimTurnCredit, usesWbShim } from '../config-center/runtime.js';
+import { readArkUsage, readGwBalance, readDeepSeekBalance, readArkUsageCached, readGwBalanceCached, readDeepSeekBalanceCached, readLitellmUpstreamView, readLitellmTurnUsage, readModelCreditsRate, readWbShimTurnCredit, usesWbShim, resolveUpstreamModel } from '../config-center/runtime.js';
 import { recordStats } from './stats.js';
 
 // 状态行固定全局显示项（管所有 agent；缺省全显示）
@@ -1306,11 +1306,16 @@ export class MessageEngine {
         // 失败/不适用一律不加，绝不阻塞卡片。
         let credTail = '';
         try {
-          if (await usesWbShim(this.opts.modelGroup, this.opts.providerBaseUrl || '')) {
-            const c = await readWbShimTurnCredit(turnStartTs);
+          const baseUrl = this.opts.providerBaseUrl || '';
+          if (await usesWbShim(this.opts.modelGroup, baseUrl)) {
+            // [2026-10-21 修] 必须带上本 bot 的上游模型名：实测 openclaw 只跑了 1 次
+            // wb-step5(0 分)，却显示出 0.47 —— 那是同时段 dsh 会话的两笔 deepseek
+            // (0.24+0.23) 被当成同一轮了。按模型过滤后只剩自己的。
+            const upModel = await resolveUpstreamModel(this.opts.modelGroup, baseUrl);
+            const c = await readWbShimTurnCredit(turnStartTs, upModel || undefined);
             if (c && c.credit > 0) {
               credTail = ` · ⚡${c.credit.toFixed(2)} 积分`;
-              console.log(`[engine][wb-credit] model=${this.opts.modelGroup} credit=${c.credit} requests=${c.requests}`);
+              console.log(`[engine][wb-credit] model=${this.opts.modelGroup} upstream=${upModel || '-'} credit=${c.credit} requests=${c.requests}`);
             }
           }
         } catch { /* 积分显示失败不影响交付 */ }
