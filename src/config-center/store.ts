@@ -405,7 +405,7 @@ export const DEFAULT_MCPS: McpDef[] = [
   },
   {
     id: 'comfy', displayName: 'ComfyUI 生图（list_templates/generate_image/reverse_prompt）', transport: 'streamable-http',
-    serverName: 'comfy-mcp', url: 'http://127.0.0.1:13600/mcp/comfy',
+    serverName: 'comfy-mcp', url: 'https://127.0.0.1:13600/mcp/comfy',
     failOnStartupError: false, toolCallTimeoutMs: 600000, external: true,
   },
 ];
