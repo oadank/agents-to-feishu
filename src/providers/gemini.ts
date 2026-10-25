@@ -270,10 +270,42 @@ export class GeminiProvider implements RuntimeProvider {
       if (head) { queue.push({ type: 'thinking', text: head }); thinkForwarded += head.length; poke(); }
       if (thinkForwarded >= THINK_STREAM_HEAD) thinkFrozen = true;
     };
+    // [2026-10-17 修复] 上游 gemini 把 thought 拆成极碎 chunk（每 chunk 一两个词）+ chunk 边界自带单 \n，
+    // 原样转发满屏碎行（老大 2026-10-17 定性为 bug，以前没事=上游行为变了，改不了上游只能桥侧合并）。
+    // 合并规则：单 \n = chunk 边界（中英判断接合方式），\n\n = 模型真段落（保留）。
+    const isCJK = (ch: string): boolean => /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(ch);
+    let thinkPrevTail = '';   // 已输出文本尾字符（跨 chunk 记忆接合方式）
+    let thinkPendNL = false;  // 上一条 delta 以单个 \n 结尾（chunk 边界未决，等下一条来接）
+    const mergeChunks = (s: string): string => {
+      if (s.length === 0) return s;
+      let tail = false;
+      if (s.endsWith('\n') && !s.endsWith('\n\n')) { s = s.slice(0, -1); tail = true; } // 吞尾部悬空 \n
+      if (thinkPendNL && s.length > 0) {
+        // 跨 chunk 拼接：两边都中文=直连，否则补空格防英文粘连
+        s = (isCJK(thinkPrevTail) && isCJK(s[0]) ? '' : ' ') + s;
+        thinkPendNL = false;
+      }
+      // 条内单 \n 合并（\n\n 已被负向前瞻排除 = 真段落保留）
+      s = s.replace(/([^\n])\n(?!\n)/g, (_m, prev: string, off: number, str: string) => {
+        const next = str[off + prev.length + 1];
+        return isCJK(prev) && next && isCJK(next) ? prev : `${prev} `;
+      });
+      // [2026-10-17] 空格规整：上游 chunk 边界自带空格 + **** 清洗空格 + 合并空格会叠罗汉
+      // （实测"用户  问"三空格）。连续空格压成一个；中文之间的空格直接去掉（正常中文排版无空格）。
+      s = s.replace(/ {2,}/g, ' ');
+      s = s.replace(/([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]) (?=[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])/g, '$1');
+      if (tail) thinkPendNL = true;
+      if (s.length > 0) thinkPrevTail = s[s.length - 1];
+      return s;
+    };
     const pushThinking = (delta: string): void => {
-      thinkFull += delta;
+      // [2026-10-17 修复] gemini-cli 上游把 thought 拆成多 chunk，拼接时在每段边界插入 `****` 分隔标记
+      // （实测：597 字 thinking 含 168 个 *，全是连续 ****，飞书卡片原样渲染即满屏 ****）。
+      // 连续 ≥4 个 * 不可能是合法 markdown（粗体 ** 成对、粗斜体 *** 仅 3 连），安全替换为空格防粘连。
+      const merged = mergeChunks(delta.replace(/\*{4,}/g, ' '));
+      thinkFull += merged;
       if (thinkFrozen) return;
-      thinkBuf += delta;
+      thinkBuf += merged;
       if (thinkMergeTimer) return;
       thinkMergeTimer = setTimeout(flushThink, THINK_MERGE_MS);
     };
@@ -473,6 +505,11 @@ export class GeminiProvider implements RuntimeProvider {
         settleErr = `Gemini prompt 失败: ${msg}`;
       }
     } finally {
+      // [DIAG 2026-10-17 临时] 验证碎行合并效果——确认后删
+      if (thinkFull) {
+        const nl = (thinkFull.match(/\n/g) || []).length;
+        rtLog(`[gemini][DIAG] merged thinkFull len=${thinkFull.length} newlines=${nl} head=${JSON.stringify(thinkFull.slice(0, 150))}`);
+      }
       // 先刷出未合并的思考增量，再补发真实思考尾部（冻结后隐含正文继续，终卡显示尾部保真不闪）
       flushThinkingSync();
       if (thinkFull.length > thinkForwarded + 120) {
