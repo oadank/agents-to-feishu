@@ -473,6 +473,13 @@ export class OpencodeProvider implements RuntimeProvider {
     let resolveSettled: () => void = () => {};
     const settledP = new Promise<void>((r) => { resolveSettled = r; });
     let lastOutput = Date.now();
+    // [2026-10-17 修复] 首包阈值对齐 gemini/hermes：opencode 引擎遇上游 429 时把错误咽在自己 log 里、
+    // 既不发 ACP 事件也不回 prompt 响应（实测 zen 限流 prompt 后 4 秒即失败，桥却干等 1200s watchdog）。
+    // 首包 60s 零回包 = 真无响应（长任务必有回包），当场定性，不再一刀切等 20 分钟。
+    const promptStartedAt = Date.now();
+    let firstOutputAt: number | null = null;
+    const STALL_FIRST_MS = Math.min(
+      Math.max(parseInt(process.env.CTI_OPENCODE_STALL_FIRST_MS || '60000', 10), 1000), 600_000);
 
     let wakeup: () => void = () => {};
     let wakeupP: Promise<void> = Promise.resolve();
@@ -488,6 +495,7 @@ export class OpencodeProvider implements RuntimeProvider {
       sessionId: session.sessionId,
       onUpdate: (msg) => {
         lastOutput = Date.now();
+        if (firstOutputAt === null) firstOutputAt = Date.now();
         const update = msg.params?.update;
         if (update?.sessionUpdate === 'usage_update') {
           // [T-0030 C 类] 原生用量 {used,size}：只做兜底告警数据源（result 已供 stats，不双记）
@@ -567,6 +575,17 @@ export class OpencodeProvider implements RuntimeProvider {
 
     const watchdog = setInterval(() => {
       if (settled) { clearInterval(watchdog); return; }
+      if (firstOutputAt === null) {
+        // [2026-10-17] 首包阈值：零回包即当场定性，不等整轮 1200s。
+        // 长任务必然有回包（💭/工具/正文任一都算），60s 什么都没到 = 引擎假死或上游静默失败。
+        if (Date.now() - promptStartedAt > STALL_FIRST_MS) {
+          clearInterval(watchdog);
+          const secs = Math.round((Date.now() - promptStartedAt) / 1000);
+          rtLog(`[opencode] first-packet stall promptId=${promptId} elapsed=${secs}s`);
+          promptHandler.onDone(`Opencode ${secs}s 零回包（首包未到，不是长任务被截断）：引擎可能假死或上游限流静默失败，本轮已中断。会话保留，下条消息自动重建，无需人工 /new`);
+        }
+        return;
+      }
       if (Date.now() - lastOutput > OpencodeProvider.PROMPT_TIMEOUT_MS) {
         clearInterval(watchdog);
         if (gotText) {
