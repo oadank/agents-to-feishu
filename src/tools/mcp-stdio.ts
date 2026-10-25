@@ -1,7 +1,7 @@
 /**
  * CTI 内置工具 stdio MCP server（2026-08-30 能力配齐第二阶段）
  *
- * 背景：claude（SDK 进程内）/ dsh（harness 插件）自带 look_image 等内置工具；
+ * 背景：claude（SDK 进程内）/ dsh（harness 插件）自带内置工具；
  * 其余 CLI（codex/gemini/opencode/reasonix/openclaw…）各自支持 MCP 配置，
  * 把同一份注册表用 stdio MCP 暴露给它们 —— 与 claude/dsh 同源同实现。
  *
@@ -9,7 +9,7 @@
  *   command = node.exe
  *   args    = [tsx/dist/cli.mjs, 本文件路径]
  *
- * 工具集：look_image / generate_image / reverse_prompt / transcribe
+ * 工具集：generate_image / reverse_prompt / transcribe
  * （send_voice 需要 chatId 桥接上下文，走桥接 wantsVoiceReply 自动通道，不在此暴露）
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -20,7 +20,7 @@ import { buildLarkTools } from './lark-tools.js';
 import { buildSkillTools } from './skills.js';
 
 // 技能读取件 skill_index/skill_read 与 look/gen 同批暴露（registry 生图看图路本身未改）
-const EXPOSE = new Set(['look_image', 'generate_image', 'reverse_prompt', 'list_templates', 'transcribe', 'skill_index', 'skill_read']);
+const EXPOSE = new Set(['generate_image', 'reverse_prompt', 'list_templates', 'transcribe', 'skill_index', 'skill_read']);
 
 const server = new McpServer({ name: 'cti-builtin', version: '1.0.0' });
 
