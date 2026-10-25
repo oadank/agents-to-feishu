@@ -25,21 +25,215 @@ export const STREAM_ELEMENT_ID = 'stream_content';
  * settings API 里的 streaming_mode 字段是假成功（code=0 但不生效），只可用于终态关闭 + summary。
  */
 export function buildStreamingCardSkeleton(dividerInfo?: DividerInfo): unknown {
+  // status 初值空串 = 卡片顶部不多出一行（心跳已迁底部状态栏）；实测空 content 建卡可接受
+  return buildStreamCard(
+    { status: '', tools: '', thinking: '', text: '', divider: '' },
+    dividerInfo,
+  );
+}
+
+// ── 流式多元素视图（T-0032 2026-10-02 老大令·治本）─────────────────────────
+// 实测结论（本机脚本 + 群里真实卡片，opencode 凭据）：
+//  · 2.0 骨架 cardkit.create 正常（旧注释里"建卡失败"是测试脚本用了 1.0 卡片：
+//    飞书报的 `body is nil` 指的是【卡片 JSON 缺 body 字段】，不是 HTTP body、不是权限）。
+//  · cardElement.content 多元素并行流式全部 code=0（状态/工具/思考/正文 各一个 element_id）。
+//  · 官方打字机语义 = 新内容以已推送内容为前缀才"末尾追加"，否则整块重画
+//    ⇒ 旧单元素 buildStreamMarkdown 每帧重排（💭 尾部 400 窗口 / 🔧 标题 执行中↔已完成 /
+//      移动的 --- 分隔线 / 工具行就地打 ✅）帧帧都不是前缀延续 ⇒ 老大看到的
+//      "打印一半又重新打印、反反复复"。分元素后每层各自只增，天然单调。
+//  · 单卡通货流式硬上限实测 ≈605s ⇒ code=200850 card streaming timeout；
+//    静默 480s 不会死（不是空闲超时），长任务一定会撞总时长上限。
+//  · settings(streaming=false) 或整卡 im PATCH 之后，cardElement.content 一律
+//    code=300309 streaming mode is closed，且 settings(true) **救不回来**；
+//    唯一有效的续命法 = cardkit card.update 传 config.streaming_mode:true 的整卡（实测之后推送恢复 code=0）。
+//  · 静默期"看不到在动"：短行元素允许原地重写（代价极小）⇒ 心跳计时有处可放。
+
+export const EL_STATUS = 'el_status';
+export const EL_TOOLS = 'el_tools';
+export const EL_THINK = 'el_think';
+// [T-0035 2026-10-03 老大令] 心跳从顶部状态元素挪到【底部状态栏】：顶部那行离正文太远，
+// 观察要来回滚。挪动的唯一前提是状态栏自己得有 element_id —— 旧写法是条静态 markdown（无 id），
+// 天生刷不动，所以现在给它开一条流式通道（同原地重写语义，只影响这一行，不碰正文前缀）。
+export const EL_DIVIDER = 'el_divider';
+
+/** 流式视图（各元素各自的内容；顺序固定 = 状态→工具→思考→正文→状态栏） */
+export interface StreamViews {
+  status: string;
+  tools: string;
+  thinking: string;
+  text: string;
+  /** 状态栏那一行（含流式期间的心跳尾巴）；无状态栏的 bot 为空串 = 该元素不存在 */
+  divider: string;
+}
+
+/** 单元素字符顶：超顶即冻结（宁可少显示，也不回收已推出去的前缀） */
+const STREAM_EL_CAP = 20000;
+const STREAM_THINK_CAP = 6000;
+const STREAM_TOOL_LINES = 60;
+
+/**
+ * 状态栏那一行的 markdown：`---` + 小字状态条；流式期间把心跳 tail 并进【同一行末尾】
+ * （老大 2026-10-03 令：秒数写在卡片顶部离正文太远，要看着费劲 —— 挪进状态栏才顺手）。
+ */
+export function dividerMarkdown(info: DividerInfo, tail: string): string {
+  // info.tail = 终卡要留的耗时（老大 2026-10-03 令：结果卡状态栏也别把秒数弄丢）
+  return `---\n${appendDividerTail(buildDividerText(info), tail || info.tail || '')}`;
+}
+
+/** 流式期间状态栏的【极简形态】：整行只剩一个秒数，路径/模型/余额一概不出现
+ *  （老大 2026-10-03 令：过程中那行太长，"应该只显示用多少秒"）。
+ *  终卡由 buildSimpleCard / dividerMarkdown 恢复完整字段 + 末尾总耗时。 */
+export function dividerSecondsOnlyMarkdown(tail: string): string {
+  return `---\n<font size="s">${tail}</font>`;
+}
+
+/** 状态行整体被 <font size="s">…</font> 包住 → 心跳塞进同一行；包不住就退化成下一行小字 */
+function appendDividerTail(base: string, tail: string): string {
+  if (!tail) return base;
+  if (base.endsWith('</font>')) return `${base.slice(0, -'</font>'.length)}｜${tail}</font>`;
+  return `${base}\n<font size="s">${tail}</font>`;
+}
+
+export function buildStreamElements(v: StreamViews, dividerInfo?: DividerInfo): Array<Record<string, unknown>> {
   const elements: Array<Record<string, unknown>> = [
-    { tag: 'markdown', content: '⏳ 正在处理…', element_id: STREAM_ELEMENT_ID },
+    { tag: 'markdown', element_id: EL_STATUS, content: v.status },
+    { tag: 'markdown', element_id: EL_TOOLS, content: v.tools },
+    { tag: 'markdown', element_id: EL_THINK, content: v.thinking },
+    { tag: 'markdown', element_id: STREAM_ELEMENT_ID, content: v.text },
   ];
-  if (dividerInfo) {
-    elements.push({ tag: 'markdown', content: `---\n${buildDividerText(dividerInfo)}` });
+  // 状态栏【必须带 element_id】才存在流式通道（心跳/余额才能中途刷进来）；
+  // 关了 showAgentDivider 的 bot 没有这行 → 不建元素，engine 侧也不会推它。
+  const divMd = v.divider || (dividerInfo ? dividerMarkdown(dividerInfo, '') : '');
+  if (divMd) {
+    elements.push({ tag: 'markdown', element_id: EL_DIVIDER, content: divMd });
   }
+  return elements;
+}
+
+/** 流式整卡：创建 & 通道续命共用（streaming_mode 必须 true） */
+export function buildStreamCard(v: StreamViews, dividerInfo?: DividerInfo): unknown {
   return {
     schema: '2.0',
-    config: {
-      wide_screen_mode: true,
-      update_multi: true,
-      streaming_mode: true,
-    },
-    body: { elements },
+    config: { wide_screen_mode: true, update_multi: true, streaming_mode: true },
+    body: { elements: buildStreamElements(v, dividerInfo) },
   };
+}
+
+/** 降级（无 CardKit 通道）时把四视图压成一段文本，走整卡 PATCH */
+export function flattenStream(v: StreamViews): string {
+  return [v.status, v.tools, v.thinking, v.text].filter((s) => s && s.trim()).join('\n\n---\n\n') || '⏳ 正在处理…';
+}
+
+/**
+ * 流式视图累积器：对外的唯一契约是"每层只增"。
+ * engine 在事件里直接喂增量（不再从 layers 反推），因此不受 layers 侧尾部窗口/打标改写影响。
+ */
+export class StreamView {
+  private v: StreamViews = { status: '', tools: '', thinking: '', text: '', divider: '' };
+  private toolsFrozen = false;
+  private thinkFrozen = false;
+  private dividerInfo?: DividerInfo;
+  private dividerTail = '';
+  /** true = 流式极简形态（状态栏只有秒数），此时基线/尾字写入一律靠后站 */
+  private dividerOnly = false;
+
+  constructor(dividerInfo?: DividerInfo) {
+    this.setDividerInfo(dividerInfo);
+  }
+
+  views(): StreamViews {
+    return { ...this.v };
+  }
+
+  /** 状态栏基线：余额/上下文/命中率是后台预取的，取到就更新（只影响状态栏这一行） */
+  setDividerInfo(info?: DividerInfo): void {
+    this.dividerInfo = info;
+    this.refreshDivider();
+  }
+
+  /** 心跳与阶段提示 → 写进【底部状态栏】，不再挂卡片顶部（老大 2026-10-03 令） */
+  setDividerTail(t: string): void {
+    if (this.dividerOnly) return; // 极简形态下不吃基线，只认 setDividerSeconds
+    this.dividerTail = t.slice(0, 160);
+    this.refreshDivider();
+  }
+
+  /** 流式期间状态栏【整行只留一个秒数】：路径/模型/余额一概不出现
+   *  （老大 2026-10-03 令：过程中那行太长，只要"盯着一串数字在不在跳"） */
+  setDividerSeconds(t: string): void {
+    if (!this.dividerInfo) return; // 关了 showAgentDivider 的 bot 没有这个元素，别去推
+    this.dividerOnly = true;
+    this.v.divider = dividerSecondsOnlyMarkdown(t.slice(0, 40));
+  }
+
+  /** 退出极简形态 → 恢复完整状态栏（终卡前调用） */
+  restoreDivider(): void {
+    this.dividerOnly = false;
+    this.dividerTail = '';
+    this.refreshDivider();
+  }
+
+  private refreshDivider(): void {
+    if (!this.dividerInfo) { this.v.divider = ''; return; }
+    if (this.dividerOnly) return; // 极简形态由 setDividerSeconds 自己维护
+    this.v.divider = dividerMarkdown(this.dividerInfo, this.dividerTail);
+  }
+
+  /** 顶部状态元素：心跳迁走后基本闲置（骨架初值为空串 ⇒ 顶部不再多出一行） */
+  setStatus(s: string): void {
+    this.v.status = s.slice(0, 200);
+  }
+
+  pushToolLine(line: string, capLines = STREAM_TOOL_LINES): void {
+    if (this.toolsFrozen) return;
+    if (!this.v.tools) this.v.tools = '🔧 工具执行';
+    if (this.v.tools.length >= STREAM_EL_CAP) { this.toolsFrozen = true; return; }
+    this.v.tools += `\n${line.slice(0, 160)}`;
+    if ((this.v.tools.match(/\n/g)?.length ?? 0) >= capLines) {
+      this.v.tools += '\n…（工具行过多，此处冻结，完整清单见终卡）';
+      this.toolsFrozen = true;
+    }
+  }
+
+  pushThinking(delta: string): void {
+    if (this.thinkFrozen || !delta) return;
+    if (!this.v.thinking) this.v.thinking = '> 💭 **思考中…**\n> ';
+    // delta 内每个换行都补 "> "，使整块保持 blockquote；已推字符绝不回收
+    const out = delta.replace(/\n/g, '\n> ');
+    const room = STREAM_THINK_CAP - this.v.thinking.length;
+    if (out.length > room) {
+      if (room > 0) this.v.thinking += out.slice(0, room);
+      this.v.thinking += '\n…（思考过长，此处折叠，完整见终卡）';
+      this.thinkFrozen = true;
+      return;
+    }
+    this.v.thinking += out;
+    if (this.v.thinking.length >= STREAM_EL_CAP) this.thinkFrozen = true;
+  }
+
+  /** 正文：layers.text 天然只增，这里只接受"以旧为前缀"的增量；被整体改写时按新增段落续写 */
+  pushText(full: string): void {
+    if (this.v.text.endsWith('…（正文过长已冻结）')) return;
+    if (full.startsWith(this.v.text)) {
+      const delta = full.slice(this.v.text.length);
+      if (!delta) return;
+      if (this.v.text.length + delta.length > STREAM_EL_CAP) {
+        const room = Math.max(0, STREAM_EL_CAP - this.v.text.length);
+        this.v.text += delta.slice(0, room) + '…（正文过长已冻结，完整见终卡/文件）';
+        return;
+      }
+      this.v.text += delta;
+      return;
+    }
+    // 罕见：provider 整体改写正文（失败轮补人话等）⇒ 不回收历史，另起一段续写
+    this.v.text += `\n\n${full}`;
+  }
+
+  /** 错误块：作为正文的追加段落贴上去（只增），绝不重排已推内容 */
+  pushError(message: string): void {
+    if (!message) return;
+    this.v.text += `\n\n${errorBlock(message)}`;
+  }
 }
 
 export interface DividerInfo {
@@ -59,16 +253,20 @@ export interface DividerInfo {
   contextLimit?: number;
   /** 余额视图（深求/gw 直连） */
   balance?: { currency: string; total: string } | null;
+  /** 消耗系数（wb-shim 模型目录的 credits_rate，如 "x0.08 credits"）——2026-10-14 老大令 */
+  creditsRate?: string | null;
   /** Ark 套餐配额（volc-ark） */
   usage?: Array<{ label: string; pct: number }> | null;
   /** 显示项开关（缺省=全部）：agent/model/provider/dir/session/cache/avg/context/balance/usage */
   fields?: string[];
+  /** 常驻尾字：终卡用它保留本轮总耗时（如 `⏳ 用时 41s`）。老大 2026-10-03 令：结果卡也别把秒数弄丢 */
+  tail?: string;
 }
 
 // 状态行图标（reasonix 风格，与 13600 概览页一致）
 const DIV_IC: Record<string, string> = {
   agent: '🤖', model: '⚙️', provider: '☁️', dir: '📁', session: '💬',
-  cache: '🎯', avg: '🟰', context: '📚', balance: '💰', usage: '⏱️',
+  cache: '🎯', avg: '🟰', context: '📚', balance: '💰', usage: '⏱️', rate: '🔢',
 };
 
 export function buildDividerText(info: DividerInfo): string {
@@ -86,6 +284,8 @@ export function buildDividerText(info: DividerInfo): string {
     const cur = info.balance.currency === 'CNY' ? '¥' : (info.balance.currency || '');
     const amt = Number(info.balance.total);
     const val = Number.isFinite(amt) ? amt.toFixed(2) : String(info.balance.total);
+    // CodeBuddy 官方积分（2026-10-23）：非货币单位走后缀更顺口（5348.28 积分），别拼成 ¥ 误导成钱
+    if (info.balance.currency === '积分') return `${val} 积分`;
     return `${cur}${val}`;
   };
   const usageStr = (): string | null =>
@@ -104,6 +304,7 @@ export function buildDividerText(info: DividerInfo): string {
     if (show('avg')) { const s = rateOrNA(info.cacheAvgRate); if (s) parts.push(`平均: ${s}`); }
     const u = usageStr(); if (show('usage') && u) parts.push(`Usage: ${u}`);
     const b = balanceStr(); if (show('balance') && b) parts.push(`Balance: ${b}`);
+    if (show('rate') && info.creditsRate) parts.push(`Rate: ${info.creditsRate}`);
   } else if (valueMode) {
     // 仅数值版：所有段的值都在（无图标无标签；dir/context 不放）
     if (show('agent') && info.agent) parts.push(info.agent);
@@ -114,6 +315,7 @@ export function buildDividerText(info: DividerInfo): string {
     if (show('avg')) { const s = rateOrNA(info.cacheAvgRate); if (s) parts.push(s); }
     const u = usageStr(); if (show('usage') && u) parts.push(`⏱️ ${u}`);
     const b = balanceStr(); if (show('balance') && b) parts.push(b);
+    if (show('rate') && info.creditsRate) parts.push(info.creditsRate);
   } else {
     // 图标版（默认/full，含旧 icon 值）：图标+数值
     const push = (f: string, icon: string, txt: string | null | undefined): void => {
@@ -135,6 +337,7 @@ export function buildDividerText(info: DividerInfo): string {
     }
     push('usage', DIV_IC.usage, usageStr());
     push('balance', DIV_IC.balance, balanceStr());
+    push('rate', DIV_IC.rate, info.creditsRate);
   }
   const text = parts.join(textMode || valueMode ? ' | ' : '｜');
   if (text.length === 0) return 'Agent: N/A';
@@ -146,7 +349,7 @@ export function buildDividerText(info: DividerInfo): string {
 export function buildSimpleCard(text: string, dividerInfo?: DividerInfo): unknown {
   const elements: Array<Record<string, unknown>> = [{ tag: 'markdown', content: text }];
   if (dividerInfo) {
-    elements.push({ tag: 'markdown', content: `---\n${buildDividerText(dividerInfo)}` });
+    elements.push({ tag: 'markdown', content: dividerMarkdown(dividerInfo, '') });
   }
   return {
     schema: '2.0',
@@ -339,7 +542,15 @@ export function buildFinalMarkdown(layers: TurnLayers): string {
   parts.push(layers.text.trim() || (layers.toolLines.length > 0
     ? `（模型执行了 ${layers.toolLines.length} 次工具调用但未写出正文总结 —— 可回一句「总结一下」或「继续」催收）`
     : '（空回复）'));
-  if (layers.error) parts.push(errorBlock(layers.error));
+  if (layers.error) {
+    // [2026-10-17 降噪] codex CLI 在流式内容已完整收到、仅收尾信号（response.completed）丢失时
+    // 也会报 "stream disconnected before completion..."（MidStream 物理断连，litellm 无法兜底）。
+    // 此时正文完整、引擎没卡死，报错纯属噪声 → 有正文/工具产出就吞掉不上卡片；
+    // 无正文（真断流/卡死）仍照常显示 —— 卡死排障线索不丢（老大 2026-10-17 拍板口径）。
+    const isMidStreamNoise = /stream disconnected before completion|stream closed before response\.completed/.test(layers.error);
+    const hasBody = Boolean(layers.text.trim()) || layers.toolLines.length > 0;
+    if (!(isMidStreamNoise && hasBody)) parts.push(errorBlock(layers.error));
+  }
   let combined = parts[0];
   for (let i = 1; i < parts.length; i++) {
     combined += '\n\n---\n\n' + parts[i];
