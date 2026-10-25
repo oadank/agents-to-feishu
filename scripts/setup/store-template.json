@@ -173,7 +173,7 @@
       "displayName": "ComfyUI 生图（list_templates/generate_image/reverse_prompt）",
       "transport": "streamable-http",
       "serverName": "comfy-mcp",
-      "url": "http://100.108.133.82:13600/mcp/comfy",
+      "url": "https://lecoo.tailb5f10f.ts.net:13600/mcp/comfy",
       "failOnStartupError": false,
       "toolCallTimeoutMs": 600000,
       "external": true

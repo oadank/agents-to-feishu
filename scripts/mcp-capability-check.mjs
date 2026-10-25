@@ -151,7 +151,7 @@ async function resolveBotChatIds() {
   try {
     const r = await run('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
-      "(Invoke-RestMethod -Uri 'http://127.0.0.1:13600/api/agents' -TimeoutSec 10) | ForEach-Object { $_.id }",
+      "[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; (Invoke-RestMethod -Uri 'https://127.0.0.1:13600/api/agents' -TimeoutSec 10) | ForEach-Object { $_.id }",
     ], 15000);
     roster = (r.out || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   } catch {

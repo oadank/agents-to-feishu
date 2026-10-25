@@ -28,7 +28,7 @@ config-store.json（唯一真相源：providers 池 / mcps 池 / agents 分配�
 
 1. 安装依赖：`npm install`
 2. 启动配置中心（首次运行自动生成 `~/.agents-to-feishu/config-store.json` 骨架）：
-   `npm run config-center`，浏览器打开 `http://localhost:13600`
+   `npm run config-center`，浏览器打开 `https://localhost:13600`
 3. 网页「总配置」：建一个模型 Provider（填你的 baseURL + API Key + 模型，如 `https://ark.cn-beijing.volces.com/api/plan/v3` + 火山方舟 key；或任何 OpenAI 兼容网关）
 4. 网页「Agent 分配置」：新建 Agent——选运行时（自动探测到的 CLI，未检测到的会给出安装命令）、
    飞书应用凭证（App ID/Secret，[创建应用指南](https://open.feishu.cn/document/home/introduction-to-custom-app-creation/overview)）、
@@ -50,7 +50,7 @@ config-store.json（唯一真相源：providers 池 / mcps 池 / agents 分配�
 - 配置存储文件：`~/.agents-to-feishu/config-store.json`（未生成则首次创建默认骨架）
 - 凭证：每个 provider 的水平，可在对应 `apiKeyEnv` 的背后放
   `<home>/.agents-to-feishu/.credentials.yaml`（`KEY=value` 或 `KEY: value`）或直接在网页填。
-- 配置中心服务：端口默认 13600，网页 `http://<host>:13600`（本机长期运行可注册为 nssm 服务 `agentsconfig`）。
+- 配置中心服务：端口默认 13600，网页 `https://lecoo.tailb5f10f.ts.net:13600`（远程，tailscale serve 公信证书；本机 `https://localhost:13600`）（本机长期运行可注册为 nssm 服务 `agentsconfig`）。
 
 ## ZCode 运行时接入（2026-09-05）
 

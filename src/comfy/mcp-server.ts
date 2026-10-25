@@ -7,8 +7,9 @@
  *  - 这里复用官方 @modelcontextprotocol/sdk，保证与 dsh-mcp-client 的 StreamableHTTPClientTransport 完全兼容。
  *
  * 部署形态：
- *  - 不单独开端口，而是挂在配置中心（13600）同一个 http server 的 `/mcp/comfy` 路径，
- *    这样 Tailscale 访问 http://<本机IP>:13600/mcp/comfy 即可，无需额外进程/端口。
+ *  - 不单独开端口，而是挂在配置中心（13600）同一个 https server 的 `/mcp/comfy` 路径，
+ *    这样 Tailscale 访问 https://lecoo.tailb5f10f.ts.net:13600/mcp/comfy 即可，无需额外进程/端口
+ *    （2026-10-22 起走 tailscale serve 公信证书，裸 IP 直连会被 serve 的 SNI 门禁拒）。
  *  - 工具调用内部转发到 8090（COMFY_BASE_URL 可配），与 server.ts 的内建 /api/comfy/* 逻辑一致。
  *
  * 会话策略：

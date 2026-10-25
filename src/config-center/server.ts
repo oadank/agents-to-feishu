@@ -21,6 +21,7 @@
  */
 
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -610,8 +611,12 @@ export function createConfigServer(opts: ConfigServerOptions) {
     // 本服务绑定的地址。浏览器里 evil.com 把域名 rebind 到 127.0.0.1 再 fetch /api/store
     // 时 Host 是 evil.com → 403；curl / 直连 127.0.0.1 / Tailscale IP 不受影响
     // （老大 09-19 拍板过"怎么访问就怎么绑"，这里只挡浏览器侧的伪装 Host，不改绑定面）。
+    // 2026-10-22：走 tailscale serve 后 ts.net 域名也要放行 → CTI_CONFIG_EXTRA_HOSTS（逗号分隔，
+    // 仅放行自家域名，rebind 防护不变）。
     const hostName = String(req.headers.host || '').replace(/:\d+$/, '').toLowerCase();
-    if (!hostName || !(hostName === '127.0.0.1' || hostName === 'localhost' || hostName === '::1' || hosts.some((h) => h.toLowerCase() === hostName))) {
+    const extraHosts = (process.env.CTI_CONFIG_EXTRA_HOSTS || '')
+      .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    if (!hostName || !(hostName === '127.0.0.1' || hostName === 'localhost' || hostName === '::1' || hosts.some((h) => h.toLowerCase() === hostName) || extraHosts.includes(hostName))) {
       res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ error: 'forbidden host' }));
       return;
@@ -2170,18 +2175,55 @@ export function createConfigServer(opts: ConfigServerOptions) {
     }
   };
 
+  // ── 可选 HTTPS：本地受信任证书（mkcert 签发）。证书缺失/读取失败则仅 http，向后兼容 ──
+  function loadTls(): { cert: Buffer; key: Buffer } | null {
+    const certPath = process.env.CONFIG_CENTER_TLS_CERT || 'C:\\D\\opt\\certs\\localhost\\cert.pem';
+    const keyPath = process.env.CONFIG_CENTER_TLS_KEY || 'C:\\D\\opt\\certs\\localhost\\key.pem';
+    if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
+      log(`HTTPS 未启用：缺少证书（${certPath}）`);
+      return null;
+    }
+    try {
+      return { cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) };
+    } catch (e) {
+      log(`HTTPS 证书读取失败，仅 http 启动：${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+  const tls = loadTls();
+  const httpsServers = new Map<string, https.Server>();
+  if (tls) {
+    for (const h of hosts) {
+      httpsServers.set(h, https.createServer({ cert: tls.cert, key: tls.key }, requestHandler));
+    }
+    log(`HTTPS 已就绪（端口 ${port}，证书 ${process.env.CONFIG_CENTER_TLS_CERT || 'C:\\D\\opt\\certs\\localhost\\cert.pem'}）`);
+  }
+
   const server = http.createServer(requestHandler);
 
   return {
     server,
     listen(): Promise<void> {
-      // 多地址绑定：每个 host 一个 server 实例，共享同一个请求处理器
+      // 2026-10-22 老大拍板：13600 直接就是 https（单栈），不再额外开端口，避免两套地址。
+      // 有证书 → 只起 https；没证书 → 回落 http（别人机器没装证书也能跑，向后兼容）。
+      if (tls) {
+        const tlsListeners = hosts.map((h) => new Promise<void>((resolve, reject) => {
+          const srv = httpsServers.get(h);
+          if (!srv) return reject(new Error(`https server missing for ${h}`));
+          srv.once('error', reject);
+          srv.listen(port, h, () => {
+            log(`配置中心已启动 https://${h}:${port}`);
+            resolve();
+          });
+        }));
+        return Promise.all(tlsListeners).then(() => undefined);
+      }
       const listeners = hosts.map((h) => {
         const srv = h === hosts[0] ? server : http.createServer(requestHandler);
         return new Promise<void>((resolve, reject) => {
           srv.once('error', reject);
           srv.listen(port, h, () => {
-            log(`配置中心已启动 http://${h}:${port}`);
+            log(`配置中心已启动 http://${h}:${port}（未找到证书，回落 http）`);
             resolve();
           });
         });
@@ -2196,6 +2238,21 @@ export function createConfigServer(opts: ConfigServerOptions) {
     bindHost(host: string): Promise<void> {
       if (hosts.includes(host)) return Promise.resolve();
       hosts.push(host);
+      if (tls) {
+        const hs = https.createServer({ cert: tls.cert, key: tls.key }, requestHandler);
+        httpsServers.set(host, hs);
+        return new Promise<void>((resolve, reject) => {
+          hs.once('error', (e) => {
+            hosts.splice(hosts.indexOf(host), 1);
+            httpsServers.delete(host);
+            reject(e);
+          });
+          hs.listen(port, host, () => {
+            log(`配置中心追加绑定 https://${host}:${port}（网卡延迟就绪，补绑）`);
+            resolve();
+          });
+        });
+      }
       const srv = http.createServer(requestHandler);
       return new Promise<void>((resolve, reject) => {
         srv.once('error', (e) => { hosts.splice(hosts.indexOf(host), 1); reject(e); });
@@ -2210,7 +2267,14 @@ export function createConfigServer(opts: ConfigServerOptions) {
       return [...hosts];
     },
     close(): Promise<void> {
-      return new Promise((resolve) => server.close(() => resolve()));
+      const servers: http.Server[] = [server, ...(Array.from(httpsServers.values()) as http.Server[])];
+      return new Promise((resolve) => {
+        if (servers.length === 0) return resolve();
+        let remaining = servers.length;
+        for (const s of servers) {
+          s.close(() => { if (--remaining === 0) resolve(); });
+        }
+      });
     },
     applyAgent,
   };

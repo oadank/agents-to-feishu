@@ -279,6 +279,6 @@ Write-Host @"
 
 剩一处脚本**故意**不自动做（影响 13 家在跑的服务，得有人盯着）：
   飞书 bot：入白名单 + 逐家 apply（apply 不重启服务，实测无扰动）
-    Invoke-RestMethod -Method Post http://127.0.0.1:13600/api/skills/toggle -ContentType 'application/json' -Body '{"name":"$Name","enabled":true}'
+    Invoke-RestMethod -Method Post https://127.0.0.1:13600/api/skills/toggle -ContentType 'application/json' -Body '{"name":"$Name","enabled":true}'   # https：PS5.1 先用 [Net.ServicePointManager]::ServerCertificateValidationCallback={$true}
     再对每家 POST /api/agents/<id>/apply
 "@ -ForegroundColor Yellow

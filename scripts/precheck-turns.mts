@@ -27,6 +27,10 @@ import path from 'node:path';
 import { judgeTurns, readTurnFile, turnLogFile, type TurnVerdict } from '../src/bridge/turn-ledger.js';
 import { windows } from '../src/bridge/windows.js';
 
+// 配置中心 2026-10-22 起走 https（mkcert 本地证书）。本脚本是 Node fetch，
+// 默认不信任 mkcert 根 ⇒ 这里只对本进程关闭证书校验（仅访问 127.0.0.1 本地回环）。
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 type State = 'idle' | 'running' | 'likely-busy' | 'stale-leftover' | 'unknown';
 interface Row {
   bot: string;
@@ -73,7 +77,7 @@ async function listBots(): Promise<string[]> {
   const prefixes = prefixesFromLogs();
   let ids: string[] = [];
   try {
-    const res = await fetch('http://127.0.0.1:13600/api/agents', { signal: AbortSignal.timeout(5000) });
+    const res = await fetch('https://127.0.0.1:13600/api/agents', { signal: AbortSignal.timeout(5000) });
     const j = (await res.json()) as Array<{ id?: string }>;
     if (Array.isArray(j)) ids = j.map((a) => a.id).filter((n): n is string => !!n);
   } catch { /* 走窄兜底 */ }
