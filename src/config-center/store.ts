@@ -27,13 +27,23 @@ import path from 'node:path';
 export interface ProviderDef {
   id: string; // 唯一 id，如 'volc-ark' / 'gw' / 'litellm' / 'deepseek-official'
   displayName: string;
-  /** DSH llm 插件 id：llm-pi-ai（openai 兼容直连）或 llm-deepseek（DeepSeek 官方协议） */
-  plugin: 'llm-pi-ai' | 'llm-deepseek';
+  /**
+   * DSH llm 插件 id：llm-pi-ai（openai 兼容直连）/ llm-deepseek（DeepSeek 官方协议）
+   * / llm-workbuddy（T-0039 2026-10-08：provider 路由由 profile bundle `dsh-workbuddy-connect`
+   * 自行注册进 llm seam，桥侧【不生成任何 llm-* 段】，也无 baseURL/ apiKeyEnv 可填）。
+   */
+  plugin: 'llm-pi-ai' | 'llm-deepseek' | 'llm-workbuddy';
   /** api 类型：llm-pi-ai 支持 openai-completions / openai-responses / anthropic-messages；llm-deepseek 固定官方协议 */
   api?: 'openai-completions' | 'openai-responses' | 'anthropic-messages';
   baseURL?: string;
   /** 用哪个环境变量名存 key（如 ARK_API_KEY / GATEWAY_API_KEY / OPENAI_API_KEY） */
   apiKeyEnv: string;
+  /**
+   * 官方账号认证模式（2026-10-23）：provider 走引擎自带官方登录态（如 CodeBuddy 官方完整版
+   * 的磁盘持久化登录），不注 apiKeyEnv、模型不经本机网关。render 据此下发
+   * CTI_BOT_<ID>_OFFICIAL_AUTH=1，provider 侧切换认证/模型分支。
+   */
+  officialAuth?: boolean;
   /** 可选模型列表 */
   models: ModelDef[];
 }

@@ -15,6 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash, createHmac } from 'node:crypto';
 import { findModel } from './store.js';
+import { readOfficialBalance } from './official-credits.js';
 import type { ConfigStore, AgentDef, ProviderDef } from './store.js';
 
 /** 一个 agent 的实时状态视图 */
@@ -339,6 +340,9 @@ export async function readBalanceView(provider: ProviderDef | undefined): Promis
   if (isArkProvider) return { balance: null, usage: await readArkUsage() };
   if (isGwGateway) return { balance: await readGwBalance(), usage: null };
   if (provider.id === 'deepseek-official') return { balance: await readDeepSeekBalance(), usage: null };
+  // CodeBuddy 官方账号积分（2026-10-23）：officialAuth=true 且无 baseURL，查官方 billing 接口
+  if (provider.id === 'codebuddy-official' || provider.officialAuth === true)
+    return { balance: await readOfficialBalance(), usage: null };
   return { balance: await readBalance(provider), usage: null };
 }
 

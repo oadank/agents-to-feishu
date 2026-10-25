@@ -265,6 +265,9 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_LARK_TOOLS=${(agent.feishuCaps && agent.feishuCaps.length ? agent.feishuCaps : ['list_chats', 'chat_history', 'send_text', 'send_image', 'create_doc', 'get_doc_text', 'bot_directory', 'send_post', 'send_as_user', 'chat_members']).join(',')}`);
   // 真实模型 ID + 网关 base_url（provider 端读这两个跑真实值，而非只读展示标签 MODEL_GROUP）
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_MODEL=${envVal(model?.id || agent.modelId)}`);
+  // 官方账号认证模式（2026-10-23）：provider.officialAuth=true → 引擎走官方登录态/官方模型路由，
+  // 不注 apiKeyEnv、不拼 custom-local:。键不出现 = 普通网关模式（切回 litellm 即还原）。
+  if (prov?.officialAuth) lines.push(`CTI_BOT_${agent.id.toUpperCase()}_OFFICIAL_AUTH=1`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_BASE_URL=${envVal(acpGatewayBaseUrl(agent.id) || prov?.baseURL || '')}`);
   // 真实 key 穿透（2026-09-11 从 zcode 专属升为全 runtime 统一）：
   // 按当前 provider 的 apiKeyEnv 从凭证层解析真实 key，写 CTI_BOT_<ID>_API_KEY。

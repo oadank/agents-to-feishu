@@ -1292,9 +1292,15 @@ export function createConfigServer(opts: ConfigServerOptions) {
         const prov: ProviderDef = {
           id: String(body.id || '').trim(),
           displayName: String(body.displayName || body.id || ''),
-          plugin: body.plugin === 'llm-deepseek' ? 'llm-deepseek' : 'llm-pi-ai',
+          // T-0039 2026-10-08：三值白名单原样透传。旧写法把非 llm-deepseek 一律强制成
+          // llm-pi-ai，导致「provider 由 profile bundle 自带路由」（WorkBuddy）无法表达，
+          // render 会给它错生成一段 llm-pi-ai.providers.<id>，与插件注册的同名路由打架。
+          plugin: (body.plugin === 'llm-deepseek' || body.plugin === 'llm-workbuddy')
+            ? body.plugin
+            : 'llm-pi-ai',
           baseURL: body.baseURL || undefined,
           apiKeyEnv: String(body.apiKeyEnv || ''),
+          officialAuth: body.officialAuth === true,
           api: body.api || 'openai-completions',
           models: Array.isArray(body.models) ? body.models : [],
         };

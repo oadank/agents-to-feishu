@@ -43,6 +43,7 @@ import {
   type TurnLayers,
 } from '../feishu/cards.js';
 import { readArkUsage, readGwBalance, readDeepSeekBalance, readArkUsageCached, readGwBalanceCached, readDeepSeekBalanceCached, readLitellmUpstreamView, readLitellmTurnUsage, readModelCreditsRate, readWbShimTurnCredit, usesWbShim, resolveUpstreamModel } from '../config-center/runtime.js';
+import { readOfficialBalance, readOfficialBalanceCached } from '../config-center/official-credits.js';
 import { recordStats } from './stats.js';
 
 // 状态行固定全局显示项（管所有 agent；缺省全显示）
@@ -306,16 +307,19 @@ export class MessageEngine {
 
   /**
    * 用量/余额类型：ark=火山方舟配额；gw=henry-gao 网关余额；deepseek=DeepSeek 官方余额；
-   * litellm=经 LiteLLM(:4000) 中转（按模型组解析真实上游后再分流）；none=不显示。
+   * litellm=经 LiteLLM(:4000) 中转（按模型组解析真实上游后再分流）；codebuddy-official=
+   * CodeBuddy 官方账号积分余额（官方 CLI + 官方登录态，2026-10-23）；none=不显示。
    * 按 provider baseURL 判类型（不硬编码 providerId），用户改 provider 名/id 也能正确匹配
    * （如 claude 从 GWAnth 切到 Ark，providerId 是自定义的 p1787900370627，但 baseURL 是 ark.cn-beijing.volces.com）。
    */
-  private usageKind(): 'ark' | 'gw' | 'deepseek' | 'litellm' | 'none' {
+  private usageKind(): 'ark' | 'gw' | 'deepseek' | 'litellm' | 'codebuddy-official' | 'none' {
     const pid = this.opts.providerId || '';
     const base = (this.opts.providerBaseUrl || '').toLowerCase();
     if (pid === 'volc-ark' || base.includes('volces') || base.includes('volcengine') || base.includes('ark.cn-beijing')) return 'ark';
     if (pid === 'deepseek-official') return 'deepseek';
     if (pid === 'gw' || pid === 'p1787900927926' || base.includes('henry-gao') || base.includes('gateway.henry-gao')) return 'gw';
+    // CodeBuddy 官方账号（2026-10-23）：provider officialAuth=true 且无 baseURL（官方登录态不经网关）
+    if (pid === 'codebuddy-official') return 'codebuddy-official';
     // LiteLLM 中转（2026-08-31）：端口 4000 或 id 含 litellm；解析真实上游延迟到预取阶段
     if (pid.includes('litellm') || /:4000(\/|$)/.test(base)) return 'litellm';
     return 'none';
@@ -771,6 +775,7 @@ export class MessageEngine {
               case 'ark': await readArkUsage(); break;
               case 'gw': await readGwBalance(); break;
               case 'deepseek': await readDeepSeekBalance(); break;
+              case 'codebuddy-official': await readOfficialBalance(); break;
               case 'litellm': {
                 // 解析模型组真实上游（GwV4F→GW / ArkV4F→Ark），并预取对应余额/配额进缓存
                 const v = await readLitellmUpstreamView(this.opts.modelGroup, this.opts.providerBaseUrl || '');
@@ -799,7 +804,8 @@ export class MessageEngine {
         ? up.periods.map((p) => ({ label: LABEL[p.label] || p.label, pct: p.quota > 0 ? Math.round((p.used / p.quota) * 100) : 0 }))
         : null;
       const balance = effKind === 'gw' ? readGwBalanceCached()
-        : effKind === 'deepseek' ? readDeepSeekBalanceCached() : null;
+        : effKind === 'deepseek' ? readDeepSeekBalanceCached()
+        : effKind === 'codebuddy-official' ? readOfficialBalanceCached() : null;
       return {
         agent: this.opts.botName,
         dividerMode: (process.env[`CTI_BOT_${(process.env.CTI_BOT || '').toUpperCase()}_DIVIDER_MODE`] as 'full' | 'icon' | 'text' | 'value') || 'full',
