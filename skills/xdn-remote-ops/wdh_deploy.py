@@ -27,8 +27,10 @@ import paramiko
 HOST = sys.argv[1]
 USER = os.environ.get("XDN_USER", "")
 PASS = os.environ.get("XDN_PASS", "")
+KEY = os.environ.get("XDN_KEY", "")
+HOME = os.environ.get("XDN_HOME", "oadan")
 LOCAL_EXE = r"C:\D\opt\win-desktop-helper\shot-service.exe"
-APPDIR = r"C:\Users\oadan\AppData\Local\Programs\win-desktop-helper"
+APPDIR = r"C:\Users\%s\AppData\Local\Programs\win-desktop-helper" % HOME
 REMOTE_EXE = APPDIR + r"\shot-service.exe"
 REMOTE_CFG = APPDIR + r"\shot-service.json"
 REMOTE_LOG = APPDIR + r"\shot-service.log"
@@ -65,8 +67,13 @@ def main():
     key = agnes_key()
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(HOST, 22, username=USER, password=PASS, timeout=20,
-                allow_agent=False, look_for_keys=False)
+    if KEY:
+        pkey = paramiko.Ed25519Key.from_private_key_file(KEY)
+        ssh.connect(HOST, 22, username=USER, pkey=pkey, timeout=20,
+                    allow_agent=False, look_for_keys=False)
+    else:
+        ssh.connect(HOST, 22, username=USER, password=PASS, timeout=20,
+                    allow_agent=False, look_for_keys=False)
 
     print("=== 1. 现状 (%s) ===" % HOST)
     print(run(ssh, 'tasklist /FI "IMAGENAME eq shot-service.exe" /NH', "gbk"))
@@ -77,6 +84,8 @@ def main():
     print("--- 改前配置(已脱敏) ---\n%s" % redact(raw))
 
     print("=== 2. 停进程 ===")
+    # 先放更新锁: 让看门狗在覆盖期间不拉起(避免占用 exe 挡覆盖 / 拉起旧版本)
+    print(run(ssh, 'echo. > "%s\\updating.lock"' % APPDIR.replace("/", "\\"), "gbk"))
     print(run(ssh, "taskkill /F /IM shot-service.exe", "gbk"))
     print(run(ssh, "taskkill /F /IM shot-watcher.exe", "gbk"))
     time.sleep(1.5)
@@ -119,6 +128,8 @@ def main():
     #   顺带清理废弃任务，免得日后被误 Run 造成双实例打架（单实例互斥会让进程反复消失）。
     print(run(ssh, 'schtasks /Delete /TN "dsh-shot-helper" /F', "gbk"))
     print(run(ssh, 'schtasks /Run /TN "WinDesktopHelper"', "gbk"))
+    # 覆盖完成、新实例已在拉起流程中 -> 删更新锁, 交还看门狗自愈权
+    print(run(ssh, 'del /f /q "%s\\updating.lock" 2>nul' % APPDIR.replace("/", "\\"), "gbk"))
 
     def instances():
         txt = run(ssh, 'powershell -NoProfile -Command "Get-Process shot-service -ErrorAction SilentlyContinue | '

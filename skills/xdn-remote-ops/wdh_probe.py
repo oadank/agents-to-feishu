@@ -48,9 +48,14 @@ def main():
     host = sys.argv[1]
     user = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("XDN_USER", "")
     pw = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("XDN_PASS", "")
+    key = os.environ.get("XDN_KEY", "")
     port = int(sys.argv[4]) if len(sys.argv) > 4 else 22
     c = paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    c.connect(host, port=port, username=user, password=pw, timeout=20)
+    if key:
+        pkey = paramiko.Ed25519Key.from_private_key_file(key)
+        c.connect(host, port=port, username=user, pkey=pkey, timeout=20)
+    else:
+        c.connect(host, port=port, username=user, password=pw, timeout=20)
     print(run(c, PROBE))
     c.close()
 

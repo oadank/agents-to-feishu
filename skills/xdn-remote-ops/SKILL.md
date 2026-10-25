@@ -46,6 +46,21 @@ export XDN_HOST XDN_USER XDN_PASS XDN_PORT
 
 自定义命令：`python probe.py "nvidia-smi" "ollama ps"`
 
+## 二·五、dsh 配置审计 / 关键词扫描 / wb-shim 地址修复（2026-10-23 加）
+
+同样先 `eval` 上面那行凭据，再按需：
+
+```bash
+python xdn_dsh_audit.py        # 一次查清：root+各 profile 的 transport/baseURL、mcp-servers.json、models.json、残留旧地址
+python xdn_dsh_dump.py         # dump 原件（含 profiles/*/package.json 与插件副本是否 junction）—— 排查"到底写了什么"用
+python xdn_grep.py 18796       # 正则扫 ~/.dsh ~/.workbuddy C:\D\opt D:\opt（跳过 node_modules/.git/logs，单文件<2MB，最多 40 条）
+python xdn_fix_balance.py      # 预览：把 balance.js 里旧明文 100.108.133.82:18796 换成 ts.net（加 --apply 才真改，自动 .bak-<ts>）
+python xdn_verify_shim.py      # 验证 token 文件 / ts.net 连通（401=通但没凭据）/ 各 profile 副本新旧地址计数
+```
+
+⚠️ **XDN 的 dsh-input-tools 是实体拷贝不是 junction**（`profiles/*/package.json` 里 `file:D:/opt/dsh-input-tools`），
+改 `D:\opt\dsh-input-tools` 源码**必须同步** `profiles/*/node_modules/@oadank/dsh-input-tools` 里的副本，`xdn_fix_balance.py` 两个位置一起改。
+
 ## 三、⚠️ 关键坑
 
 1. **WDDM 模式下 `nvidia-smi` 的每进程显存全是 `N/A`**（本机就是 WDDM）。要定量必须换 Windows 性能计数器：
