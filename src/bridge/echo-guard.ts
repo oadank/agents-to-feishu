@@ -9,6 +9,9 @@
  *   1) 没有 `(from-bot:X)` 尾注 ⇒ 判定为老大本人/人类 ⇒ **永不吞**（人类消息永远不拦，团队铁律）。
  *      bot 发的一律由 lark-tools 强制盖尾注（to 分支 + target_id 分支都盖，0920 后门盖戳票）。
  *   2) X === 本进程 CTI_BOT ⇒ 自己写给自己的门铃 ⇒ 吞（掐自环根）。
+ *      ⚠️ T-0034 修正：只吞「短句(≤40)」或「回执件（含（自动回执）/ [名字] 前缀）」。
+ *      长句正文即便带着被粘进消息里的尾注也一律放行（reason=self-addressed-long-body）——
+ *      2026-10-03 真人把卡片文字连尾注一起粘进提问，整条提问被当自环吞掉，用户端看 bot 像挂了。
  *   3) 正文剥掉标记后只是一句纯确认（≤30 字且命中 ACK 词表）⇒ 吞 —— 这就是互刷的原子单位。
  *   4) 同一内容在窗口内第二次出现（归一化指纹）⇒ 吞 —— 回执原路弹回、重复投递都落这条。
  *   其余（带任务号、带结论、有一定长度的真交付）⇒ 放行：**发起方必须收到结果**，宁放勿吞。
@@ -109,8 +112,20 @@ export function classifyEcho(input: EchoInput, w: Windows): EchoVerdict {
     if (seen) { seen.set(fp, now); prune(seen, w, now); }
     return PASS('human-no-trailer', base);
   }
-  // 2) 自己给自己（模型 to=自己，或回执原路弹回本进程）= 自环根，掐掉
+  // 2) 自己给自己（模型 to=自己，或回执原路弹回本进程）= 自环根，掐掉。
+  //    🔴 T-0034（2026-10-03 真人长消息被误杀）：本函数第 1 档的正则 `parseFromBot` 不要求尾注落在句尾，
+  //    老大把带 `(from-bot:opencode …)` 落款的卡片文字粘进自己的提问（"状态栏的那个文件路径…"），
+  //    整条真提问被当自环吞掉、引擎根本没被叫醒 —— 用户侧看我就像"挂了"。
+  //    修法与第 4 档同一条口径：**只有短句/回执件才允许吞**，长句一律放行；
+  //    宁可让 bot 多跑一次，也绝不静默吞掉真消息（吞任务的代价远大于重复）。
   if (fromBot === input.me) {
+    const selfBody = normalizeBody(input.text);
+    const isReceiptShape = input.text.includes('（自动回执）') || /^\s*\[[^\]\n]{1,24}\]/.test(input.text);
+    if (selfBody.length > 40 && !isReceiptShape) {
+      if (seen) { seen.set(fp, now); prune(seen, w, now); }
+      stats.pass++;
+      return PASS('self-addressed-long-body', base);
+    }
     return verdict(base, 'self-addressed', w, stats, 'enforce');
   }
   // 3) 纯点头（互刷风暴的原子单位）
