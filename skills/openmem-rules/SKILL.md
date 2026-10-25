@@ -13,6 +13,21 @@ description: openmem 记忆中枢使用规矩：闸门票制、查重、更新�
 - 要原始记忆片段/历史事件用 `mh_search`；要理解+综合用 `mh_ask`（慢，慎用）。
 - nssm 服务台账默认不返回，查服务启动参数用 `mh_service` 或 `mh_search(source="agent-matrix")`。
 
+## 生图素材：提示词库（先抽词再生图）
+
+- **生图任务先查提示词库**，别自己硬编 prompt：
+  - `mh_pr_random` → 随机抽一条完整人像/场景提示词（整段返回，直接可用）；可选 `{file:"sfw_portrait_v3"}` 限定词库。
+  - `mh_pr_search({query:"场景描述", kind:"wildcards"})` → 按语义定向搜（如"水池边美女""雪地黑大衣"），返回最贴的整段提示词。
+- 拿到词后自己加工（加人名触发词/风格/构图），再送生图（8090 `/generate` 或 generate_image 工具）。
+- 这些工具与经验记忆隔离：`mh_search` 搜不到词库内容，必须用 `mh_pr_*` 前缀工具。
+
+## 故障自救：MCP 报 "Session not found"（-32001）
+
+- 现象：`mh_*` 调用报 `Error POSTing to endpoint: ... Session not found`（code -32001）。
+- 根因：openmem（MCP :3466）重启过，本进程缓存的 Mcp-Session-Id 已失效；**streamable-http 的 session 是进程级缓存，新开对话不会重建连接**，自己重试多少次都没用。
+- 正确自救：**立即停手报告**「openmem 刚重启过，MCP session 失效，需要重启本服务重新握手」——**禁止退化去网页搜索/绕路硬干/拿 HTTP 直查凑合交差**（10-01 dsh-web 因此被老大点名）。
+- 预防铁律：**谁重启 openmem，谁负责通知重启依赖它的长驻进程**（dsh-web、12 bot 桥），否则全体 bot 的 mh_* 静默失效。
+
 ## 写：三道闸门（一票一条）
 
 1. **领票**：`mh_skill(agent="WorkBuddy")`——一次只放行一条，写成功票即作废，下次再领。
