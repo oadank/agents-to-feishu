@@ -22,8 +22,6 @@ const app = createApp({
     const restarting = ref('');
     const activeProvider = ref([]);
     const activeMcp = ref([]);
-    const vision = ref(null);
-    const visionTest = reactive({ source: 'sample', localPath: '', task: 'describe', extra: '', loading: false, result: '' });
     const speech = ref(null);
     const ttsTest = reactive({ text: '你好，这是一段语音试听。', loading: false, dataUrl: '', error: '' });
     // 全局原生 audio：所有试听点击后立即播放（不二次点击）
@@ -77,12 +75,6 @@ const app = createApp({
       try {
         const s = await api('GET', '/api/store');
         Object.assign(store, s);
-        // 加载内建看图配置
-        try {
-          const vs = await api('GET', '/api/vision');
-          if (!vision.value) vision.value = vs.vision || {};
-          else Object.assign(vision.value, vs.vision || {});
-        } catch {}
         // 加载内建语音配置
         try {
           const sp = await api('GET', '/api/speech');
@@ -121,7 +113,6 @@ const app = createApp({
       runtimes: '🧩 运行时管理',
       providers: '🏭 总配置 · 模型/Provider',
       mcps: '🔌 总配置 · MCP',
-      vision: '👁 看图配置',
       speech: '🗣 语音能力',
       promptopt: '⚡ 提示词优化',
       skills: '🛠 技能库',
@@ -319,30 +310,6 @@ const app = createApp({
       await api('DELETE', `/api/mcps/${encodeURIComponent(m.id)}`);
       ElMessage.success('已删除');
       reloadAll();
-    }
-
-    // ── 看图配置 ──
-    async function saveVision() {
-      try {
-        await api('PUT', '/api/vision', vision.value || {});
-        ElMessage.success('看图配置已保存');
-      } catch (e) { ElMessage.error('保存失败: ' + e.message); }
-    }
-    async function testVision() {
-      const imagePath = visionTest.source === 'local' ? String(visionTest.localPath || '').trim() : '__sample__';
-      if (!imagePath) { ElMessage.warning('请填图片路径'); return; }
-      visionTest.loading = true;
-      visionTest.result = '';
-      try {
-        const r = await api('POST', '/api/vision/test', {
-          imagePath: imagePath, task: visionTest.task, extra: visionTest.extra,
-        });
-        visionTest.result = r.ok ? `✅ 识别成功 (${r.model || ''})\n\n${r.text}` : `❌ ${r.error || '识别失败'}`;
-      } catch (e) {
-        visionTest.result = '❌ 调用失败: ' + e.message;
-      } finally {
-        visionTest.loading = false;
-      }
     }
 
     // ── 语音能力（ASR / TTS）──
@@ -548,12 +515,12 @@ const app = createApp({
 
     return {
       tab, setTab, loading, store, runtime, applying, restarting, activeProvider, activeMcp,
-      vision, visionTest, speech, ttsTest, edgeVoices, xiaomiVoices, aiAgeLabels,
+      speech, ttsTest, edgeVoices, xiaomiVoices, aiAgeLabels,
       comfyTest, loadComfyTemplates, runComfyGenerate, comfyOutputUrl,
       agentDlg, pageTitle, providerName, modelLabel, fmtK, fmtBalance, currentProviderModels,
       reloadAll, newAgent, openAgent, onProviderChange, saveAgent, closeAgentDlg,
       deleteAgent, applyAgent, restartAgent, newProvider, saveProvider, deleteProvider,
-      newMcp, saveMcp, deleteMcp, saveVision, testVision, saveSpeech, testTts, audioRef,
+      newMcp, saveMcp, deleteMcp, saveSpeech, testTts, audioRef,
       vdSamples, vdCustom, syncVdSamples, playVdSample, applyVdInstruct, testVdCustom,
       cloneFileRef, cloneForm, onCloneFileChange, addCloneSample, playCloneSource, playClonePreview,
       asrTest, loadAsrSample, testAsr,

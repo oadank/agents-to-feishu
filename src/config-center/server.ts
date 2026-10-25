@@ -51,7 +51,6 @@ import { createTask, claimTask, updateTask, listTasks, getTask, boardSummary } f
 import { readAllGateStats, currentMode, type GateMode } from '../bridge/task-gate.js';
 // 票 T-0019（2026-09-29 dsh）：桥接层窗口单一真源 + 回声档（运行时页可见可改；桥启动即自查不变量）
 import { factoryEnvLines, WINDOW_LABELS } from '../bridge/windows.js';
-import { lookImage } from '../vision/look.js';
 import {
   synthesize, synthesizeVoiceClone, AUDIO8_DIR, AUDIO8_VOICES_DIR, AUDIO8_PY, type TtsConfig,
 } from '../voice/tts.js';
@@ -61,11 +60,10 @@ import { createComfyMcpHttpHandler } from '../comfy/mcp-server.js';
 // MCP 代理通道调用计数（comfy/vision 旧通道退役取证的仪表；进程重启清零）
 const mcpProxyStats: Record<string, { calls: number; lastAt: string }> = {
   comfy: { calls: 0, lastAt: '' },
-  vision: { calls: 0, lastAt: '' },
 };
 
 // ── [T-0031 批一 09-30 审计P2] 密钥脱敏：GET 只说"有没有"，不给值 ─────────────
-// 此前 /api/store、/api/agents、/api/vision、/api/speech、/api/prompt-optimize 把
+// 此前 /api/store、/api/agents、/api/speech、/api/prompt-optimize 把
 // appSecret/apiKey 明文回显给浏览器（model-catalog 早就是 hasKey 口径，就这几家漏了），
 // 服务又同时绑 Tailscale IP 且不校验 Host —— DNS rebinding 一页就能读走全部密钥。
 // 契约：GET 出掩码哨兵；前端原样带回；PUT/POST 侧 unmask——哨兵从旧值还原、旧值没有就
@@ -118,14 +116,10 @@ function unmaskSecretsDeep(body: unknown, old: unknown): void {
     }
   }
 }
-import { createVisionMcpHttpHandler } from '../vision/mcp.js';
 
 /** 项目根（server.ts 位于 src/config-center/，上溯两级） */
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
-/** 内置测试样例图（可分发，随项目走） */
-const SAMPLE_VISION_IMAGE = path.join(PROJECT_ROOT, 'assets', 'sample-vision.jpg');
-
 /**
  * 同步 DSH 本地语音配置（~/.dsh/voice-config.json）的 defaultEngine，
  * 让「聊天内（DSH 设置页）」与「聊天外（飞书兜底）」的引擎选择保持一致。
@@ -174,8 +168,6 @@ export function createConfigServer(opts: ConfigServerOptions) {
 
   // ComfyUI 生图 MCP 服务（挂 /mcp/comfy，Tailscale 可访问）
   const comfyMcpHandler = createComfyMcpHttpHandler();
-  // 内建看图 MCP 服务（挂 /mcp/vision，暴露 look_image 三任务给所有 agent）
-  const visionMcpHandler = createVisionMcpHttpHandler();
 
   // 读/写 store（每次实时，避免并发脏读）
   const load = (): ConfigStore => readStore(storeFile);
@@ -635,13 +627,6 @@ export function createConfigServer(opts: ConfigServerOptions) {
         await comfyMcpHandler(req, res);
         return;
       }
-      // ── 内建看图 MCP 服务（Streamable HTTP，暴露 look_image 三任务给所有 agent）──
-      if (p === '/mcp/vision' || p === '/mcp/vision/') {
-        mcpProxyStats.vision.calls++; mcpProxyStats.vision.lastAt = new Date().toISOString();
-        await visionMcpHandler(req, res);
-        return;
-      }
-
       // ── 旧通道使用计数查询（退役决策取证口）──
       if (p === '/api/mcp-proxy-usage' && method === 'GET') {
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -1416,24 +1401,6 @@ export function createConfigServer(opts: ConfigServerOptions) {
         }
       }
 
-      // ── 内建看图（look_image）──
-      // GET /api/vision：读视觉配置
-      if (p === '/api/vision' && method === 'GET') {
-        const store = load();
-        return json(res, 200, { ok: true, vision: maskSecretsDeep(store.vision) });
-      }
-      // PUT /api/vision：更新视觉配置（apiKey 留空表示由凭证层读）
-      if (p === '/api/vision' && method === 'PUT') {
-        const store = load();
-        const body = JSON.parse((await readBody(req)) || '{}');
-        unmaskSecretsDeep(body, store.vision ?? {}); // 哨兵 → 旧 apiKey 放回
-        store.vision = {
-          ...(store.vision ?? { enabled: true, provider: 'online', baseUrl: '', apiKey: '', model: '', timeoutMs: 240000, prompts: {} }),
-          ...body,
-        };
-        save(store);
-        return json(res, 200, { ok: true, vision: store.vision });
-      }
       // ── 内建 ⚡ 提示词优化 + /de 副驾（本地引擎，不依赖 dsh；页面上两块配置共用一张卡）──
       if (p === '/api/prompt-optimize' && method === 'GET') {
         const store = load();
@@ -1551,33 +1518,6 @@ export function createConfigServer(opts: ConfigServerOptions) {
         } catch (e) {
           return json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
         }
-      }
-
-      // GET /api/vision/sample-image：返回项目内置样例图（前端预览图用）
-      if (p === '/api/vision/sample-image' && method === 'GET') {
-        if (!fs.existsSync(SAMPLE_VISION_IMAGE)) return json(res, 404, { error: 'sample image not found' });
-        const buf = fs.readFileSync(SAMPLE_VISION_IMAGE);
-        res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'max-age=3600' });
-        res.end(buf);
-        return;
-      }
-
-      // POST /api/vision/test：测试看图（body: { imagePath, task, extra }）
-      if (p === '/api/vision/test' && method === 'POST') {
-        const store = load();
-        const body = JSON.parse((await readBody(req)) || '{}');
-        let imagePath = String(body.imagePath || '').trim();
-        // imagePath 为空或 __sample__ 时用项目内置样例图（可分发）
-        if (!imagePath || imagePath === '__sample__') {
-          imagePath = SAMPLE_VISION_IMAGE;
-        }
-        const r = await lookImage({
-          imagePath,
-          task: String(body.task || 'describe'),
-          extra: String(body.extra || ''),
-          vision: store.vision,
-        });
-        return json(res, 200, r);
       }
 
       // ── 内建语音（ASR+TTS）──

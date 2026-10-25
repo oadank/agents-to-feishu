@@ -169,16 +169,6 @@
       "external": true
     },
     {
-      "id": "visionqa",
-      "displayName": "VisionQA 质量看图（供 ComfyUI 后端）",
-      "transport": "streamable-http",
-      "serverName": "visionqa",
-      "url": "http://127.0.0.1:8092/mcp",
-      "failOnStartupError": false,
-      "toolCallTimeoutMs": 300000,
-      "external": true
-    },
-    {
       "id": "comfy",
       "displayName": "ComfyUI 生图（list_templates/generate_image/reverse_prompt）",
       "transport": "streamable-http",
@@ -187,15 +177,6 @@
       "failOnStartupError": false,
       "toolCallTimeoutMs": 600000,
       "external": true
-    },
-    {
-      "id": "vision",
-      "displayName": "看图 look_image（describe/reverse/text）",
-      "transport": "streamable-http",
-      "serverName": "vision",
-      "url": "http://100.108.133.82:13600/mcp/vision",
-      "failOnStartupError": false,
-      "toolCallTimeoutMs": 300000
     }
   ],
   "agents": [
@@ -208,8 +189,7 @@
       "modelId": "glm-5-3-flash",
       "mcps": [
         "openmem",
-        "win-desktop-helper",
-        "visionqa"
+        "win-desktop-helper"
       ],
       "port": 13580,
       "showToolCallCards": true,
@@ -228,8 +208,7 @@
       "modelId": "deepseek-v4-flash",
       "mcps": [
         "openmem",
-        "win-desktop-helper",
-        "visionqa"
+        "win-desktop-helper"
       ],
       "port": 13581,
       "showToolCallCards": true,
@@ -248,8 +227,7 @@
       "modelId": "deepseek-v4-flash",
       "mcps": [
         "openmem",
-        "win-desktop-helper",
-        "visionqa"
+        "win-desktop-helper"
       ],
       "port": 13582,
       "showToolCallCards": true,
@@ -268,8 +246,7 @@
       "modelId": "GwV4F",
       "mcps": [
         "openmem",
-        "win-desktop-helper",
-        "visionqa"
+        "win-desktop-helper"
       ],
       "port": 13583,
       "showToolCallCards": true,
@@ -288,8 +265,7 @@
       "modelId": "deepseek-v4-flash",
       "mcps": [
         "openmem",
-        "win-desktop-helper",
-        "visionqa"
+        "win-desktop-helper"
       ],
       "port": 13584,
       "showToolCallCards": true,
@@ -308,8 +284,7 @@
       "modelId": "deepseek-v4-flash",
       "mcps": [
         "openmem",
-        "win-desktop-helper",
-        "visionqa"
+        "win-desktop-helper"
       ],
       "port": 13585,
       "showToolCallCards": true,
@@ -328,8 +303,7 @@
       "modelId": "deepseek-v4-flash",
       "mcps": [
         "openmem",
-        "win-desktop-helper",
-        "visionqa"
+        "win-desktop-helper"
       ],
       "port": 13586,
       "showToolCallCards": true,
@@ -348,8 +322,7 @@
       "modelId": "deepseek-v4-flash",
       "mcps": [
         "openmem",
-        "win-desktop-helper",
-        "visionqa"
+        "win-desktop-helper"
       ],
       "port": 13587,
       "showToolCallCards": true,
@@ -369,8 +342,7 @@
       "modelId": "deepseek-v4-flash",
       "mcps": [
         "openmem",
-        "win-desktop-helper",
-        "visionqa"
+        "win-desktop-helper"
       ],
       "port": 13588,
       "showToolCallCards": true,
@@ -402,15 +374,6 @@
       "dividerMode": "full"
     }
   ],
-  "vision": {
-    "enabled": true,
-    "provider": "online",
-    "baseUrl": "https://apihub.agnes-ai.cn/v1",
-    "apiKey": "",
-    "model": "agnes-2.5-flash",
-    "timeoutMs": 240000,
-    "prompts": {}
-  },
   "speech": {
     "enabled": true,
     "tts": {

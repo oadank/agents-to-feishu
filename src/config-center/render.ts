@@ -21,34 +21,13 @@ import {
 import { writeEnvMerged, writeCordisMerged, backupFile, logApply, writeFileAtomic } from './patch-apply.js';
 
 /**
- * 视觉能力降级令（A 段 · 2026-09-19 老大亲提）：
- * model.visionCapable=true/缺省 时 apply 注入；false 不注入。
- * 只动注入文案，不碰 look.ts / registry.ts / engine.ts 的看图实现。
- */
-export const VISION_DEGRADE_PROMPT =
-  '你看图优先用自身视觉直接看；look_image/看图 MCP 仅在需要逐字提取、长图放大、像素级反推或你自看不准时作为兜底工具。';
-
-/**
  * 工具路权令（老大 2026-09-19 裁定两轮合并）：默认内建底座（生图=agnes 快路）；
  * 用户点名高质量/XDN/本地生图 → 走 comfy MCP（8090 控制服务→XDN 高质量产线）。
  * comfy 其余场景禁首选（临时文件被清导致自动发图落空前科，09-19 09:0x dsh 丢图实锤）。
- * 无条件注入，与 visionCapable 共用同一注入点。配置层 comfy/vision 挂载永不摘（老大亲裁）。
+ * 无条件注入。配置层 comfy 挂载永不摘（老大亲裁）。
  */
 export const TOOL_ROUTE_PROMPT =
-  '生图/看图/反推一律优先内建工具（generate_image/look_image/reverse_prompt）：不点名模板时默认 agnes 快引擎，失败自动回落 8090→XDN，文件名由桥统一 Agnes-*，回合末自动发图。用户点名「高质量/精致/4K/高清」或「XDN生图/本地生图/Z-IMAGE/工作流模板」→ 内建 generate_image **直接传 template（即直连 XDN 产线，v4 起不再先试 agnes）**；或走 comfy MCP generate_image（该入口文件名跟随工作流且偶发 temp 临时名，回合末自己把图片路径讲清或手动发图，勿依赖自动发图）。点名高质量就一锤子下单，禁止先搜索/读文档再权衡。vision MCP 永不首选（与内建同一条看图链）。后端只有一套：agnes(N5105) + 8090调度台→XDN真引擎，两入口共用图库 runs\\img，区别仅在谁定文件名。';
-
-/** 缺省视为支持看图（老大口径：现在都支持；纯文本模型在 store 里显式 false） */
-export function resolveVisionCapable(model?: ModelDef): boolean {
-  return model?.visionCapable !== false;
-}
-
-/** apply 时把降级令拼进该 agent 的统一注入（幂等：已含同文则不重复） */
-export function withVisionDegradeInject(globalInject: string, model?: ModelDef): string {
-  if (!resolveVisionCapable(model)) return globalInject ?? '';
-  const base = globalInject ?? '';
-  if (base.includes(VISION_DEGRADE_PROMPT)) return base;
-  return base.trim() ? `${base}\n\n${VISION_DEGRADE_PROMPT}` : VISION_DEGRADE_PROMPT;
-}
+  '生图/反推一律优先内建工具（generate_image/reverse_prompt）：不点名模板时默认 agnes 快引擎，失败自动回落 8090→XDN，文件名由桥统一 Agnes-*，回合末自动发图。用户点名「高质量/精致/4K/高清」或「XDN生图/本地生图/Z-IMAGE/工作流模板」→ 内建 generate_image **直接传 template（即直连 XDN 产线，v4 起不再先试 agnes）**；或走 comfy MCP generate_image（该入口文件名跟随工作流且偶发 temp 临时名，回合末自己把图片路径讲清或手动发图，勿依赖自动发图）。点名高质量就一锤子下单，禁止先搜索/读文档再权衡。后端只有一套：agnes(N5105) + 8090调度台→XDN真引擎，两入口共用图库 runs\\img，区别仅在谁定文件名。';
 
 /** 工具路权令：全员无条件注入（幂等） */
 export function withToolRouteInject(globalInject: string): string {
@@ -62,7 +41,7 @@ export function withToolRouteInject(globalInject: string): string {
 const SKILL_EXEMPT_AGENTS = new Set(['deeptutor']);
 
 /**
- * apply 统一注入合成：store 全局注入 → 视觉降级令（按 model.visionCapable）→ 工具路权令（全员）。
+ * apply 统一注入合成：store 全局注入 → 工具路权令（全员）。
  * config.env 与 dsh persona.md 共用，保证两处口径一致。
  * agentId 传入时按豁免户摘掉技能目录段（老大 09-20 令）。
  */
@@ -70,9 +49,9 @@ export function buildAgentGlobalInject(store: ConfigStore, model?: ModelDef, age
   const base = store.injection?.enabled === false ? '' : (store.injection?.global ?? '');
   // skill Phase1：技能清单（name+一句 desc+路径）拼进统一注入（幂等，见 withSkillIndexInject）
   if (agentId && SKILL_EXEMPT_AGENTS.has(agentId)) {
-    return withToolRouteInject(withVisionDegradeInject(base, model));
+    return withToolRouteInject(base);
   }
-  return withToolRouteInject(withVisionDegradeInject(withSkillIndexInject(base, resolveMountedSkills(store)), model));
+  return withToolRouteInject(withSkillIndexInject(base, resolveMountedSkills(store)));
 }
 
 // ── skill Phase 1（2026-09-19 老大拍板：单源 skills/，双分发面）──
@@ -329,10 +308,10 @@ export function renderConfigEnv(store: ConfigStore, agent: AgentDef, globalExtra
   lines.push('');
   // 注入（systemPrompt）：统一注入(全局) + 独立注入(该 agent)。值用 JSON 字符串编码，
   // loadConfig 读取时 JSON.parse 还原（支持多行/引号）。空字符串也写，保证键存在。
-  // 合成：store 全局 → 视觉降级令（visionCapable）→ 工具路权令（全员，内建底座优先）。
+  // 合成：store 全局 → 工具路权令（全员，内建底座优先）。
   const globalInject = buildAgentGlobalInject(store, model, agent.id);
   lines.push('# ── systemPrompt 注入：统一(全局) + 独立(本 agent) ──');
-  lines.push(`# visionCapable=${resolveVisionCapable(model)}；toolRoute=always`);
+  lines.push('# toolRoute=always');
   lines.push(`CTI_SYSTEM_PROMPT_GLOBAL=${JSON.stringify(globalInject)}`);
   lines.push(`CTI_BOT_${agent.id.toUpperCase()}_SYSTEM_PROMPT=${JSON.stringify(agent.systemPrompt ?? '')}`);
   if (agent.runtime === 'dsh') {
@@ -730,7 +709,7 @@ export function writeAgentArtifacts(
     writeCordisMerged(cordisYmlPath, cordisYml, agent.id);
     // 生成 persona.md：cordis.yml 的 acp-agent 段用 readFileSync 引用它，缺失会导致
     // 插件树加载失败（ENOENT persona.md）→ acp-demo 崩溃 → ACP 全部超时（"ACP request 100 timeout"）。
-    // 内容 = 统一注入(全局, 视觉降级令+工具路权令) + 独立注入(本 agent)，拼接规则对齐 config.ts buildInjectedSystemPrompt。
+    // 内容 = 统一注入(全局, 工具路权令) + 独立注入(本 agent)，拼接规则对齐 config.ts buildInjectedSystemPrompt。
     const personaGlobal = buildAgentGlobalInject(_store, findModel(_store, agent.providerId, agent.modelId), agent.id);
     const personaCustom = agent.systemPrompt ?? '';
     const personaBody = [personaGlobal, personaCustom].filter((s) => s && s.trim()).join('\n\n---\n\n');

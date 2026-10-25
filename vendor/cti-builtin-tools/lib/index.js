@@ -83,12 +83,6 @@ async function ensureBundledAssets(config, parsed) {
       // [2026-08-22] 预生成的合成试听录音（静态文件，播放免联网；与 VoiceDesign 官方示例同类）
       await copyFile(join(ASSETS_DIR, 'voiceclone-samples', BUNDLED_CLONE_ID + '-preview.mp3'), join(cloneDir, BUNDLED_CLONE_ID + '-preview.mp3'))
     } catch { /* 包内素材缺失或拷贝失败：跳过（不阻塞启动） */ }
-    // [2026-08-22] 像素级反推提示词（vision-qa GENERAL_SINGLE 吸收）落地到
-    // DSH_HOME/visionqa-reverse-prompt.txt——fork 的图片转文本引导会指示模型在
-    // 反推任务时读取该文件并作为 modlens_read_image 的 prompt 参数传入。
-    try {
-      await copyFile(join(ASSETS_DIR, 'reverse-prompt.txt'), join(homeDir, 'visionqa-reverse-prompt.txt'))
-    } catch { /* 素材缺失跳过 */ }
     // 仅"首次安装"（配置里还没有 voiceclone 键）时注册自带样本；用户删光的 [] 不强制
     const parsedHasClone = parsed !== null && typeof parsed === 'object' && parsed.engines?.voiceclone !== undefined
     const samples = config?.engines?.voiceclone?.samples
@@ -141,23 +135,6 @@ function defaultVoiceConfig() {
         cmd: 'C:\\D\\opt\\sherpa-onnx\\bin\\sherpa-onnx-offline.exe --tokens=C:\\D\\opt\\sherpa-onnx\\models\\sensevoice-int8\\tokens.txt --sense-voice-model=C:\\D\\opt\\sherpa-onnx\\models\\sensevoice-int8\\model.int8.onnx --num-threads=4',
         apiKey: '',
         apiBaseUrl: 'https://api.xiaomimimo.com/v1', // 小米 mimo-v2.5-asr；填 openai 地址则走 Whisper 风格
-      },
-    },
-    // [2026-08-22] 图片识别（look_image 工具）：直连视觉后端，不依赖外部 MCP/第三方插件
-    // [2026-08-22 改] 分类改为本地(local: ollama/sglang/vllm/LM Studio 等本机起 /v1 兼容端点)
-    // vs 在线(online: 云端 API 如硅基流动/OpenAI/DeepSeek)。请求格式统一 OpenAI 兼容。
-    vision: {
-      enabled: true,
-      provider: 'local', // local=本地(ollama/sglang/vllm 等 OpenAI 兼容 /v1 端点) / online=在线云端 API
-      baseUrl: 'http://127.0.0.1:11434/v1', // 本地默认 ollama；在线留空或填云端地址(如 https://api.siliconflow.cn/v1)
-      apiKey: '',
-      model: 'qwen3-vl:4b-instruct',
-      timeoutMs: 240000,
-      // [2026-08-22] 三个任务的提示词（空 = 用内置模板/reverse 读默认文件）；用户可在设置页编辑/恢复默认
-      prompts: {
-        describe: '',  // 空 = 用内置简短描述提示词
-        text: '',      // 空 = 用内置文字提取提示词
-        reverse: '',   // 空 = 读 DSH_HOME/visionqa-reverse-prompt.txt（GENERAL_SINGLE）
       },
     },
   }
@@ -986,94 +963,6 @@ async function readJsonBody(req, maxBytes) {
 // 插件入口
 // ──────────────────────────────────────────────────────────────
 async function apply(ctx) {
-  // [2026-08-22] 识图核心（look_image 工具 + 设置页测试共用）：直连 vision 配置的视觉后端
-  const LOOK_TASK_PROMPTS = {
-    // [2026-08-22 改] 简短描述（普通看图），不再用"画面风格/主体/..."专业结构（那是反推的事）
-    describe: '请用中文简要描述这张图片的内容（一到两句话，简洁明了），如有人物说明主要形象与姿态。',
-    text: '请逐字提取这张图片中的所有文字，按在画面中的位置分行输出，每行前缀标出行位置（如「顶部」「中部」「底部」）。仅输出提取到的文字内容，不要解释、不要翻译。',
-  }
-  async function runVision({ imagePath, task, extra }) {
-    try {
-      const path = (imagePath ?? '').trim()
-      if (path === '') return { ok: false, error: 'image_path 不能为空' }
-      const t = (task ?? 'describe').trim()
-      const vis = (await loadVoiceConfig()).vision ?? {}
-      if (vis.enabled === false) return { ok: false, error: '图片识别未启用：请到「设置 → 语音服务 → 图片识别」开启' }
-      // [2026-08-22 改] provider 映射：local/online（兼容旧 ollama/openai）；请求格式统一 OpenAI 兼容
-      const rawProvider = (vis.provider ?? 'local').trim()
-      const provider = (rawProvider === 'online' || rawProvider === 'openai') ? 'online' : 'local'
-      const baseUrl = (vis.baseUrl ?? '').trim() || 'http://127.0.0.1:11434/v1'
-      const model = (vis.model ?? '').trim() || 'qwen3-vl:4b-instruct'
-      const apiKey = (vis.apiKey ?? '').trim()
-      const timeoutMs = Number(vis.timeoutMs) > 0 ? Number(vis.timeoutMs) : 240000
-      // 提示词：优先用 vis.prompts[task]（用户编辑后），），）读 reverse 文件，
-      // describe/text 仍无则用内置模板
-      const userPrompt = (vis.prompts ?? {})[t]
-      let promptText = ''
-      if (typeof userPrompt === 'string' && userPrompt.trim() !== '') {
-        promptText = userPrompt.trim()
-      } else if (t === 'reverse') {
-        try {
-          const homeDir = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-          promptText = (await readFile(join(homeDir, 'visionqa-reverse-prompt.txt'), 'utf8')).trim()
-        } catch {
-          try { promptText = (await readFile(join(ASSETS_DIR, 'reverse-prompt.txt'), 'utf8')).trim() } catch { /* 忽略 */ }
-        }
-        if (promptText === '') return { ok: false, error: '反推提示词文件缺失' }
-      } else {
-        promptText = LOOK_TASK_PROMPTS[t] ?? LOOK_TASK_PROMPTS.describe
-      }
-      const extraText = (extra ?? '').trim()
-      const userContent = promptText + (extraText !== '' ? '\n\n【附加要求】' + extraText : '')
-      // [2026-08-22 修] 读文件头(magic bytes)判断实际图片格式，data URL 按真实格式声明 mime——
-      // 之前硬编码 data:image/png，jpg/webp 图片标签写错；ollama 不较真能自动识别，但
-      // 严格按声明 mime 解码的后端会失败。不依赖扩展名，无后缀/后缀错的图也能正确声明。
-      const imgRaw = await readFile(path)
-      const imgB64 = imgRaw.toString('base64')
-      const sniffImageMime = (b) => {
-        if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg'
-        if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 && b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a) return 'image/png'
-        if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp'
-        if (b.length >= 6 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image/gif'
-        return 'image/png' // 未知格式兜底（保持向后兼容）
-      }
-      const imgMime = sniffImageMime(imgRaw)
-      const t0 = Date.now()
-      let resp
-      const ac = new AbortController()
-      const timer = setTimeout(() => ac.abort(), timeoutMs)
-      try {
-        resp = await fetch((baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl) + '/chat/completions', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', ...(apiKey !== '' ? { authorization: 'Bearer ' + apiKey } : {}) },
-          signal: ac.signal,
-          body: JSON.stringify({
-            model,
-            temperature: 0.4,
-            messages: [{ role: 'user', content: [
-              { type: 'text', text: userContent },
-              { type: 'image_url', image_url: { url: 'data:' + imgMime + ';base64,' + imgB64 } },
-            ] }],
-          }),
-        })
-      } catch (error) {
-        clearTimeout(timer)
-        const aborted = error?.name === 'AbortError'
-        return { ok: false, error: aborted ? '视觉后端超时（' + Math.round(timeoutMs / 1000) + 's）：' + baseUrl : '无法连接视觉后端（' + baseUrl + '）：' + String(error?.message ?? error) }
-      }
-      clearTimeout(timer)
-      if (!resp.ok) {
-        let body = ''; try { body = (await resp.text()).slice(0, 300) } catch { /* 忽略 */ }
-        return { ok: false, error: '视觉后端返回 ' + resp.status + '：' + body }
-      }
-      const data = await resp.json()
-      const text = (data?.choices?.[0]?.message?.content ?? '').trim()
-      if (text === '') return { ok: false, error: '视觉后端未返回内容' }
-      return { ok: true, text, task: t, model, provider, durationMs: Date.now() - t0 }
-    } catch (error) {
-      return { ok: false, error: String(error?.message ?? error) }
-    }
-  }
   ctx.effect(() => {
     // agents-to-feishu 收编版：acp-demo 无 webServer 服务，cordis 禁止未 inject 的属性访问 ⇒ try/catch 安全取值
     let webServer;
@@ -1119,40 +1008,6 @@ async function apply(ctx) {
                     xiaomi: typeof process.env.TTS_XIAOMI_KEY === 'string' && process.env.TTS_XIAOMI_KEY !== '',
                     ali: typeof process.env.TTS_ALI_KEY === 'string' && process.env.TTS_ALI_KEY !== '',
                   },
-                },
-              })
-            }
-            // [2026-08-22] 图片识别配置测试：POST { task } → 用内置测试图跑一遍识图链路，返回结果文本
-            if (url.pathname === '/voice-config/vision-test' && req.method === 'POST') {
-              const body = await readJsonBody(req, 4 * 1024)
-              const task = (typeof body?.task === 'string' ? body.task : 'describe').trim()
-              // [2026-08-22] 测试图：用户提供的带文本图片（可测 text 提取），随插件打包
-              const testImage = join(ASSETS_DIR, 'vision-test.jpg')
-              const result = await runVision({ imagePath: testImage, task })
-              return sendJson(res, 200, result)
-            }
-            // [2026-08-22] 测试图静态访问（前端缩略图对照识图结果）
-            if (url.pathname === '/voice-config/vision-test-image' && req.method === 'GET') {
-              const data = await readFile(join(ASSETS_DIR, 'vision-test.jpg'))
-              res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'no-store' })
-              res.end(data)
-              return
-            }
-            // [2026-08-22] 默认提示词（编辑弹窗预填：配置空时显示默认内容）
-            if (url.pathname === '/voice-config/vision-prompts' && req.method === 'GET') {
-              let reverseDefault = ''
-              try {
-                const homeDir = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-                reverseDefault = (await readFile(join(homeDir, 'visionqa-reverse-prompt.txt'), 'utf8')).trim()
-              } catch {
-                try { reverseDefault = (await readFile(join(ASSETS_DIR, 'reverse-prompt.txt'), 'utf8')).trim() } catch { /* 忽略 */ }
-              }
-              return sendJson(res, 200, {
-                ok: true,
-                defaults: {
-                  describe: LOOK_TASK_PROMPTS.describe,
-                  text: LOOK_TASK_PROMPTS.text,
-                  reverse: reverseDefault,
                 },
               })
             }
@@ -1920,36 +1775,6 @@ async function apply(ctx) {
       },
     })))
 
-    // 2.5) look_image 工具：图片识别（看图描述 / 像素级反推 / 文字提取）
-    // [2026-08-22] 自研识图工具（替代 modlens_read_image + reverse_image）：modlens 结构化
-    // schema 与反推任务冲突；且少工具让模型不困惑——识图统一走本工具，用 task 参数分流。
-    // 直连「设置 → 语音服务 → 图片识别」配置的视觉后端（ollama / OpenAI 兼容 vllm 等）。
-    disposers.push(ctx.tools.register(defineTool({
-      name: 'look_image',
-      description: '识别本地图片。task 三种模式：describe=详细看图描述（默认）；reverse=像素级反推——把图片反推成可直接用于 AI 生图（即梦/可灵/Nano Banana Pro/Qwen-Image/Stable Diffusion/Midjourney）的完整中文提示词（画面风格/主体/背景/装饰/细节特征/美学与光线/技术修饰）；text=逐字提取图片文字。'
-        + '何时调用：消息里有图片、用户问图里有什么/描述图片/反推生图提示词/提取图中文字时。'
-        + '依赖「设置 → 语音服务 → 图片识别」配置的视觉后端（默认本地 ollama qwen3-vl），首次调用可能需 1-2 分钟。',
-      parameters: {
-        image_path: {
-          type: 'string', required: true,
-          description: '本地图片完整路径（模型收到的图片本地路径）',
-        },
-        task: {
-          type: 'string', default: 'describe',
-          description: '任务类型：describe=看图描述（默认）；reverse=像素级反推生图提示词；text=逐字提取文字',
-        },
-        extra: {
-          type: 'string',
-          description: '可选附加要求（如「重点看左下角」「主角换成女生」），为空则按 task 默认',
-        },
-      },
-      output: { schema: { type: 'object', additionalProperties: true }, render(_args, value) { const t = typeof value?.text === 'string' ? value.text : JSON.stringify(value, null, 2); return [{ type: 'text', text: t }] } },
-      timeoutMs: 240000,
-      isConcurrencySafe: () => true,
-      async execute(args) {
-        return runVision({ imagePath: args?.image_path, task: args?.task, extra: args?.extra })
-      },
-    })))
 
 
     // 3) manage_voice_clone 工具（克隆音色库管理：注册/设为默认/列出/删除）

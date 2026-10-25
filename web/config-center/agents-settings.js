@@ -218,7 +218,7 @@
                     m.displayName + "（内建底座 · 恒挂 · 不可拆）",
                   );
                 }
-                var legacy = m.id === "comfy" || m.id === "vision";
+                var legacy = m.id === "comfy";
                 return h("label", { key: m.id, title: legacy ? "旧代理通道：能力与内建底座重复，仅 zcode/dsh/deeptutor 等旧配置挂着；新 agent 不用勾" : "" },
                   h("input", { type: "checkbox", checked: (f.mcps || []).includes(m.id), onChange: () => toggleMcp(m.id) }),
                   m.displayName + (legacy ? "（旧通道 · 与内建重复）" : ""),
@@ -241,7 +241,7 @@
   // ── 主页面 ──
   function App() {
     const [store, setStore] = useState(null);   // {agents, providers, mcps}
-    const [caps, setCaps] = useState({ vision: false, speech: false });
+    const [caps, setCaps] = useState({ speech: false });
     const [installed, setInstalled] = useState(null); // Set<string> | null（null=未探测完）
     const [svcStatus, setSvcStatus] = useState({});    // { [id]: "running"|"stopped" } —— 服务运行健康度
     const [applying, setApplying] = useState("");
@@ -266,9 +266,8 @@
         if (rt.httpOk && Array.isArray(rt.data.runtimes)) setRuntimes(rt.data.runtimes);
         const gs = await api("/api/settings");
         if (gs.httpOk && gs.data) setGsettings(gs.data);
-        const v = await api("/api/vision");
         const s = await api("/api/speech");
-        setCaps({ vision: !!(v.data && v.data.vision && v.data.vision.enabled), speech: !!(s.data && s.data.speech && s.data.speech.enabled) });
+        setCaps({ speech: !!(s.data && s.data.speech && s.data.speech.enabled) });
         // 2026-08-30 合并概览页：余额/用量数据源（原 overview-settings）
         if (installed) for (const a of r.data.agents) { if (installed.has(a.id)) refreshRuntime(a.id); }
       } else {
@@ -426,9 +425,7 @@
                 (a.mcps || []).length ? a.mcps.map(function (m) { return h("span", { class: "tag", key: m }, m); }) : h("span", null, "无"),
               ),
               h("div", { class: "line" }, h("span", { class: "line-k" }, "🧩 内建:"),
-                caps.vision ? h("span", { class: "tag ok" }, "👁 看图") : null,
-                caps.speech ? h("span", { class: "tag ok" }, "🗣 语音") : null,
-                !caps.vision && !caps.speech ? h("span", null, "无") : null,
+                caps.speech ? h("span", { class: "tag ok" }, "🗣 语音") : h("span", null, "无"),
               ),
               h("div", { class: "line" }, h("span", { class: "line-k" }, "🔢 端口:"), h("b", null, a.port)),
               h("div", { class: "line" }, h("span", { class: "line-k" }, "📁 工作区:"), h("b", null, a.workdir || "—")),

@@ -8,7 +8,7 @@
  *
  * 三层结构：
  *   providers : 总配置 —— 可选模型/Provider 池（volc-ark / gw / litellm / deepseek-official …）
- *   mcps      : 总配置 —— 可选 MCP 服务池（openmem / visionqa / win-desktop-helper / comfy …）
+ *   mcps      : 总配置 —— 可选 MCP 服务池（openmem / win-desktop-helper / comfy …）
  *   agents    : 分配置 —— 每个 agent 一页，从总配置池【选择】model/provider + 勾选 mcps
  *
  * 状态行字段对应（用户强调"数据必须真实"）：
@@ -46,17 +46,11 @@ export interface ModelDef {
   contextWindow?: number;
   /** 状态行显示的 model 标签；缺省用 id */
   label?: string;
-  /**
-   * 模型是否支持看图（默认 true——现役模型大多自生视觉）。
-   * true/缺省：apply 时向 systemPrompt 注入「优先用自身视觉，look_image 仅兜底」降级令。
-   * false：不注入，现有 look_image/看图 MCP 工具行为不变（纯文本模型手动关）。
-   */
-  visionCapable?: boolean;
 }
 
 /** 一个 MCP 服务定义 —— 总配置池的一项 */
 export interface McpDef {
-  id: string; // 如 'openmem' / 'visionqa' / 'win-desktop-helper'
+  id: string; // 如 'openmem' / 'win-desktop-helper'
   displayName: string;
   transport: 'streamable-http' | 'stdio';
   serverName: string;
@@ -68,18 +62,6 @@ export interface McpDef {
   toolCallTimeoutMs?: number;
   /** 重的 MCP（要装客户端/权限，如控制电脑）：独立外接，不默认绑定 */
   external?: boolean;
-}
-
-/** 内建看图（look_image）视觉配置：只配模型即可用，项目自带实现 */
-export interface VisionConfig {
-  enabled: boolean;
-  /** local / online（OpenAI 兼容接口） */
-  provider: 'local' | 'online';
-  baseUrl: string;   // 如 https://apihub.agnes-ai.cn/v1
-  apiKey: string;    // 视觉模型 key（存凭证，不出现在网页明文），可在网页占位
-  model: string;     // 如 agnes-2.5-flash（免费视觉，反应快）
-  timeoutMs: number;
-  prompts?: { describe?: string; text?: string; reverse?: string };
 }
 
 /** 一个可克隆的音色样本（voiceclone） */
@@ -197,8 +179,6 @@ export interface ConfigStore {
   providers: ProviderDef[];
   mcps: McpDef[];
   agents: AgentDef[];
-  /** 内建看图配置（look_image）：只配模型即可用，项目自带实现 */
-  vision?: VisionConfig;
   /** 内建语音配置（ASR 识别 + TTS 合成）：项目自带实现 */
   speech?: SpeechConfig;
   /** 注入配置：统一注入 = 全局共享 systemPrompt（所有 agent 首条消息生效） */
@@ -360,17 +340,6 @@ export const DEFAULT_INJECTION: InjectionConfig = {
   files: {},
 };
 
-/** 默认内建看图配置：免费 agnes-ai 视觉（反应快）。apiKey 为空由凭证层注入。 */
-export const DEFAULT_VISION: VisionConfig = {
-  enabled: true,
-  provider: 'online',
-  baseUrl: 'https://apihub.agnes-ai.cn/v1',
-  apiKey: '',
-  model: 'agnes-2.5-flash',
-  timeoutMs: 240000,
-  prompts: {},
-};
-
 /** 默认内建语音配置：全引擎结构（edge 免费默认开，其余关，真实 key/样本在运行时 config-store 填）。 */
 export const DEFAULT_SPEECH: SpeechConfig = {
   enabled: true,
@@ -407,18 +376,12 @@ export const DEFAULT_SPEECH: SpeechConfig = {
  * 默认 MCP 池。
  * 原则（用户 2026-08-25）：
  *  - 池要【丰富可增加】——各 agent 按需勾选，不删减选项。
- *  - zai-vision 已移除（看图改走内建 look_image，见 vision 段）。
- *  - 轻量、能内建的能力（看图 look_image）不走 MCP，走 config-store 的 vision 段（项目自带实现）。
  *  - 重的 MCP（要装客户端/权限，如控制电脑 win-desktop-helper）标 external，独立外接不默认绑定。
  */
 export const DEFAULT_MCPS: McpDef[] = [
   {
     id: 'openmem', displayName: 'openmem 统一记忆中枢', transport: 'streamable-http',
     serverName: 'openmem', url: 'http://127.0.0.1:3466/mcp', failOnStartupError: false, external: true,
-  },
-  {
-    id: 'visionqa', displayName: 'VisionQA 质量看图（供 ComfyUI 后端）', transport: 'streamable-http',
-    serverName: 'visionqa', url: 'http://127.0.0.1:8092/mcp', failOnStartupError: false, toolCallTimeoutMs: 300000, external: true,
   },
   {
     id: 'skills', displayName: '技能库', transport: 'streamable-http',
@@ -484,7 +447,6 @@ export function readStore(file?: string): ConfigStore {
       providers: DEFAULT_PROVIDERS,
       mcps: DEFAULT_MCPS,
       agents: [],
-      vision: DEFAULT_VISION,
       speech: DEFAULT_SPEECH,
       injection: DEFAULT_INJECTION,
       promptOptimize: DEFAULT_PROMPT_OPTIMIZE,
@@ -507,7 +469,6 @@ export function readStore(file?: string): ConfigStore {
       providers: parsed.providers ?? DEFAULT_PROVIDERS,
       mcps: parsed.mcps ?? DEFAULT_MCPS,
       agents: parsed.agents ?? [],
-      vision: parsed.vision ?? DEFAULT_VISION,
       speech: parsed.speech ?? DEFAULT_SPEECH,
       injection: parsed.injection ?? DEFAULT_INJECTION,
       skills: parsed.skills,

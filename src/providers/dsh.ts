@@ -719,7 +719,7 @@ export class DshProvider implements RuntimeProvider {
         DSH_PERMISSION_MODE: 'danger-full-access',
         // 2026-08-29 修复：插件（cti-builtin-tools）按 DSH_HOME 定位 voice-config.json/素材。
         // 不设则 homedir() 在 LocalSystem 下指向 systemprofile ⇒ 配置漂移——看图回落
-        // "本地 ollama qwen3-vl" 默认（弱模型误描述=看错图 / 后端缺模型=找不到图片）。
+        // agnes 默认（缺 key=找不到图片 / 误描述=看错图）。
         // harness 的 BOOTSTRAP_PREFIXES 只禁 .env 文件带 DSH_*，父进程 spawn 注入是受信通道。
         DSH_HOME: path.join(process.env.CTI_USER_HOME || 'C:\\Users\\oadan', '.dsh'),
       });

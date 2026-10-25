@@ -124,34 +124,6 @@ html.dark {
 /* 分割线 / 折叠面板 */
 .el-collapse { --el-collapse-header-bg-color: #161b27; --el-collapse-content-bg-color: #1a2130; }
 .el-collapse-item__header, .el-collapse-item__wrap { background: #161b27; }
-
-/* 看图测试结果 */
-.vision-result {
-  background: #202735;
-  color: #c7cede;
-  padding: 12px;
-  border-radius: 6px;
-  border: 1px solid #2a3346;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 300px;
-  overflow: auto;
-  font-size: 12px;
-  width: 100%;
-}
-
-/* 看图预览 */
-.vision-preview-wrap { width: 100%; }
-.vision-preview {
-  width: 100%;
-  max-width: 480px;
-  height: 300px;
-  border-radius: 8px;
-  border: 1px solid #2a3346;
-  background: #0c1018;
-  cursor: zoom-in;
-  display: block;
-}
 /* 放大预览层：鼠标变缩小镜，点图片本体可缩小 */
 .el-image-viewer__canvas .el-image-viewer__img {
   cursor: zoom-out !important;

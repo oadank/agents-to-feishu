@@ -23,7 +23,6 @@
           <el-menu-item index="runtimes"><span class="m-ic">🧩</span><span class="m-txt">运行时</span></el-menu-item>
           <el-menu-item index="providers"><span class="m-ic">☁️</span><span class="m-txt">总配置·模型</span></el-menu-item>
           <el-menu-item index="mcps"><span class="m-ic">🔌</span><span class="m-txt">总配置·MCP</span></el-menu-item>
-          <el-menu-item index="vision"><span class="m-ic">👁</span><span class="m-txt">看图配置</span></el-menu-item>
           <el-menu-item index="speech"><span class="m-ic">🗣</span><span class="m-txt">语音能力</span></el-menu-item>
           <el-menu-item index="promptopt"><span class="m-ic">⚡</span><span class="m-txt">提示词优化</span></el-menu-item>
           <el-menu-item index="skills"><span class="m-ic">🛠</span><span class="m-txt">技能库</span></el-menu-item>
@@ -63,11 +62,6 @@
           <!-- ══ 总配置 · MCP（独立 React 页）══ -->
           <div v-show="tab==='mcps'">
             <iframe src="/mcps-settings" style="width:100%;height:84vh;border:1px solid #2a3346;border-radius:8px;background:#0f1419" title="总配置 · MCP"></iframe>
-          </div>
-
-          <!-- ══ 看图配置（独立 React 看图配置页）══ -->
-          <div v-show="tab==='vision'">
-            <iframe src="/vision-settings" style="width:100%;height:84vh;border:1px solid #2a3346;border-radius:8px;background:#0f1419" title="看图配置"></iframe>
           </div>
 
           <!-- ══ 技能库（独立 React 技能设置页）══ -->

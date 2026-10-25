@@ -1,20 +1,19 @@
 /**
  * 内置工具注册表（2026-08-29 方向定调：老大的初心）
  *
- * agents-to-feishu 自带的能力（看图/生图/反推/转写/语音回复）全部以**进程内函数**形式
+ * agents-to-feishu 自带的能力（生图/反推/转写/语音回复）全部以**进程内函数**形式
  * 收进这里——无 HTTP、无端口、无 MCP、无外部依赖，agent 接入即天生可用。
  * 各 provider 按自己的协议通道把这份注册表注入给模型：
  *   - claude   → Agent SDK 进程内工具（createSdkMcpServer，内存直调）【本文件实现】
  *   - dsh 等ACP → vendor/cti-builtin-tools 第一方插件（harness 进程内直调）
  *                 【⚠ 插件 lib/index.js 里有同源 JS 实现——改这里的实现逻辑必须同步插件侧】
  *   - 其余     → 桥接 pre/post 代劳（后续 Phase）
- * MCP 端点（/mcp/vision、/mcp/comfy）保留，仅作为**对外**暴露接口给外界 agents 用。
+ * MCP 端点（/mcp/comfy）保留，仅作为**对外**暴露接口给外界 agents 用。
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
-import { lookImage } from '../vision/look.js';
 import { transcribe } from '../voice/asr.js';
 import { COMFY_BASE_URL } from '../comfy/mcp-server.js';
 import { DEFAULT_SPEECH } from '../config-center/store.js';
@@ -162,25 +161,6 @@ function readImageBase64(imagePath: string): string {
 
 export function buildBuiltinTools(deps: BridgeToolDeps): BuiltinTool[] {
   return [
-    {
-      name: 'look_image',
-      description:
-        '看一张本地图片文件。task=describe 简述内容 / text 逐字提取图中文字 / reverse 反推绘画提示词。'
-        + '用户发来图片的落盘路径会出现在消息里，直接把路径传给本工具即可。',
-      schema: {
-        image_path: z.string().describe('图片的本地绝对路径'),
-        task: z.enum(['describe', 'text', 'reverse']).optional().describe('看图模式，默认 describe'),
-        extra: z.string().optional().describe('附加要求（describe/reverse 模式下的补充指令）'),
-      },
-      execute: async (args) => {
-        const r = await lookImage({
-          imagePath: String(args.image_path ?? ''),
-          task: args.task as string | undefined,
-          extra: args.extra as string | undefined,
-        });
-        return r.ok ? (r.text ?? '（看图完成，但无描述输出）') : `看图失败: ${r.error ?? '未知错误'}`;
-      },
-    },
     {
       name: 'list_templates',
       description:

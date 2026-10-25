@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * mcp-capability-check.mjs — 12 bot × mh_* / lark_* / 桌面 / 视觉 / 生图 只读体检器
+ * mcp-capability-check.mjs — 12 bot × mh_* / lark_* / 桌面 / 生图 只读体检器
  *
  * 用法（限流铁律见下，勿高峰跑全量）：
  *   node scripts/mcp-capability-check.mjs --quick claude,dsh
@@ -8,7 +8,7 @@
  *   node scripts/mcp-capability-check.mjs --quick dsh --domain gen
  *   node scripts/mcp-capability-check.mjs --all --serial-slow
  *
- * --domain: mh,lark,desktop,vision,gen（默认 mh,lark）
+ * --domain: mh,lark,desktop,gen（默认 mh,lark）
  * --tag: 探针前缀（默认 [MiMo]，兼容 mimo 自跑；WorkBuddy 侧跑带 --tag [WB]，用于区分谁发的体检）
  *
  * ⚠️ 2026-09-18：曾因 --all 叠打把 qwen3.8 并发打满。默认禁止裸 --all。
@@ -19,7 +19,7 @@
  * 撞 429/网关限流 → 立刻停，不要重试。
  *
  * 判定三态：
- *   ✅ native — 模型直接调工具成功（工具卡 + 正文给出结果；视觉须复述 CTI-PROBE-2026）
+ *   ✅ native — 模型直接调工具成功（工具卡 + 正文给出结果）
  *   ⚠️ bypass — 靠 curl :3466/mcp 或桥接代调才成
  *   ❌ fail   — 看不见工具 / unsupported call / 超时 / 空回复 / 复述错误
  *
@@ -32,8 +32,7 @@ import { existsSync } from 'node:fs';
 
 const USAGE =
   'node scripts/mcp-capability-check.mjs --quick b1,b2   # mh+lark\n' +
-  'node scripts/mcp-capability-check.mjs --quick b1 --domain desktop,vision\n' +
-  'node scripts/mcp-capability-check.mjs --quick b1 --domain vision --tag [WB]   # 换探针前缀\n' +
+  'node scripts/mcp-capability-check.mjs --quick b1 --domain desktop\n' +
   'node scripts/mcp-capability-check.mjs --all --serial-slow   # 全量（必须限流，勿在高峰跑）';
 
 /** --tag：探针前缀参数化（默认 [MiMo]；WorkBuddy 侧跑带 --tag [WB]） */
@@ -52,7 +51,7 @@ const BOT_IDS = [
   'dsh', 'zcode', 'hermes', 'opencode', 'mimo',
 ];
 const DEEPTUTOR_NA = 'deeptutor';
-const ALL_DOMAINS = ['mh', 'lark', 'desktop', 'vision', 'gen'];
+const ALL_DOMAINS = ['mh', 'lark', 'desktop', 'gen'];
 const GEN_BOTS = new Set([
   'claude', 'codex', 'gemini', 'hermes', 'mimo', 'openakita', 'reasonix', 'openclaw', 'opencode',
   'dsh', 'zcode',
@@ -79,8 +78,6 @@ const PROBE_LARK =
   `${TAG} 体检：请调用 lark_list_chats（或 mcp__cti-builtin__lark_list_chats 等同名变体），只回你会话/群数量或前2个会话名。禁止 curl；没有工具就说：没有 lark_*。`;
 const PROBE_DESKTOP =
   `${TAG} 体检·桌面：请真调 win-desktop-helper 只读工具（active_window / list_apps / window_info 类），回「前台窗口名 + 窗口数」。禁止点击/按键/拖拽/截图写操作。没有工具就说：没有桌面。`;
-const PROBE_VISION =
-  `${TAG} 体检·视觉：请真调 visionqa/look_image OCR 或 describe，读 C:\\D\\opt\\agents-to-feishu\\team-artifacts\\probe-ocr.png，只复述图中文字（原样英文数字）。禁止 curl；没有工具就说：没有视觉。`;
 const PROBE_GEN =
   `${TAG} 体检·生图：请真调 generate_image/comfy，512x512 简笔「简笔画：一只猫」，120秒内出图即算成功，回「已出图」+图片路径或 image_key。没有工具就说：没有生图。`;
 
@@ -88,10 +85,8 @@ const PROBES = {
   mh: PROBE_MH,
   lark: PROBE_LARK,
   desktop: PROBE_DESKTOP,
-  vision: PROBE_VISION,
   gen: PROBE_GEN,
 };
-const OCR_TEXT = 'CTI-PROBE-2026';
 
 const LARK_CANDIDATES = [
   process.env.MCP_CHECK_LARK_CLI,
@@ -426,27 +421,6 @@ function judgeDesktop(raw) {
   return { state: '❌', note: '未命中desktop判定' };
 }
 
-function judgeVision(raw) {
-  const t = stripTags(raw);
-  if (!t.trim()) return { state: '❌', note: 'timeout/empty' };
-  if (/api-gate|拦下：这是飞书/i.test(t)) return { state: '❌', note: 'api-gate拦门' };
-  if (/\bAPI 报错\b|BadRequestError|Process exited with code/i.test(t)) {
-    return { state: '❌', note: 'API报错/未进工具' };
-  }
-  const noTool = /没有视觉|no vision|没有 visionqa|没有 look_image/i.test(t);
-  if (noTool) return { state: '❌', note: '无视觉' };
-  // 复述对 OCR 文本才算过；差一个字符不算
-  const saidOk = t.includes(OCR_TEXT);
-  const toolHit =
-    /look_image|visionqa|ocr|describe|视觉/i.test(t) &&
-    /工具执行|调用成功|✅|tool|复述|图中/i.test(t);
-  if (saidOk && (toolHit || true)) return { state: '✅', note: 'native·复述正确' };
-  if (saidOk) return { state: '✅', note: '复述正确' };
-  if (toolHit && !saidOk) return { state: '❌', note: '复述不符(非CTI-PROBE-2026)' };
-  if (/unsupported call/i.test(t)) return { state: '❌', note: 'unsupported call' };
-  return { state: '❌', note: '未命中vision判定' };
-}
-
 function judgeGen(raw) {
   const t = stripTags(raw);
   if (!t.trim()) return { state: '❌', note: 'timeout/empty' };
@@ -473,13 +447,12 @@ const JUDGES = {
   mh: judgeMh,
   lark: judgeLark,
   desktop: judgeDesktop,
-  vision: judgeVision,
   gen: judgeGen,
 };
 
 function defaultWaitMs(kind) {
   if (kind === 'gen') return Math.max(120000, Number(process.env.MCP_CHECK_GEN_WAIT || 130000));
-  if (kind === 'vision' || kind === 'desktop') return Math.max(70000, Number(process.env.MCP_CHECK_VIS_WAIT || 70000));
+  if (kind === 'desktop') return Math.max(70000, Number(process.env.MCP_CHECK_VIS_WAIT || 70000));
   return 50000;
 }
 

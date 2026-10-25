@@ -256,7 +256,7 @@ export class ClaudeProvider implements RuntimeProvider {
   attachBridgeTools(deps: BridgeToolDeps): void {
     this.toolDeps = deps;
     this.sdkMcp = buildClaudeBuiltinServer(deps);
-    rtLog('[claude] attachBridgeTools: 进程内内置工具 server 已构建（look_image/generate_image/reverse_prompt/transcribe/send_voice/skill_index/skill_read）');
+    rtLog('[claude] attachBridgeTools: 进程内内置工具 server 已构建（generate_image/reverse_prompt/transcribe/send_voice/skill_index/skill_read）');
   }
 
   /**

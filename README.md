@@ -8,17 +8,17 @@
 **设计原则（2026-08-25）**
 - **完全独立**：运行与本机 DSH / dsh-harness 解耦，`config-store.json` 是唯一配置真相源。clone 项目、配好模型 key 即可跑。
 - **配置中心**：管理任意多个 Agent，每个 Agent 是一个飞书应用 + 一套模型/MCP 配置。网页可视化增删改。
-- **内建能力**：看图 `look_image` 项目自带（只在配置里填一个视觉模型 key 就能用，无需外部看图服务）。
+- **看图能力**：由模型自身多模态能力承担（现役模型基本自带识图）。原项目自带的 `look_image` 工具与配置中心「看图配置」页已于 2026-10-23 移除，统一改为把图片本地路径交给 agent、由模型自行看图。
 - **重 MCP 外接**：要装客户端/权限的 MCP（如 win-desktop-helper 控制电脑）独立挂载，不强制依赖。
 
 ## 架构
 
 ```
-config-store.json（唯一真相源：providers 池 / mcps 池 / agents 分配置 / vision 看图配置）
+config-store.json（唯一真相源：providers 池 / mcps 池 / agents 分配置）
         │  配置中心 (agentsconfig 服务)
         ├── 渲染生成 → 每个 agent 的 config.<id>.env + cordis.yml（或自建内核配置）
         ├── 飞书桥接进程（每 Agent 一个）
-        └── 网页（概览 / Agent 分配置 / 总配置·模型 / 总配置·MCP / 看图配置）
+        └── 网页（概览 / Agent 分配置 / 总配置·模型 / 总配置·MCP）
 ```
 
 ## 快速开始（新机器 clone 后 10 分钟上手）
@@ -48,7 +48,7 @@ config-store.json（唯一真相源：providers 池 / mcps 池 / agents 分配�
 ## 配置
 
 - 配置存储文件：`~/.agents-to-feishu/config-store.json`（未生成则首次创建默认骨架）
-- 凭证：每个 provider/看图的水平，可在对应 `apiKeyEnv` 的背后放
+- 凭证：每个 provider 的水平，可在对应 `apiKeyEnv` 的背后放
   `<home>/.agents-to-feishu/.credentials.yaml`（`KEY=value` 或 `KEY: value`）或直接在网页填。
 - 配置中心服务：端口默认 13600，网页 `http://<host>:13600`（本机长期运行可注册为 nssm 服务 `agentsconfig`）。
 
@@ -86,8 +86,6 @@ config-store 选的 provider/model 推送为 DeepTutor 的专属 profile（`llm-
 | PUT/DELETE | `/api/agents/:id` | 改/删 Agent |
 | POST | `/api/agents/:id/apply` | 应用：渲染生成其配置文件并重启进程（真实生效） |
 | GET  | `/api/agents/:id/status` | 该 Agent 运行时状态（Session/Cache/平均/上下文/余额） |
-| GET/PUT | `/api/vision` | 读/写内建看图配置 |
-| POST | `/api/vision/test` | 测试看图（imagePath + task: describe/reverse/text） |
 | PUT | `/api/providers/:id` / `/api/mcps/:id` | 改总配置（模型/MCP 池） |
 
 ## 目录结构

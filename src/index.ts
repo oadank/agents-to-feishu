@@ -26,9 +26,9 @@ import { createWorkBuddyProvider } from './providers/workbuddy.js';
 import { handleCommand } from './commands.js';
 import type { RuntimeProvider } from './providers/types.js';
 import { transcribe } from './voice/asr.js';
-import { lookImage } from './vision/look.js';
 import { DEFAULT_SPEECH, readStore } from './config-center/store.js';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,7 +82,7 @@ function reportInterruptedTurnsOnBoot(): void {
 }
 
 // ── pending 图片（对齐 agents-to-im：先发图，文本到达后合并）──
-// key = chatId；收到图片先挂号提醒补文本，收到文本时把图片路径合并给 agent（agent 用 look_image 按需求看图）
+// key = chatId；收到图片先挂号提醒补文本，收到文本时把图片路径合并给 agent（agent 用自身视觉自行看图）
 const pendingImages = new Map<string, { imagePath: string; messageId: string; ts: number }>();
 const PENDING_IMG_TTL_MS = () => win().pendingImgMs; // 票 T-0019③：值收口 windows.ts，此处不再写死
 /** 下载中的图片任务（chatId → job）：修复"文字跑在图片下载前面"的竞态，文字先到时等它落盘 */
@@ -97,36 +97,11 @@ function prunePendingImages(now = Date.now()): void {
   }
 }
 
-// ── 看图"桥接代劳"（2026-08-30 能力配齐：对齐 claude/dsh 标杆）──
-// claude（SDK 进程内工具）/ dsh（ACP 插件）自带 look_image，路径注入即可；
-// 其余 runtime 的 CLI 没有看图工具 ⇒ 桥接 pre 代劳：先 look_image 识别，把描述注入 prompt。
-function hasBuiltinVision(): boolean {
-  try {
-    const bot = process.env.CTI_BOT || '';
-    const agent = readStore().agents.find((a) => a.id === bot);
-    const rt = agent?.runtime || 'dsh';
-    return rt === 'claude' || rt === 'dsh';
-  } catch {
-    return false;
-  }
-}
-
-/** 图片注入文本：自带看图工具的给路径（agent 自己调 look_image）；其余桥接代劳识别后注入描述 */
+// ── 图片注入文本（2026-10-23 变更：不再桥接代劳识图）──
+// 现役模型大多自带视觉，统一只把图片本地路径交给 agent，由 agent 用自身视觉自行看图。
+/** 图片注入文本：把图片本地路径交给 agent，由 agent 用自身视觉自行看图 */
 async function imagePromptFor(imagePath: string): Promise<string> {
-  const pathOnly = `[用户附了一张图片，本地路径: ${imagePath}]`;
-  if (hasBuiltinVision()) return pathOnly;
-  try {
-    const r = await lookImage({ imagePath, task: 'describe' });
-    const desc = (r.ok && r.text ? r.text : '').trim();
-    if (desc) {
-      console.log(`[agents-to-feishu] 桥接代劳看图完成 path=${imagePath} desc.len=${desc.length}`);
-      return `[用户发来一张图片，已由桥接代为识别。\n图片本地路径: ${imagePath}\n图片内容描述: ${desc}]`;
-    }
-    console.warn(`[agents-to-feishu] 桥接代劳看图无输出，回退路径注入 path=${imagePath}`);
-  } catch (e) {
-    console.warn(`[agents-to-feishu] 桥接代劳看图失败，回退路径注入: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  return pathOnly;
+  return `[用户附了一张图片，本地路径: ${imagePath}]`;
 }
 
 // ── 收图磁盘清理策略（2026-08-30 老大提出：垃圾越来越多）──
@@ -842,7 +817,7 @@ async function handleIncoming(
 
   // 图片消息：仅下载挂号（pending），不预识别、不触发。
   // 对齐 agents-to-im：收到图片提醒用户补文字需求；等文本到达后合并，
-  // 把图片本地路径交给 agent，agent 用 look_image 工具（describe/reverse/text）按文本需求自行看图。
+  // 把图片本地路径交给 agent，由 agent 用自身视觉自行看图。
   if (msg.message_type === 'image') {
     const imageKey = parseImageFileKey(msg.content);
     if (!imageKey) {
