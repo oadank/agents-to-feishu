@@ -241,10 +241,34 @@ export class SessionManager {
     return [...this.sessions.values()];
   }
 
-  /** 解析 /new 后绑定的目录：优先命令参数，其次默认目录 */
+  /**
+   * 这段文本像不像一个目录？（T-0036 加固）
+   *
+   * 事故：bot 之间互发 `/new` 时，lark_send_as_user 会在正文尾部自动追加落款
+   * `(from-bot:opencode · 直接回复本消息即可，桥接自动转达，勿再 send_as_user)`。
+   * 旧 resolveWorkdir 对参数【零校验】，落款被当目录 `path.join` 进默认目录，
+   * dsh 状态栏于是显示成 `📁 C:\D\opt(from-bot:opencode · …)`（老大 2026-10-03 实拍）。
+   * 落款/中文标点/括号/通配符永远不会出现在合法路径里 ⇒ 命中即判"不是目录"。
+   */
+  looksLikeWorkdir(arg: string): boolean {
+    const s = arg.trim();
+    if (!s || s.length > 240) return false;
+    // 落款/标点类字符不可能出现在被敲进命令的路径里（`C:\D\opt(from-bot:…)` 就是这次事故）
+    if (/[()（）<>|?*"'\[\]{}·，。；：,;]/.test(s) || /[\r\n]/.test(s)) return false;
+    // 绝对路径 / UNC：直接认
+    if (/^[A-Za-z]:[\\/]/.test(s) || /^\\\\[^\\]/.test(s)) return true;
+    // 相对写法：字符集先收紧（只留目录名常见字符 + 分隔符 + 空格）
+    if (!/^\.?\.?([\\/]?[\w\u4e00-\u9fff.\- ]+)+$/.test(s)) return false;
+    // 带分隔符（sub\dir、.\x）当目录认；【裸词】必须本机真存在才算，否则 `/new 帮我看看代码`
+    // 这种误打会被绑成工作区、显示在状态栏上（老大嫌吵的正是这类长串）
+    return /[\\/]/.test(s) || fs.existsSync(s);
+  }
+
+  /** 解析 /new 后绑定的目录：优先命令参数（必须像目录），其次默认目录 */
   resolveWorkdir(arg: string | undefined): string {
-    if (!arg) return this.opts.defaultWorkdir;
-    const abs = path.isAbsolute(arg) ? arg : path.join(this.opts.defaultWorkdir, arg);
+    const cand = arg && this.looksLikeWorkdir(arg) ? arg.trim() : '';
+    if (!cand) return this.opts.defaultWorkdir;
+    const abs = path.isAbsolute(cand) ? cand : path.join(this.opts.defaultWorkdir, cand);
     return abs;
   }
 }

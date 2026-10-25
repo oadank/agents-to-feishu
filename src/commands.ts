@@ -44,13 +44,28 @@ function validateSendableImage(input: string): { ok: true } | { ok: false; reaso
   return { ok: true };
 }
 
+/**
+ * 剥掉链路机器标记（T-0036）：`lark_send_as_user` 会给 bot 间消息尾部自动追加
+ * `(from-bot:X · 直接回复本消息即可…)`，还有 `[身份名]` 前缀 /「（自动回执）」。
+ * 这些是**传输层落款，永远不可能是命令参数** —— 以前没净化，dsh 收到我发的 `/new`
+ * 时落款被当成目录参数喂进 resolveWorkdir，状态栏显示成 `📁 C:\D\opt(from-bot:opencode · …)`。
+ */
+function stripMachineMarks(raw: string): string {
+  return raw
+    .replace(/\((?:from-bot|to-bot):[^)]*\)/g, ' ')
+    .replace(/（自动回执）/g, ' ')
+    .replace(/^\s*\[[^\]\n]{1,24}\]\s*/, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export async function handleCommand(
   raw: string,
   chatId: string,
   engine: MessageEngine,
   sessions: SessionManager,
 ): Promise<void> {
-  const [cmd, ...rest] = raw.trim().split(/\s+/);
+  const [cmd, ...rest] = stripMachineMarks(raw).split(/\s+/);
   const arg = rest.join(' ');
 
   switch (cmd) {
@@ -67,9 +82,15 @@ export async function handleCommand(
       console.log(`[agents-to-feishu] 执行 /new 命令 chat=${chatId.slice(0, 12)} arg=${arg || '(默认目录)'}`);
       const session = await sessions.reset(chatId);
       const dir = sessions.resolveWorkdir(arg || undefined);
-      session.workdir = dir;
+      session.workdir = dir; // 🔴 别漏：状态栏 📁 与 provider 的 cwd 都读这个字段
+      // 参数明显不是目录（落款/一串中文）→ 不污染工作区，按默认目录绑定并【当面说出来】
+      const ignoredArg = !!arg && !sessions.looksLikeWorkdir(arg);
       // 文案对齐老项目：✅ 已新建 {agent} 会话｜工作区 \`{dir}\`｜直接对话即可
-      await engine.sendCommandCard(chatId, `✅ 已新建 ${engine.botName} 会话｜工作区 \`${dir}\`｜直接对话即可`);
+      await engine.sendCommandCard(
+        chatId,
+        `✅ 已新建 ${engine.botName} 会话｜工作区 \`${dir}\`｜直接对话即可`
+        + (ignoredArg ? `\n⚠️ 参数「${arg.slice(0, 48)}」不是目录，已忽略（按默认目录绑定）` : ''),
+      );
       break;
     }
     case '/stop': {
