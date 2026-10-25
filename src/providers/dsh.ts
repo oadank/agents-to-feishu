@@ -81,6 +81,21 @@ function readDeepSeekApiKey(): string {
  * 缩进按【相对层级】解析（providers 键为锚点）：同一样式在 settings.yaml（providers 缩进 2）
  * 与 profile cordis.patch.yml（providers 缩进 4）下都成立；绝对缩进写死会在其中一边失效。
  */
+/**
+ * [2026-10-02 修] 剥掉 YAML 标量的成对包裹引号。
+ * 背景：render.ts 的 `yamlVal()`（T-0031 批三·4 安全转义）会把值输出成 `"litellm"` 这种
+ * 带引号形式。YAML parser 自己会剥引号，harness 侧拿到的值是正确的；但本文件用的是
+ * 【朴素正则】直接取字符串，于是把引号当成值的一部分 —— 校验器拿 `"litellm"` 去查
+ * 路由表里的 `litellm` 键必然查不到，产生"provider 不存在"的【误拦】，dsh bot 因此
+ * 完全起不来（错误消息里那个 `""litellm""` 双引号就是本 bug 的指纹）。
+ */
+function unquoteYaml(v: string | undefined): string | undefined {
+  if (v === undefined) return undefined;
+  const t = v.trim();
+  const m = /^"([^"]*)"$|^'([^']*)'$/.exec(t);
+  return m ? (m[1] ?? m[2] ?? '') : t;
+}
+
 function parseSettingsProviders(text: string): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   let baseInd = -1; // providers 键的缩进；-1 = 尚未进入
@@ -100,9 +115,11 @@ function parseSettingsProviders(text: string): Record<string, string[]> {
     if (ind === baseInd + 2 && key) { cur = name; out[cur] = out[cur] ?? []; inModels = false; continue; }
     if (ind === baseInd + 4 && key) { inModels = name === 'models'; continue; }
     if (ind >= baseInd + 6 && inModels && cur) {
-      const m = /(?:^|[\s,\[])-\s*(?:id|name)\s*:\s*([\w.\-]+)/.exec(raw);
+      // [2026-10-02 修] 值可能带引号（render.ts 的 yamlVal() 会写成 `- id: "DV4F"`），
+      // 旧字符类 [\w.\-] 不吃引号 ⇒ 该模型被整条漏收，校验器随后误报"模型未注册"。
+      const m = /(?:^|[\s,\[])-\s*(?:id|name)\s*:\s*"?([\w.\-]+)"?/.exec(raw);
       if (m?.[1]) out[cur]?.push(m[1]);
-      const inline = /^\s*(?:id|name)\s*:\s*([\w.\-]+)/.exec(raw);
+      const inline = /^\s*(?:id|name)\s*:\s*"?([\w.\-]+)"?/.exec(raw);
       if (inline?.[1]) out[cur]?.push(inline[1]);
     }
   }
@@ -120,6 +137,59 @@ function parseSettingsProviders(text: string): Record<string, string[]> {
  * cordis.patch.yml**（acp bot 用 `--profile acp` ⇒ 读 profiles/acp/）。旧逻辑
  * 文件不存在直接 return null，校验长期形同虚设。现按「实际会加载的文件」收集路由表。
  */
+/**
+ * [T-0039 2026-10-08] profile bundles 里由【插件自带】注册的 provider 路由名。
+ *
+ * 背景：`dsh-workbuddy-connect` 不经 llm-pi-ai 的 config providers 表声明自己，而是在
+ * 运行时用 `ctx.llm.registerAdapter(['workbuddy', 'workbuddy-ai'], adapter)` 把路由塞进
+ * llm seam（loopback shim，非 HTTP 端点 ⇒ 没有 baseURL 可写进任何配置文件）。
+ * 旧校验器只读 cordis.patch.yml / settings.yaml 的 llm-pi-ai.providers ⇒ 查不到
+ * `workbuddy` 就【响亮拒绝 spawn】（见 10-02 日志 "spawn plan FAILED"）。
+ * 那不是悬空组合，是合法组合 —— 校验器缺的是「bundle 自带路由」这一维信息。
+ *
+ * 做法（保守）：只有当 profile 的 package.json `dsh.profile.bundles` 里确实装了该插件、
+ * 且插件包目录存在时才放行；插件的 config providers 表仍查不到该模型 ⇒ 依旧拦（防真悬空）。
+ * 白名单形态（插件名 → 路由名 + 模型清单兜底路径）是为后续 codex/connect 类插件留位，
+ * 不做「凡 bundle 都放行」的泛化。
+ */
+const PLUGIN_OWNED_ROUTES: Record<string, { providers: string[] }> = {
+  'dsh-workbuddy-connect': { providers: ['workbuddy', 'workbuddy-ai'] },
+};
+
+/** WorkBuddy 插件的模型清单落点（插件从桌面 App 拉一次目录并缓存在 DSH_HOME 根） */
+function pluginModelIds(home: string): string[] {
+  try {
+    const f = path.join(home, '.workbuddy-catalog.json');
+    if (!fs.existsSync(f)) return [];
+    const j = JSON.parse(fs.readFileSync(f, 'utf-8')) as { entries?: Record<string, { models?: Array<{ id?: string }> }> };
+    return [...new Set(Object.values(j.entries ?? {}).flatMap((e) => (e.models ?? []).map((m) => m.id).filter((x): x is string => !!x)))];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 返回 provider 由 profile bundle 自带路由时的模型清单；provider 不属于任何 bundle 插件 → null。
+ * @param routeOwnerCheck 命中插件的 node_modules 目录（存在性即视为已安装）
+ */
+function pluginOwnedProviderModels(provider: string): string[] | null {
+  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+  for (const [pkg, route] of Object.entries(PLUGIN_OWNED_ROUTES)) {
+    if (!route.providers.includes(provider)) continue;
+    const acpPkgJson = path.join(home, 'profiles', 'acp', 'package.json');
+    try {
+      const j = JSON.parse(fs.readFileSync(acpPkgJson, 'utf-8')) as { dsh?: { profile?: { bundles?: string[] } } };
+      const bundles = j.dsh?.profile?.bundles ?? [];
+      if (!bundles.includes(pkg)) continue;
+      if (!fs.existsSync(path.join(home, 'profiles', 'acp', 'node_modules', pkg))) continue;
+      return pluginModelIds(home);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 function checkAcpModelSelection(provider: string, model: string): string | null {
   const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
   // 按 ACP 启动实际加载顺序收集：profile patch（真正生效）→ 旧 settings 残留（兜底）。
@@ -141,6 +211,12 @@ function checkAcpModelSelection(provider: string, model: string): string | null 
     for (const [k, v] of Object.entries(provs)) {
       merged[k] = [...new Set([...(merged[k] ?? []), ...v])];
     }
+  }
+  // [T-0039 2026-10-08] provider 由 profile bundle 插件自带路由 ⇒ 用插件缓存的模型清单当路由表。
+  // 命中即视为合法（WorkBuddy 的路由不在任何配置文件里，是运行时 registerAdapter 进来的）。
+  const owned = pluginOwnedProviderModels(provider);
+  if (owned !== null) {
+    merged[provider] = [...new Set([...(merged[provider] ?? []), ...owned])];
   }
   const names = Object.keys(merged);
   if (!names.length) return null; // 读不出结构就放行，避免误伤
@@ -202,8 +278,13 @@ function ensureAcpPatch(cordisPath: string, log?: (m: string) => void): { patchP
       return m && m[1] ? m[1].trim() : '';
     };
     const agentSeg = segs.find((s) => s.id === 'acp-agent');
-    const provider = agentSeg ? /^\s+provider:\s*(\S+)/m.exec(agentSeg.text)?.[1] : undefined;
-    const model = agentSeg ? /^\s+model:\s*(\S+)/m.exec(agentSeg.text)?.[1] : undefined;
+    // [2026-10-02 修] 必须剥引号：render.ts 现按 yamlVal() 输出 `provider: "litellm"`，
+    // 旧的 (\S+) 会把引号一起吃进来 ⇒ 派生的 acp.patch.yml 写成带引号的值，且
+    // checkAcpModelSelection 拿 `"litellm"` 查 litellm 键必然失配 ⇒ 误拦、bot 起不来。
+    const rawProvider = agentSeg ? /^\s+provider:\s*(\S+)/m.exec(agentSeg.text)?.[1] : undefined;
+    const rawModel = agentSeg ? /^\s+model:\s*(\S+)/m.exec(agentSeg.text)?.[1] : undefined;
+    const provider = unquoteYaml(rawProvider);
+    const model = unquoteYaml(rawModel);
 
     let out = '# Generated by agents-to-feishu DshProvider from cordis.yml — DO NOT EDIT BY HAND.\n';
     out += '# 换模型请在配置中心(:13600)保存，本文件随之重新派生。\n';
@@ -1130,10 +1211,42 @@ export class DshProvider implements RuntimeProvider {
     // 旧写法 `String(u.title || 'tool')` 会渲染成字面量 "tool"，卡片上只剩 `❌ tool`。
     // 按 toolCallId 缓存首个 tool_call 的 title 补全，再兜底 ACP kind。
     const toolTitles = new Map<string, string>();
+    /* 工具参数快照缓存：toolCallId → {tool, input, pushed, pretty}
+     * ACP 工具参数流式拼装（初始 {} → update 快照 → completed 时 undefined），
+     * 必须按 id 缓存才能在终态补全参数。随每轮 prompt 生命周期，与 toolTitles 同作用域。 */
+    const toolSnap = new Map<string, { tool: string; input: string; pushed: boolean; pretty: string }>();
     const KIND_LABEL: Record<string, string> = {
       read: '读文件', edit: '改文件', delete: '删文件', move: '移动文件',
       search: '搜索', execute: '执行命令', think: '思考', fetch: '抓取', other: '工具',
     };
+    // [2026-10-14 老大令·方案1] <think> 剥离：QW3.8F 会把 <think>…</think> 思考原文直接混进
+    // agent_message_chunk 正文（rt 日志实锤：text-delta preview=<think>I now have…），
+    // 飞书卡不认这标签，跟正文糊成一坨占满聊天窗。照抄 gemini.ts:324-353 的缓冲逻辑：
+    // 见 <think> 起缓冲，收齐 </think> 后思考转 thinking 流、余下正文照发，流式保持。
+    let thinkBuf = '';
+    const splitThink = (text: string): void => {
+      const tagStart = '<think>';
+      const tagEnd = '</think>';
+      if (thinkBuf) {
+        thinkBuf += text;
+        const endIdx = thinkBuf.indexOf(tagEnd);
+        if (endIdx < 0) return; // 还没收完，继续等
+        const thinkingText = thinkBuf.slice(tagStart.length, endIdx).trim();
+        const bodyText = thinkBuf.slice(endIdx + tagEnd.length).trim();
+        thinkBuf = '';
+        if (thinkingText) { queue.push({ type: 'thinking', text: thinkingText }); }
+        if (bodyText) { queue.push({ type: 'text', text: bodyText }); }
+        poke();
+        return;
+      }
+      const s = text.indexOf(tagStart);
+      if (s < 0) { queue.push({ type: 'text', text }); poke(); return; }
+      const head = text.slice(0, s).trim();
+      if (head) { queue.push({ type: 'text', text: head }); }
+      thinkBuf = text.slice(s);
+      poke();
+    };
+
     const promptHandler: ActivePrompt = {
       promptId,
       sessionId: session.sessionId,
@@ -1148,23 +1261,27 @@ export class DshProvider implements RuntimeProvider {
             // _meta.usage 且往往就是唯一正文（不再有先行增量），必须发出文本，否则空回复。
             recordUsage(metaUsage);
             queue.push({ type: 'usage', usage: metaUsage, sessionId: session.sessionId });
-            if (delta) {
-              queue.push({ type: 'text', text: delta });
-              poke();
-            }
+            if (delta) splitThink(delta);
             rtLog(`[dsh] commit chunk len=${delta?.length || 0} (usage + text)`);
           } else if (delta) {
             // text-delta 增量：实时发出（流式）
-            queue.push({ type: 'text', text: delta });
-            poke();
+            splitThink(delta);
             rtLog(`[dsh] text-delta len=${delta.length} preview=${delta.slice(0, 40).replace(/\n/g, '\\n')}`);
           }
         } else if (update?.sessionUpdate === 'agent_thought_chunk' && update?.content?.type === 'text') {
           queue.push({ type: 'thinking', text: update.content.text });
           poke();
         } else if (update?.sessionUpdate === 'tool_call' || update?.sessionUpdate === 'tool_call_update') {
+          /* 🔴 2026-10-24 修「工具执行块参数是 {}」bug（同 workbuddy.ts 修法，老大截图实锤）：
+           * codebuddy ACP 的工具参数是流式拼装的——
+           *   ① tool_call 初始帧 rawInput/input 恒为 {}（卡片显示 "Read — {}" 的来源）
+           *   ② tool_call_update 帧 rawInput 是逐步完整的快照（{"file_path":""} → 完整）
+           *   ③ completed 帧 rawInput 变 undefined（要沿用缓存，不能丢参数）
+           * 修法：按 toolCallId 缓存参数快照；空参数不显示 "{}"；
+           *       中间帧吞掉只更缓存，pending（参数齐+title 漂亮）才推首行，
+           *       completed/failed 推终态——防半成品刷屏。 */
           const u = update as any;
-          const status = String(u.status || (update?.sessionUpdate === 'tool_call' ? 'running' : 'done'));
+          const st = String(u.status || (update?.sessionUpdate === 'tool_call' ? 'running' : 'done'));
           // [2026-09-13] title 按 toolCallId 缓存补全（失败型 update 不带 title），详见上方注释
           const toolCallId = typeof u.toolCallId === 'string' ? u.toolCallId : '';
           const incomingTitle = typeof u.title === 'string' && u.title.trim() ? u.title.trim() : '';
@@ -1173,16 +1290,38 @@ export class DshProvider implements RuntimeProvider {
             || (toolCallId ? toolTitles.get(toolCallId) ?? '' : '')
             || KIND_LABEL[String(u.kind ?? '')]
             || 'tool';
-          queue.push({
-            type: 'tool',
-            tool: toolName,
-            status: status === 'failed' ? 'error' : status === 'completed' ? 'done' : 'running',
-            input: typeof u.rawInput === 'string' ? u.rawInput.slice(0, 200) : JSON.stringify(u.rawInput ?? '').slice(0, 200),
-            // [2026-09-01] 透传工具结果文本（harness ACP 已带 rawOutput ≤2000 字符）；
-            // send_voice 的 voiceId 就在里面，桥接靠它读语音对象投递到飞书
-            output: typeof u.rawOutput === 'string' ? u.rawOutput.slice(0, 500) : undefined,
-          });
-          poke();
+          let snap = toolSnap.get(toolCallId);
+          if (!snap) { snap = { tool: toolName, input: '', pretty: '', pushed: false }; toolSnap.set(toolCallId, snap); }
+          const rawIn = (u.rawInput !== undefined ? u.rawInput : u.input) as Record<string, unknown> | undefined;
+          if (rawIn && typeof rawIn === 'object' && Object.keys(rawIn).length > 0) {
+            snap.input = JSON.stringify(rawIn).slice(0, 2000);
+          }
+          if (u.title && !/^[`]/.test(String(u.title)) && String(u.title) !== toolName) snap.pretty = String(u.title).slice(0, 80);
+          const isTerminal = st === 'completed' || st === 'failed';
+          const isPending = st === 'pending';           // pending 帧 = 参数齐 + title 人类可读
+          // [2026-09-01] 透传工具结果文本（harness ACP 已带 rawOutput ≤2000 字符）；
+          // send_voice 的 voiceId 就在里面，桥接靠它读语音对象投递到飞书——终态帧必带
+          const output = typeof u.rawOutput === 'string' ? u.rawOutput.slice(0, 500) : undefined;
+          if (!snap.pushed && (isPending || (isTerminal && snap.input))) {
+            snap.pushed = true;
+            queue.push({
+              type: 'tool',
+              tool: snap.pretty || toolName,
+              status: 'running',
+              input: snap.input || undefined,
+            });
+            poke();
+          }
+          if (isTerminal && snap.pushed) {
+            queue.push({
+              type: 'tool',
+              tool: snap.pretty || toolName,
+              status: st === 'failed' ? 'error' : 'done',
+              input: snap.input || undefined,
+              output,
+            });
+            poke();
+          }
         }
       },
       onDone: (err?: string) => {
