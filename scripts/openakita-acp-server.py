@@ -35,6 +35,7 @@ WS = os.environ.get(
 os.chdir(WS)
 os.environ.setdefault("LLM_ENDPOINTS_CONFIG", os.path.join(WS, "data", "llm_endpoints.json"))
 os.environ.setdefault("OPENAKITA_AUTO_CONFIRM", "1")
+BANNER = "日志预检"
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -45,6 +46,41 @@ if hasattr(sys.stdout, "reconfigure"):
 # 因此 import 期间临时把 stdout 换成 stderr，让 handler 永久指向 stderr。
 _real_stdout = sys.stdout
 sys.stdout = sys.stderr
+
+# [2026-10-17 日志预检] 上一个进程若被 nssm restart 落成孤儿（venv 启动器→真 python 的
+# 孙进程链杀不干净），会一直握着 openakita.log → 新进程 setup_logging 直接 PermissionError
+# 退出 code=1，bot 整条链瘫。这里在 import openakita 前先试锁：打不开就把旧日志改名让路，
+# 新进程建新文件，旧进程继续写它的旧 inode（Windows 改名后句柄仍有效），双活不冲突。
+_candidates = [os.path.join(WS, "logs", "openakita.log")]
+try:
+    import re as _re
+    _ws_env = os.path.join(WS, ".env")
+    if os.path.isfile(_ws_env):
+        _m = _re.search(r'^LOG_DIR=(.+)$', open(_ws_env, encoding="utf-8", errors="replace").read(), _re.M)
+        if _m:
+            _ld = _m.group(1).strip().strip('"')
+            if not os.path.isabs(_ld):
+                _ld = os.path.join(WS, _ld)
+            if _ld not in _candidates:
+                _candidates.append(os.path.join(_ld, "openakita.log"))
+except Exception:
+    pass
+for _log_file in _candidates:
+    try:
+        _probe = open(_log_file, "a", encoding="utf-8")
+        _probe.close()
+        continue
+    except FileNotFoundError:
+        continue
+    except PermissionError:
+        _alt = _log_file + f".orphan-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            os.rename(_log_file, _alt)
+            sys.stderr.write(f"[acp] {BANNER} {_log_file} 被孤儿占用，已改名让路\n"); sys.stderr.flush()
+        except OSError as _oe:
+            sys.stderr.write(f"[acp] {BANNER} {_log_file} 改名失败: {_oe}\n"); sys.stderr.flush()
+    except Exception as _oe:
+        sys.stderr.write(f"[acp] {BANNER} {_log_file} 预检异常: {_oe}\n"); sys.stderr.flush()
 
 from openakita.main import get_agent  # noqa: E402
 from openakita.sessions.session import Session  # noqa: E402
@@ -79,11 +115,34 @@ def _dbg(msg: str) -> None:
         pass
 
 
+async def _dump_pending_tasks(tag: str) -> None:
+    """[2026-10-17 探挂] agent.initialize 挂死排查：把所有挂起协程的栈吐到 stderr（rt.log 可见）。"""
+    try:
+        import asyncio as _aio
+        tasks = [t for t in _aio.all_tasks() if not t.done()]
+        _dbg(f"[acp][hangdump:{tag}] pending tasks={len(tasks)}")
+        for t in tasks:
+            _dbg(f"[acp][hangdump:{tag}] ---- {t.get_name()}")
+            for line in t.print_stack(limit=12).splitlines():
+                _dbg(f"[acp][hangdump:{tag}]   {line}")
+    except Exception as exc:
+        _dbg(f"[acp][hangdump:{tag}] dump failed: {exc}")
+
+
 async def get_agent_safe():
     global agent
     if agent is None:
         agent = get_agent()
-        await agent.initialize()
+        # [2026-10-17 探挂] initialize 挂死不改语义：300s 超时先吐 hangdump 再继续等，
+        # 每 300s 重复 dump 一次，定位卡死的 await 后即可移除本探针。
+        init_t = asyncio.ensure_future(agent.initialize())
+        while True:
+            done, _p = await asyncio.wait({init_t}, timeout=300)
+            if done:
+                await init_t  # 透传结果/异常
+                _dbg("[acp] agent.initialize completed")
+                return
+            await _dump_pending_tasks("initialize-300s")
     return agent
 
 
@@ -288,6 +347,9 @@ async def main_loop() -> None:
                 "capabilities": {"session": True},
                 "model": {"id": "openakita", "name": "OpenAkita"},
             }})
+            # [2026-10-17 提速] agent.initialize 实测要 4~5 分钟（技能/插件扫描 + 冷缓存），
+            # 懒加载会让首条消息干等。握手完成即后台预热，真消息到达时通常已就绪。
+            asyncio.ensure_future(get_agent_safe())
         elif method == "session/new":
             acp_id = f"ok-{uuid.uuid4().hex[:12]}"
             sessions[acp_id] = {"ok_session": make_ok_session(acp_id), "history": [], "task": None}
