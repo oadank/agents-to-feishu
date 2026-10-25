@@ -185,12 +185,14 @@ export function buildBuiltinTools(deps: BridgeToolDeps): BuiltinTool[] {
         '文生图/图生图：默认走 N5105 agnes（快但画面差），失败自动回落本机 ComfyUI/XDN。返回 JSON 含 source/output_name/path。'
         + '用户要画图/生图时使用。'
         + '【要高质量/定稿/人像/海报/画面里带文字 → 必须显式传 template】传模板名（≠ agnes）会跳过 agnes 直发 8090→XDN。'
-        + '当前首选：文生图 "QW_image2.1-文生图"（Qwen-Image-2.1，7B，2K 直出、中文文字渲染准、支持透明底）；'
-        + '改图/换背景/换风格 "QW_image2.1-图像编辑"（需传参考图）。模板名可用 list_templates 现查。'
+        + '🔴 通用高质量默认 = "Krea2 Turbo-文生图"（老大 2026-09-18 拍板的文生图主力模板：画质最好且更快，1024 约 25s）。'
+        + '说「高质量/精致/4K/高清/定稿」一律先用它，不要选 QW，除非画面里必须出现中文/海报文字——'
+        + '那种场景才用 "QW_image2.1-文生图"（Qwen-Image-2.1，7B，2K 直出、中文文字渲染准、支持透明底）。'
+        + '改图/换背景/换风格/换脸 "QW_image2.1-图像编辑"（需传参考图）。模板名可用 list_templates 现查。'
         + '【服务侧已写死】成功后桥接会自动把本地图发到当前飞书会话，不必再自己 send_image。',
       schema: {
         prompt: z.string().describe('生图提示词'),
-        template: z.string().optional().describe('工作流模板名；省略=agnes 快路（画面差）；显式传（如 QW_image2.1-文生图 / QW_image2.1-图像编辑 / Krea2 Turbo-文生图.json / comfy）=直走 8090→XDN 高质量产线，不再先试 agnes'),
+        template: z.string().optional().describe('工作流模板名；省略=agnes 快路（画面差）；显式传（如 Krea2 Turbo-文生图（通用高质量首选）/ QW_image2.1-文生图（要中文文字时）/ QW_image2.1-图像编辑（改图，需参考图））=直走 8090→XDN 高质量产线，不再先试 agnes'),
         width: z.number().optional(),
         height: z.number().optional(),
         seed: z.number().optional(),
