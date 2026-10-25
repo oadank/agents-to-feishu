@@ -397,6 +397,73 @@ ${trimmed}`);
   // 票 T-0019①：回声指纹表清扫（周期来自 windows.ts，W1 已强制它 < 最短存活窗口）
   setInterval(() => { pruneEchoLedger(echoLedger, win()); }, win().echoPruneMs).unref?.();
 
+  // ══ 第17件·本机注入口（2026-10-24）：神经最后一公里 ══
+  // 让 ops-watch 等本机系统能把一条文本当「人类消息」注入 CEO 回合——
+  // 与飞书真人消息走完全相同的 handleIncoming 路径（CEO 侧零新逻辑）。
+  // 安全：只绑 127.0.0.1；令牌校验（ceo-inject.key，与 dashboard-auth.key 同目录）不过 403；
+  // 正文自动加【系统巡检】前缀，让 CEO 分清这不是老板亲口说的。
+  // 启用条件：runtime=workbuddy（注入语义与 ACP 同源）+ 端口已登记（env / INJECT_PORT_MAP）
+  // + 令牌文件在。别家 bot 不满足条件即不启用。
+  const injectSlug = String(process.env.CTI_BOT || '');
+  const INJECT_PORT_MAP: Record<string, number> = { ceo: 18755 };
+  const INJECT_PORT = Number(process.env[`CTI_BOT_${injectSlug.toUpperCase()}_INJECT_PORT`] || INJECT_PORT_MAP[injectSlug] || 0);
+  const INJECT_TOKEN_FILE = 'C:\\Users\\oadan\\.agents-to-feishu\\ceo-inject.key';
+  if (bot.runtime === 'workbuddy' && INJECT_PORT > 0) {
+    const injectServer = http.createServer((req, res) => {
+      const url = String(req.url || '/');
+      if (req.method !== 'POST' || url.split('?')[0] !== '/inject') {
+        res.writeHead(404); return res.end(JSON.stringify({ ok: false, error: 'not found' }));
+      }
+      let token = '';
+      try { token = fs.readFileSync(INJECT_TOKEN_FILE, 'utf8').trim(); } catch { token = ''; }
+      let given = String(req.headers['x-inject-key'] || '');
+      if (!given) { try { given = new URL(url, 'http://x').searchParams.get('key') || ''; } catch { given = ''; } }
+      if (!token || given !== token) {
+        res.writeHead(403); return res.end(JSON.stringify({ ok: false, error: 'forbidden' }));
+      }
+      let body = '';
+      req.on('data', (c) => { body += c; if (body.length > 64 * 1024) req.destroy(); });
+      req.on('end', () => {
+        let text = '';
+        try { text = String(JSON.parse(body || '{}').text || '').trim(); } catch { text = ''; }
+        if (!text) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'text required' })); }
+        // 会话解析：env 显式指定优先（改名前后的 chats-map 键不一致），再回退 chats-map.json 本 bot 条目
+        let chatId = String(process.env[`CTI_BOT_${injectSlug.toUpperCase()}_INJECT_CHAT`] || '');
+        if (!chatId) {
+          try {
+            const map = JSON.parse(fs.readFileSync(path.join('C:\\D\\opt\\agents-to-feishu\\logs', 'chats-map.json'), 'utf8'));
+            chatId = String(map[injectSlug] || '');
+          } catch { chatId = ''; }
+        }
+        if (!chatId) { res.writeHead(500); return res.end(JSON.stringify({ ok: false, error: 'no chat resolved' })); }
+        const ev = {
+          message: {
+            chat_id: chatId,
+            message_id: 'inj-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+            message_type: 'text',
+            content: JSON.stringify({ text: '【系统巡检】' + text })
+          },
+          sender: { sender_id: { open_id: 'local-inject-system' } }
+        } as unknown as FeishuMessageEventData;
+        void (async () => {
+          try {
+            // 本机注入 = 持钥匙的受信系统消息，豁免 allowlist（【系统巡检】前缀已标明身份）
+            await handleIncoming(ev, engine, sessions, ['*']);
+            console.log(`[inject] 注入回合完成 chat=${chatId}`);
+          } catch (e) {
+            console.error(`[inject] 注入回合失败:`, String(e).slice(0, 200));
+          }
+        })();
+        // 与飞书回调同款：立即返回（整轮在后台跑，回合可能长达数分钟）
+        res.writeHead(202); res.end(JSON.stringify({ ok: true, chat: chatId, note: '回合已注入后台执行' }));
+      });
+    });
+    injectServer.on('error', (e) => console.error(`[inject] 注入口启动失败 port=${INJECT_PORT}:`, String(e).slice(0, 140)));
+    injectServer.listen(INJECT_PORT, '127.0.0.1', () => {
+      console.log(`[inject] 本机注入口就绪 127.0.0.1:${INJECT_PORT} (POST /inject {text})`);
+    });
+  }
+
   // WebSocket 长连接（事件订阅）
   const dispatcher = new lark.EventDispatcher({}).register({
     'im.message.receive_v1': async (data: unknown) => {
