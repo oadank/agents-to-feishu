@@ -459,7 +459,11 @@ export class OpenClawProvider implements RuntimeProvider {
 
     // 人设注入：首条消息注入 systemPrompt（由 agents-to-feishu 统一注入）
     let fullPrompt = params.text;
-    if (!session.personaInjected) {
+    // [2026-10-17] 人设改走 gateway 原生 workspace AGENTS.md（~/.openclaw/workspace/AGENTS.md 已迁入）。
+    // 实测：桥内 persona + acp-bridge 通道组合 = embedded agent 稳定空回（stopReason=error
+    // non-visible-output ×3，纯用户文本正常、exec 路径带 persona 又正常）。
+    // 默认不再注入；要恢复旧行为设 env CTI_OPENCLAW_INJECT_PERSONA=1。
+    if (!session.personaInjected && process.env.CTI_OPENCLAW_INJECT_PERSONA === '1') {
       fullPrompt = `${params.systemPrompt || ''}\n\n${params.text}`;
       session.personaInjected = true;
     }
