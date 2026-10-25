@@ -329,7 +329,9 @@ export class HermesProvider implements RuntimeProvider {
             type: 'tool',
             tool: String(update?.title || 'tool'),
             status: status === 'failed' ? 'error' : status === 'completed' ? 'done' : 'running',
-            input: typeof update?.input === 'object' ? JSON.stringify(update.input).slice(0, 220) : String(update?.input ?? '').slice(0, 220),
+            // [2026-10-24] 修字段名笔误（同 gemini.ts 9-13 款）：ACP 事件里是 rawInput，
+            // 旧写 update.input 永远取不到 → 工具参数一直空白
+            input: typeof update?.rawInput === 'object' ? JSON.stringify(update.rawInput).slice(0, 220) : String(update?.rawInput ?? '').slice(0, 220),
           });
           poke();
           break;
