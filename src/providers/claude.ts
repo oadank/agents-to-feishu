@@ -16,6 +16,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Query, SDKMessage, SDKUserMessage, Options } from '@anthropic-ai/claude-agent-sdk';
 import type { RuntimeProvider, StreamChatParams, StreamEvent, UsageInfo } from './types.js';
@@ -214,6 +216,15 @@ export class ClaudeProvider implements RuntimeProvider {
   /** 🔴 票 claude-2 件3（死因必须留痕，不靠 rt 管子）：引擎最近一次 is_error result 的原始文本。
    *  起新进程即清零；pump 结束 / handleProcessLost / dispose 留痕时带上它。 */
   private lastEngineError: string | null = null;
+  /**
+   * [2026-10-17 黑匣子] 引擎子进程死亡现场：exitCode/signal/stderr 尾巴。
+   * 此前 SDK 默认 spawn 不暴露退出码（票 claude-2 件3 注释"结构性不可得"），静默退出
+   * 只有"事件流结束"一句话，真因无从排查（17:06 重建 2 次现场同样抓瞎）。
+   * 现经 options.spawnClaudeCodeProcess 自带 spawner 在子进程层捕获。
+   */
+  private spawnDeath: string | null = null;
+  /** [2026-10-17 黑匣子v2] 最近一次 spawn 的 child 引用：断流时直接读 exitCode/killed，区分"进程死了"vs"stdout 流断了但进程还挂着" */
+  private spawnChild: ChildProcess | null = null;
   /** 票 claude-2：true=桥在主动释放进程（dispose 路径，如 /new、切 cwd）。
    *  pump 结束日志据此区分"主动关"与"引擎静默死"，不写谎报现场。 */
   private intentionalStop = false;
@@ -410,11 +421,45 @@ export class ClaudeProvider implements RuntimeProvider {
           // Phase 1 内置工具注入：进程内 server（内存直调，无 HTTP）。attachBridgeTools 必须先于首条消息调用。
           // 2026-09-10 MCP 穿透：外接池与内置工具合并，同名时内置（spec）优先。
           ...(Object.keys(externalMcp).length || this.sdkMcp ? { mcpServers: { ...externalMcp, ...(this.sdkMcp ? this.sdkMcp.spec : {}) } } : {}),
+          // [2026-10-17 实锤] CLI 默认还会合并用户级 ~/.claude.json 的 mcpServers（本机有
+          // anysearch + beeftv），叠加后工具数 279、请求体 967KB → 上游处理 96s，桥 60s 就判死。
+          // strictMcpConfig=true 只认本处注入的 MCP，屏蔽用户级污染（实测 tools 279→60，96s→7~12s）。
+          strictMcpConfig: true,
+          // [2026-10-17 黑匣子] 自定义 spawner：ChildProcess 天然满足 SpawnedProcess 接口
+          // （sdk.d.ts L9311），只需包一层 spawn 并在子进程层抓 exitCode/signal/stderr 尾巴。
+          // 静默退出时 startPump/handleProcessLost 就有真因可报，不再"SDK 未暴露"。
+          spawnClaudeCodeProcess: (opts: { command: string; args: string[]; cwd?: string; env: Record<string, string | undefined>; signal: AbortSignal }) => {
+            const child: ChildProcess = spawn(opts.command, opts.args, {
+              cwd: opts.cwd,
+              env: opts.env as NodeJS.ProcessEnv,
+              signal: opts.signal,
+              windowsHide: true,
+            });
+            this.spawnChild = child;
+            let stderrTail = '';
+            child.stderr?.on('data', (d: Buffer) => { stderrTail = (stderrTail + d.toString('utf8')).slice(-4096); });
+            child.stdout?.on('close', () => {
+              // stdout 关闭 ≠ 进程退出：记下此刻进程状态，pump 结束时对照（流断 vs 进程死）
+              rtLog(`[claude] 黑匣子: stdout close 时 exitCode=${child.exitCode} killed=${child.killed} stderr尾=${JSON.stringify(stderrTail.trim().slice(-400))}`);
+            });
+            child.on('error', (err: Error) => {
+              this.spawnDeath = `spawn error: ${err.message}`;
+              rtLog(`[claude] 黑匣子: 子进程 error=${err.message}`);
+            });
+            child.on('exit', (code: number | null, sig: NodeJS.Signals | null) => {
+              // 正常轮次结束也会 exit（dispose 触发 stdin EOF）——只在没标 intentionalStop 时留痕
+              const death = `exitCode=${code} signal=${sig}${stderrTail.trim() ? ` stderr尾=${JSON.stringify(stderrTail.trim().slice(-600))}` : ' stderr空'}`;
+              this.spawnDeath = death;
+              rtLog(`[claude] 黑匣子: 子进程 ${death}`);
+            });
+            return child;
+          },
         } as unknown as Options,
       });
       this.q = q;
       this.queue = queue;
       this.lastEngineError = null; // 票 claude-2：新进程不背旧进程的死因
+      this.spawnDeath = null; // 黑匣子同款：新进程从零记
       this.intentionalStop = false;
       this.startPump(q);
       rtLog(`[claude] ensureProcess: 已起重进程 cwd=${this.cwd}`);
@@ -551,15 +596,14 @@ export class ClaudeProvider implements RuntimeProvider {
       //   ② this.q 仍非空 ⇒ ensureProcess() 的 `if (this.q) return` 永不重建 ⇒
       //      **claude 死一次就彻底不回话，直到人工 restart**。
       // 实锤现场：09-20 11:20 老大「测试」那一轮，桥 node(31012) 子进程只剩 esbuild，引擎进程根本不在。
-      // 🔴 票 claude-2 件3：死因留痕（console → claude-out.log）。退出码为【结构性不可得】——
-      // SDK Query 接口（sdk.d.ts L2425-2739）只有 close()/interrupt()，没有 exitCode；
-      // exitCode/signalCode/kill() 在 SpawnedProcess 接口（L7956-L8003），须 options.spawnClaudeCodeProcess
-      // 自带自定义 spawner 才可达，本桥用 SDK 默认 spawn ⇒ 如实记"SDK 未暴露退出码+位置"，不装。
+      // 🔴 票 claude-2 件3 → 2026-10-17 黑匣子升级：退出码原本"结构性不可得"（Query 无 exitCode），
+      // 现经 options.spawnClaudeCodeProcess 自带 spawner 在子进程层抓 exitCode/signal/stderr（见 ensureProcess），
+      // 死因随 pump 结束/handleProcessLost 日志带出，不再"SDK 未暴露"。
       console.log(`[claude] ⚰️ pump 结束 ${new Date().toISOString()}：${this.intentionalStop
         ? '桥主动释放进程（dispose 路径，如 /new、切 cwd），非引擎静默死'
         : `引擎事件流终止（for-await 正常返回=子进程静默退出），在途 sinks=${this.sinks.length}`}${
         this.lastEngineError ? `；退出前最后引擎错误原文：${this.lastEngineError}` : '；退出前无错误 result'
-      }；退出码：SDK 未暴露（Query 无 exitCode，sdk.d.ts L2425-2739）`);
+      }；死亡现场：${this.spawnDeath ?? '黑匣子无 exit 事件'}；进程快照：exitCode=${this.spawnChild?.exitCode} killed=${this.spawnChild?.killed}（exitCode=null+无exit=进程还挂着，stdout 流断了）`);
       await this.handleProcessLost('Claude 引擎进程已退出（事件流结束）');
     })();
   }
@@ -573,7 +617,7 @@ export class ClaudeProvider implements RuntimeProvider {
   private async handleProcessLost(reason: string): Promise<void> {
     if (!this.q && !this.queue) return; // 已复位过，别重复报
     // 🔴 票 claude-2 件3：进程丢失死因进 claude-out.log（带 SDK 错误原文；退出码不可得，见 startPump 结束注释）。
-    console.log(`[claude] ⚠️ handleProcessLost: ${reason}${this.lastEngineError ? `；最后引擎错误原文：${this.lastEngineError}` : '；无错误 result'}；退出码：SDK 未暴露`);
+    console.log(`[claude] ⚠️ handleProcessLost: ${reason}${this.lastEngineError ? `；最后引擎错误原文：${this.lastEngineError}` : '；无错误 result'}；死亡现场：${this.spawnDeath ?? '黑匣子未捕获'}`);
     rtLog(`[claude] ⚠️ ${reason} —— 复位常驻把手，下一条消息将重建引擎进程`);
     const stranded = this.sinks.splice(0, this.sinks.length);
     for (const s of stranded) {
