@@ -105,6 +105,23 @@ export async function handleCommand(
       // 正常轮次管道（handleText 不再经过命令拦截，无回环），各家引擎用自己的原生
       // 压缩策略（claude-code 的 /compact、mimocode/codex 各家定义）；引擎不认就如实回。
       // 旧版桥自压（截500字拼摘要注入）已废：那是桥替引擎做梦，压缩质量与策略必须归引擎。
+      //
+      // [2026-10-18 全机排查] 只有 claude（claude-code）真正响应 /compact 命令并产出 compact_boundary。
+      // 其余引擎实测均无原生 /compact：codex/workbuddy 把命令当聊天（codex 实测 FINAL 1399 字）；
+      // mimo/opencode/openclaw 探针 session/compact = Method not found（T-0030 已判 C 类）；
+      // gemini/hermes 只在每轮结算后 fire-and-forget notify session/compact，不响应命令文本；
+      // zcode 归 B 类、压缩归引擎自管（桥不触发）；reasonix/openakita/dsh/deeptutor 零 compact 通道。
+      // 桥不替引擎压缩（老大令 09-19），故统一如实回执，绝不再把命令当消息喂给模型。
+      const botId = (process.env.CTI_BOT || '').toLowerCase();
+      const COMPACT_NATIVE = new Set(['claude']);
+      if (!COMPACT_NATIVE.has(botId)) {
+        await engine.sendCommandCard(
+          chatId,
+          `⚠️ ${botId} 引擎没有 /compact 压缩命令（无原生压缩通道，桥也不替引擎压缩）。\n`
+          + '要清上下文请发 /new；继续对话时引擎会按自己的能力自动压缩/告警。',
+        );
+        break;
+      }
       await engine.handleText(chatId, raw.trim());
       break;
     }
