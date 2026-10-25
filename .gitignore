@@ -51,3 +51,38 @@ skills/wechat-oa/config.json
 skills/wechat-oa/.cache/
 **/access_token.json
 
+
+# ── 2026-10-21 环境变量备份快照（一次性，内容待确认后删）──
+_envbak-*/
+
+# ── WorkBuddy 安装修复战役（2026-10）一次性探针/修复脚本：调试残留待确认清理 ──
+# 保留的能力脚本（xdn_dsh_*.py / xdn_grep.py / xdn_fix_balance.py / xdn_verify_shim.py）不受影响
+skills/xdn-remote-ops/push-asar.ps1
+skills/xdn-remote-ops/push-file.ps1
+skills/xdn-remote-ops/run-xdn.ps1
+skills/xdn-remote-ops/wb_xdn_*
+skills/xdn-remote-ops/wdh_dbg_clip.py
+skills/xdn-remote-ops/wdh_repro_copy.py
+skills/xdn-remote-ops/xdn_asar*.ps1
+skills/xdn-remote-ops/xdn_audit.ps1
+skills/xdn-remote-ops/xdn_channel*.ps1
+skills/xdn-remote-ops/xdn_check.ps1
+skills/xdn-remote-ops/xdn_clean*.ps1
+skills/xdn-remote-ops/xdn_crash.ps1
+skills/xdn-remote-ops/xdn_desktop*.ps1
+skills/xdn-remote-ops/xdn_diag*.ps1
+skills/xdn-remote-ops/xdn_download.ps1
+skills/xdn-remote-ops/xdn_final*.ps1
+skills/xdn-remote-ops/xdn_fix*.ps1
+skills/xdn-remote-ops/xdn_icon.ps1
+skills/xdn-remote-ops/xdn_install.ps1
+skills/xdn-remote-ops/xdn_launch*.ps1
+skills/xdn-remote-ops/xdn_reinstall.ps1
+skills/xdn-remote-ops/xdn_relaunch.ps1
+skills/xdn-remote-ops/xdn_repair.ps1
+skills/xdn-remote-ops/xdn_root.ps1
+skills/xdn-remote-ops/xdn_sweep.ps1
+skills/xdn-remote-ops/xdn_tempcheck.ps1
+skills/xdn-remote-ops/xdn_verify1.ps1
+skills/xdn-remote-ops/xdn_verify_final.ps1
+skills/xdn-remote-ops/xdn_wipe.ps1
