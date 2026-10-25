@@ -342,7 +342,10 @@ export class CodexProvider implements RuntimeProvider {
       bridgeOpenmem = await callOpenmemBypass(params.text || '');
     }
     const promptParts: string[] = [];
-    if (params.systemPrompt) {
+    // [2026-10-18] 斜杠命令轮不拼人设/history/桥接注入：拼了前缀后引擎收到的不是
+    // leading-slash，/compact 之类命令会退化成普通聊天文本（claude/workbuddy 同款坑）。
+    const isSlashCommand = /^\//.test((params.text || '').trim());
+    if (!isSlashCommand && params.systemPrompt) {
       promptParts.push(
         params.systemPrompt +
         '\n\n【openmem 使用 · 这是绕过不是修复】\n' +
@@ -352,8 +355,8 @@ export class CodexProvider implements RuntimeProvider {
         '协议层也可用 app-server mcpServer/tool/call(server=openmem, tool=mh_search)。'
       );
     }
-    if (historyText) promptParts.push(historyText);
-    if (bridgeOpenmem) {
+    if (!isSlashCommand && historyText) promptParts.push(historyText);
+    if (!isSlashCommand && bridgeOpenmem) {
       promptParts.push(
         '【桥接代调 openmem · 这是绕过不是修复】\n' +
         '下列内容由桥接直接调用 openmem MCP 得到，可直接引用，不要再假装调用 mh_*：\n' +
