@@ -217,8 +217,17 @@ function buildInjectedSystemPrompt(envText: string, env: NodeJS.ProcessEnv, pref
   return parts.join('\n\n---\n\n');
 }
 
-/** 读单个注入键：文件源按 JSON 编码还原（render 用 JSON.stringify 写）；环境变量源为明文。 */
+/** 读单个注入键：文件源按 JSON 编码还原（render 用 JSON.stringify 写）；环境变量源为明文。
+ *  值以 file: 开头 = 引用外部人设文件（绝对路径）：读文件内容作为注入值，改文件即生效、无需改 env；
+ *  文件不存在/读失败时回退返回原字符串并告警（带 key 名和路径），不让人设凭空变空。 */
 function readInject(envText: string, env: NodeJS.ProcessEnv, key: string): string {
-  if (env[key] !== undefined) return env[key] ?? '';
-  return readJsonEnvValue(envText, key);
+  const raw = env[key] !== undefined ? (env[key] ?? '') : readJsonEnvValue(envText, key);
+  if (!raw.startsWith('file:')) return raw;
+  const filePath = raw.slice('file:'.length).trim();
+  try {
+    return fs.readFileSync(filePath, 'utf8');
+  } catch (e) {
+    console.warn(`[config] 注入键 ${key} 的 file: 引用读失败（回退原值）: ${filePath} — ${e instanceof Error ? e.message : String(e)}`);
+    return raw;
+  }
 }
